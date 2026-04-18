@@ -2,20 +2,27 @@ import * as vscode from "vscode";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
 import { buildFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
-import {
-  buildSymbolCallGraph,
-  buildStaticTrace,
-  buildWorkspaceGraph,
-  findSymbolAt,
-} from "./python/analysis/pythonCallGraphBuilder";
-import { buildLiveCallGraph, buildLiveOutline } from "./live/vscodeGraphBuilder";
 import { DebugSyncService } from "./live/debugSync";
+import { NavigationController } from "./navigation/navigationController";
+import { ActionsViewProvider } from "./providers/actionsViewProvider";
+import { FileTreeProvider } from "./providers/fileTreeProvider";
 
 export function activate(context: vscode.ExtensionContext): void {
   const indexer = new PythonWorkspaceIndexer(context.extensionPath);
   context.subscriptions.push(indexer);
   const output = vscode.window.createOutputChannel("CodeMap");
   context.subscriptions.push(output);
+  const actionsViewProvider = new ActionsViewProvider(context);
+  const fileTreeProvider = new FileTreeProvider(context);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(ActionsViewProvider.viewType, actionsViewProvider),
+  );
+  const fileTreeView = vscode.window.createTreeView("codemap.files", {
+    treeDataProvider: fileTreeProvider,
+    showCollapseAll: true,
+  });
+  fileTreeProvider.attachTreeView(fileTreeView);
+  context.subscriptions.push(fileTreeView, fileTreeProvider);
 
   const debugSync = new DebugSyncService();
   context.subscriptions.push(debugSync);
@@ -61,7 +68,7 @@ export function activate(context: vscode.ExtensionContext): void {
       output.appendLine(`[webview] ${message}`);
     },
     async (nodeId, source) => {
-      // Cross-layer navigation: double-click a call graph node → open its flowchart
+      // Double-click a call graph node → open its flowchart
       if (!source) {
         output.appendLine(`[requestFlowchart] no source for node ${nodeId}`);
         return;
@@ -83,6 +90,40 @@ export function activate(context: vscode.ExtensionContext): void {
         output.appendLine(`[requestFlowchart] error: ${(e as Error).message}`);
       }
     },
+  );
+
+  const navController = new NavigationController(
+    context.extensionPath,
+    indexer,
+    (graph) => {
+      logGraph(graph);
+      provider.show(graph);
+    },
+    (message) => output.appendLine(message),
+  );
+
+  // Workspace call graph is the default view.
+  lastCommand = () => navController.showWorkspaceCallGraph();
+
+  // Auto-start debug sync so it's always on.
+  debugSync.start();
+  void fileTreeProvider.initialize().then(() => {
+    const checkedFiles = fileTreeProvider.getCheckedFiles();
+    indexer.setIncludedFiles(checkedFiles);
+    actionsViewProvider.updateSelection(fileTreeProvider.getSelectionSummary());
+  }).catch((e) => {
+    output.appendLine(`[file-tree] init failed: ${(e as Error).message}`);
+  });
+
+  context.subscriptions.push(
+    fileTreeProvider.onDidChangeCheckedFiles((checkedFiles) => {
+      indexer.setIncludedFiles(checkedFiles);
+      navController.invalidateCache();
+      actionsViewProvider.updateSelection(fileTreeProvider.getSelectionSummary());
+      if (provider.isVisible() && lastCommand) {
+        lastCommand().catch((e) => showError(e));
+      }
+    }),
   );
 
   function showError(e: unknown): void {
@@ -139,17 +180,9 @@ export function activate(context: vscode.ExtensionContext): void {
       lastCommand = runShowFlowchart;
       await runShowFlowchart();
     }),
-    vscode.commands.registerCommand("codemap.showCallGraph", async () => {
-      lastCommand = runShowCallGraph;
-      await runShowCallGraph();
-    }),
     vscode.commands.registerCommand("codemap.showWorkspaceGraph", async () => {
-      lastCommand = runShowWorkspaceGraph;
-      await runShowWorkspaceGraph();
-    }),
-    vscode.commands.registerCommand("codemap.showStaticTrace", async () => {
-      lastCommand = runShowStaticTrace;
-      await runShowStaticTrace();
+      lastCommand = () => navController.showWorkspaceCallGraph();
+      await navController.showWorkspaceCallGraph().catch(showError);
     }),
     vscode.commands.registerCommand("codemap.refresh", async () => {
       await indexer.getAnalysis(true);
@@ -157,24 +190,6 @@ export function activate(context: vscode.ExtensionContext): void {
         await lastCommand();
       } else {
         vscode.window.showInformationMessage("CodeMap: workspace re-indexed.");
-      }
-    }),
-    vscode.commands.registerCommand("codemap.showLiveCallGraph", async () => {
-      lastCommand = runShowLiveCallGraph;
-      await runShowLiveCallGraph();
-    }),
-    vscode.commands.registerCommand("codemap.showLiveOutline", async () => {
-      lastCommand = runShowLiveOutline;
-      await runShowLiveOutline();
-    }),
-    vscode.commands.registerCommand("codemap.toggleDebugSync", () => {
-      if (debugSync.isActive()) {
-        debugSync.stop();
-        vscode.window.setStatusBarMessage("CodeMap: debug sync OFF", 3000);
-        provider.postRuntimeFrame(null);
-      } else {
-        debugSync.start();
-        vscode.window.setStatusBarMessage("CodeMap: debug sync ON", 3000);
       }
     }),
   );
@@ -223,119 +238,6 @@ export function activate(context: vscode.ExtensionContext): void {
       const graph = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: building flowchart..." },
         () => buildFlowchartFor(context.extensionPath, file, line, analysis),
-      );
-      logGraph(graph);
-      provider.show(graph);
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  async function runShowCallGraph(): Promise<void> {
-    const editor = await requireActivePython();
-    if (!editor) return;
-    try {
-      const analysis = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
-        () => indexer.getAnalysis(),
-      );
-      logAnalysis(analysis, "callgraph");
-      const file = editor.document.uri.fsPath;
-      const line = editor.selection.active.line + 1;
-      const sym = findSymbolAt(analysis, file, line);
-      if (!sym) {
-        vscode.window.showWarningMessage("CodeMap: no Python symbol found at cursor.");
-        return;
-      }
-      const depth = vscode.workspace.getConfiguration("codemap").get<number>("callGraph.depth", 1);
-      const graph = buildSymbolCallGraph(analysis, sym.id, { depth });
-      logGraph(graph);
-      provider.show(graph);
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  async function runShowWorkspaceGraph(): Promise<void> {
-    try {
-      const analysis = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
-        () => indexer.getAnalysis(),
-      );
-      logAnalysis(analysis, "workspace");
-      const graph = buildWorkspaceGraph(analysis);
-      logGraph(graph);
-      provider.show(graph);
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  async function runShowStaticTrace(): Promise<void> {
-    const editor = await requireActivePython();
-    if (!editor) return;
-    try {
-      const analysis = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
-        () => indexer.getAnalysis(),
-      );
-      logAnalysis(analysis, "trace");
-      const file = editor.document.uri.fsPath;
-      const line = editor.selection.active.line + 1;
-      const sym = findSymbolAt(analysis, file, line);
-      if (!sym || (sym.kind !== "function" && sym.kind !== "method")) {
-        vscode.window.showWarningMessage("CodeMap: place cursor inside a Python function or method.");
-        return;
-      }
-      const graph = buildStaticTrace(analysis, sym.id);
-      logGraph(graph);
-      provider.show(graph);
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  async function runShowLiveCallGraph(): Promise<void> {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      vscode.window.showWarningMessage("CodeMap: open a file first.");
-      return;
-    }
-    try {
-      const depth = vscode.workspace
-        .getConfiguration("codemap")
-        .get<number>("liveCallGraph.depth", 2);
-      const graph = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Window,
-          title: "CodeMap: querying call hierarchy...",
-        },
-        () =>
-          buildLiveCallGraph(editor.document.uri, editor.selection.active, {
-            depth,
-            direction: "both",
-          }),
-      );
-      logGraph(graph);
-      provider.show(graph);
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  async function runShowLiveOutline(): Promise<void> {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      vscode.window.showWarningMessage("CodeMap: open a file first.");
-      return;
-    }
-    try {
-      const graph = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Window,
-          title: "CodeMap: querying document symbols...",
-        },
-        () => buildLiveOutline(editor.document.uri),
       );
       logGraph(graph);
       provider.show(graph);

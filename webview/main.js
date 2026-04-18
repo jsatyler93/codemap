@@ -8,82 +8,42 @@ import { renderCallGraph } from "./views/callgraph/callGraphView.js";
 
 const vscode = window.__codemapVscode || acquireVsCodeApi();
 
-const canvasEl  = document.getElementById("canvas");
-const tooltip   = document.getElementById("tooltip");
-const titleEl   = document.getElementById("title");
-const subEl     = document.getElementById("subtitle");
-const ipModeEl  = document.getElementById("ip-mode");
-const ipFuncEl  = document.getElementById("ip-func");
-const ipFileEl  = document.getElementById("ip-file");
-const ipStatsEl = document.getElementById("ip-stats");
-const flowBtn   = document.getElementById("btn-flow");
-const resetBtn  = document.getElementById("btn-reset");
+const canvasEl   = document.getElementById("canvas");
+const tooltip    = document.getElementById("tooltip");
+const titleEl    = document.getElementById("title");
+const statsEl    = document.getElementById("stats");
+const ambientBtn = document.getElementById("btn-ambient");
+const execBtn    = document.getElementById("btn-exec");
+const stepBtn    = document.getElementById("btn-step");
+const resetBtn   = document.getElementById("btn-reset");
+const clearBtn   = document.getElementById("btn-clear");
 const refreshBtn = document.getElementById("btn-refresh");
-const searchBox = document.getElementById("search-box");
-const toggleTypes = document.getElementById("toggle-types");
-const toggleDetails = document.getElementById("toggle-details");
-
-function setBootStatus(message) {
-  if (typeof window.__codemapSetBoot === "function") {
-    window.__codemapSetBoot(message);
-  }
-}
-
-function setShellStatus(message) {
-  if (typeof window.__codemapSetShell === "function") {
-    window.__codemapSetShell(message);
-  }
-}
-
-setBootStatus("main module loaded");
-setShellStatus("Main module loaded.\nInitializing SVG canvas...");
+const searchBox  = document.getElementById("search-box");
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let flowOn = true;
 let time = 0;
-const displayOptions = {
-  showTypes: loadBoolPref("codemap.showTypes", true),
-  showDetails: loadBoolPref("codemap.showDetails", true),
-};
-
-toggleTypes.checked = displayOptions.showTypes;
-toggleDetails.checked = displayOptions.showDetails;
 
 function showTooltip(e, n) {
   const kind = n.kind || "node";
   const meta = n.metadata || {};
-  const sigParts = [];
-  if (displayOptions.showTypes && displayOptions.showDetails && meta.params) {
-    sigParts.push(`(${meta.params.map(formatParam).join(", ")})`);
-  }
-  if (displayOptions.showTypes && meta.returnType) {
-    sigParts.push(` -> ${escapeHtml(meta.returnType)}`);
-  }
-  const sig = sigParts.length ? `<div class="tt-code">${sigParts.join("")}</div>` : "";
+  const module = n.module || "";
+  const sig = meta.params
+    ? `<div class="tt-code">(${meta.params.map(formatParam).join(", ")})${meta.returnType ? " -> " + escapeHtml(meta.returnType) : ""}</div>`
+    : "";
   const doc = meta.docSummary
     ? `<div style="color:#9ece6a;margin-top:4px">${escapeHtml(meta.docSummary)}</div>`
     : "";
-  const decos = meta.decorators && meta.decorators.length
-    ? `<div style="color:#bb9af7;margin-top:4px">${meta.decorators.map((d) => "@" + escapeHtml(d)).join(" ")}</div>`
-    : "";
-  const typeLine = displayOptions.showTypes && meta.typeLabel
-    ? `<div class="tt-code" style="color:#bb9af7">${escapeHtml(meta.typeLabel)}</div>`
-    : "";
-  // Connection counts (injected by callGraphView)
   const connLine = (typeof n._connOut === "number")
-    ? `<div style="color:#454a60;margin-top:2px;font-size:10px">↗ ${n._connOut} out · ↙ ${n._connIn} in</div>`
+    ? `<div class="tt-conn">↗ ${n._connOut} out · ↙ ${n._connIn} in</div>`
     : "";
   tooltip.innerHTML = `
-    <div class="tt-type" style="color:#7aa2f7">${escapeHtml(kind)}${meta.isAsync ? " · async" : ""}</div>
-    <div>${escapeHtml(n.label || n.id)}</div>
-    ${sig}
-    ${typeLine}
-    ${decos}
-    ${doc}
-    ${displayOptions.showDetails && n.detail ? `<div class="tt-code">${escapeHtml(n.detail)}</div>` : ""}
-    ${n.module ? `<div style="color:#454a60;margin-top:4px">${escapeHtml(n.module)}</div>` : ""}
+    ${module ? `<div class="tt-module">${escapeHtml(module)}</div>` : ""}
+    <div class="tt-func">${escapeHtml(n.label || n.id)}</div>
+    ${sig}${doc}
+    ${n.source ? `<div class="tt-file">${escapeHtml(shortPath(n.source.file))}:${n.source.line}</div>` : ""}
     ${connLine}
   `;
   tooltip.style.opacity = "1";
@@ -122,11 +82,13 @@ canvasEl.addEventListener("click", (e) => {
 // Render context shared across calls — renderers attach helpers here
 const renderCtx = {};
 
-// ── Exec trace step-by-step state ──
+// ── Exec trace state ──
 let execStep = -1;
 let execAutoMode = false;
+let execStepMode = false;
 let execAutoTimer = null;
-let execDots = [];  // active glowing dots for auto-trace
+let execDots = [];
+const EXEC_AUTO_INTERVAL = 1800;
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -134,47 +96,34 @@ function escapeHtml(s) {
   })[c]);
 }
 
-function setInfoPanel(graph) {
+function updateStats(graph) {
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
-  ipModeEl.textContent  = String(graph.graphType || "graph").toUpperCase();
-  ipFuncEl.textContent  = graph.title || "—";
-  ipFileEl.textContent  = graph.subtitle || "";
-  const stats = `${nodes.length} nodes · ${edges.length} edges`;
-  const meta  = graph.metadata || {};
-  const summary = meta.analysisSummary || null;
-  const extra = [];
-  if (summary && typeof summary.typeCoveragePct === "number") {
-    extra.push(`${summary.typeCoveragePct}% typed`);
-  }
-  if (summary && summary.jediEnabled) {
-    extra.push(`Jedi +${summary.jediResolved || 0}`);
-  }
-  if (meta.truncated) {
-    extra.push("trace truncated");
-  }
-  ipStatsEl.textContent = extra.length ? `${stats} · ${extra.join(" · ")}` : stats;
   titleEl.textContent = graph.title || "CodeMap";
-  subEl.textContent   = graph.subtitle || "";
+  const parts = [`${nodes.length} nodes`, `${edges.length} edges`];
+  const meta = graph.metadata || {};
+  const summary = meta.analysisSummary || null;
+  if (summary && typeof summary.typeCoveragePct === "number") {
+    parts.push(`${summary.typeCoveragePct}% typed`);
+  }
+  statsEl.textContent = parts.join(" · ");
 }
 
 function renderGraph(graph) {
-  if (!graph || typeof graph !== "object") {
-    setBootStatus("renderGraph: missing graph payload");
-    return;
-  }
+  if (!graph || typeof graph !== "object") return;
   if (!Array.isArray(graph.nodes)) graph.nodes = [];
   if (!Array.isArray(graph.edges)) graph.edges = [];
   currentGraph = graph;
-  setBootStatus(`rendering ${graph.graphType}`);
-  setShellStatus(`Rendering ${graph.graphType}...`);
 
   // Reset exec trace state
   execStep = -1;
   execAutoMode = false;
+  execStepMode = false;
   if (execAutoTimer) { clearInterval(execAutoTimer); execAutoTimer = null; }
   execDots = [];
-  // Reset runtime debug state too (graph layout changed → invalidate node refs)
+  execBtn.classList.remove("active");
+  stepBtn.classList.remove("active");
+  // Reset runtime debug state
   runtimeHighlightedIds = [];
   runtimePrevPrimaryNodeId = null;
   // Reset shared context
@@ -182,13 +131,15 @@ function renderGraph(graph) {
 
   try {
     canvas.clear();
+    if (canvas.clearScaleListeners) canvas.clearScaleListeners();
     const ctx = {
       root: canvas.root,
       defs: canvas.defs,
+      canvas: canvas,
       showTooltip, moveTooltip, hideTooltip, onNodeClick,
       onNodeDblClick,
-      displayOptions,
     };
+
     let result;
     if (graph.graphType === "flowchart") {
       result = renderFlowchart(graph, ctx);
@@ -197,26 +148,62 @@ function renderGraph(graph) {
     }
     current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
 
-    // Copy renderer-attached helpers into our shared renderCtx
+    // Copy renderer-attached helpers into shared renderCtx
     Object.keys(ctx).forEach((k) => { if (k.startsWith("_")) renderCtx[k] = ctx[k]; });
 
-    setInfoPanel(graph);
+    updateStats(graph);
+
+    // Inject exec timeline from graph metadata if present
+    const timeline = graph.metadata && graph.metadata.execTimeline;
+    if (timeline && Array.isArray(timeline) && timeline.length > 0) {
+      renderCtx._execTimeline = timeline;
+    }
+
     if (current.initialView) {
       canvas.reset(current.initialView);
     } else {
       canvas.reset();
     }
 
-    // Show exec panel for trace graphs
     updateExecPanel(graph);
-
-    setBootStatus(`rendered ${graph.graphType}`);
-    setShellStatus(`Renderer active.\n${graph.graphType} :: ${graph.title || "CodeMap"}\n${graph.nodes.length} nodes / ${graph.edges.length} edges`);
+    updateLegend(graph);
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
-    setBootStatus("render error: " + (err && err.message ? err.message : String(err)));
-    setShellStatus("Render failed.\n" + msg);
     vscode.postMessage({ type: "debug", message: "[render-error] " + msg });
+  }
+}
+
+function updateLegend(graph) {
+  const lgItems = document.getElementById("lg-items");
+  const lgTitle = document.getElementById("lg-title");
+  if (!lgItems) return;
+  lgItems.innerHTML = "";
+  if (graph.graphType === "flowchart") {
+    lgTitle.textContent = "Node Types";
+    const types = [
+      { color: "#9ece6a", label: "entry / exit" },
+      { color: "#7aa2f7", label: "process" },
+      { color: "#e0af68", label: "decision" },
+      { color: "#f7768e", label: "error / raise" },
+      { color: "#bb9af7", label: "compute" },
+      { color: "#73daca", label: "output" },
+    ];
+    for (const t of types) {
+      const d = document.createElement("div");
+      d.className = "lg-item";
+      d.innerHTML = `<span class="lg-shape" style="background:${t.color}20;border:1px solid ${t.color}"></span>${t.label}`;
+      lgItems.appendChild(d);
+    }
+  } else {
+    lgTitle.textContent = "Modules";
+    // Build legend from module colors in graph metadata
+    const colors = (graph.metadata && graph.metadata.moduleColors) || {};
+    for (const [mod, color] of Object.entries(colors)) {
+      const d = document.createElement("div");
+      d.className = "lg-item";
+      d.innerHTML = `<span class="lg-shape" style="background:${color}20;border:1px solid ${color}"></span>${escapeHtml(mod)}`;
+      lgItems.appendChild(d);
+    }
   }
 }
 
@@ -229,28 +216,35 @@ window.addEventListener("message", (event) => {
   }
 });
 
-toggleTypes.addEventListener("change", () => {
-  displayOptions.showTypes = toggleTypes.checked;
-  saveBoolPref("codemap.showTypes", displayOptions.showTypes);
-  if (currentGraph) renderGraph(currentGraph);
-});
-
-toggleDetails.addEventListener("change", () => {
-  displayOptions.showDetails = toggleDetails.checked;
-  saveBoolPref("codemap.showDetails", displayOptions.showDetails);
-  if (currentGraph) renderGraph(currentGraph);
-});
-
-flowBtn.addEventListener("click", () => {
+// ── Toolbar buttons ──
+ambientBtn.addEventListener("click", () => {
   flowOn = !flowOn;
-  flowBtn.classList.toggle("active", flowOn);
+  ambientBtn.classList.toggle("active", flowOn);
   if (!flowOn && current) {
-    for (const r of current.edgeRecords) r.dot.setAttribute("opacity", "0");
+    for (const r of current.edgeRecords) {
+      if (r.ambDots) r.ambDots.forEach((ad) => ad.el.setAttribute("opacity", "0"));
+      else r.dot.setAttribute("opacity", "0");
+    }
   }
 });
+
+execBtn.addEventListener("click", () => {
+  toggleAutoTrace();
+});
+
+stepBtn.addEventListener("click", () => {
+  toggleStepMode();
+});
+
 resetBtn.addEventListener("click", () => {
   canvas.reset(current?.initialView);
 });
+
+clearBtn.addEventListener("click", () => {
+  clearExecTrace();
+  if (renderCtx._resetSelection) renderCtx._resetSelection();
+});
+
 refreshBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "requestRefresh" });
 });
@@ -274,27 +268,32 @@ searchBox.addEventListener("input", () => {
   }
 });
 
+// Click on empty canvas → reset selection
+canvasEl.addEventListener("click", (e) => {
+  if (e.target.closest("g[data-id]")) return;
+  if (renderCtx._resetSelection) renderCtx._resetSelection();
+});
+
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    clearExecTrace();
     if (renderCtx._resetSelection) renderCtx._resetSelection();
     canvas.reset(current?.initialView);
   }
-  // Step-by-step exec trace controls
   const timeline = renderCtx._execTimeline;
   if (timeline && timeline.length > 0) {
     if (e.key === "ArrowRight" || e.key === " ") {
       e.preventDefault();
       if (execAutoMode) stopAutoTrace();
+      if (!execStepMode) toggleStepMode();
       execStep = Math.min(execStep + 1, timeline.length - 1);
-      if (renderCtx._highlightStep) renderCtx._highlightStep(execStep);
-      updateExecStepDisplay();
+      highlightExecStep();
     }
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       if (execAutoMode) stopAutoTrace();
       execStep = Math.max(execStep - 1, 0);
-      if (renderCtx._highlightStep) renderCtx._highlightStep(execStep);
-      updateExecStepDisplay();
+      highlightExecStep();
     }
     if (e.key === "a" || e.key === "A") {
       toggleAutoTrace();
@@ -304,62 +303,114 @@ document.addEventListener("keydown", (e) => {
 
 // ── Exec Trace Panel ──
 function updateExecPanel(graph) {
-  let panel = document.getElementById("exec-panel");
-  if (graph.graphType !== "trace" || !renderCtx._execTimeline || renderCtx._execTimeline.length === 0) {
-    if (panel) panel.style.display = "none";
+  const panel = document.getElementById("exec-panel");
+  if (!panel) return;
+  const timeline = renderCtx._execTimeline;
+  if (!timeline || timeline.length === 0) {
+    panel.style.display = "none";
+    execBtn.style.display = "none";
+    stepBtn.style.display = "none";
     return;
   }
-  if (!panel) {
-    panel = document.createElement("div");
-    panel.id = "exec-panel";
-    panel.innerHTML = `
-      <div style="font-size:10px;color:#7aa2f7;margin-bottom:4px;font-weight:600">EXEC TRACE</div>
-      <div id="exec-progress" style="height:3px;background:#111420;border-radius:2px;margin-bottom:6px;overflow:hidden">
-        <div id="exec-bar" style="height:100%;background:#7aa2f7;width:0%;transition:width .2s"></div>
-      </div>
-      <div id="exec-step-label" style="font-size:9px;color:#606680">Space/→ step · ← back · A auto</div>
-    `;
-    panel.style.cssText = "position:fixed;bottom:50px;left:50%;transform:translateX(-50%);background:#0e1018ee;border:1px solid #181c28;border-radius:8px;padding:10px 16px;z-index:100;min-width:240px;text-align:center;backdrop-filter:blur(6px)";
-    document.body.appendChild(panel);
-  }
   panel.style.display = "block";
+  execBtn.style.display = "";
+  stepBtn.style.display = "";
+  resetExecPanelDisplay();
+}
+
+function resetExecPanelDisplay() {
+  const epFunc = document.getElementById("ep-func");
+  const epDesc = document.getElementById("ep-desc");
+  const epStep = document.getElementById("ep-step");
+  const epHint = document.getElementById("ep-hint");
+  const epBar  = document.getElementById("ep-bar");
+  const panel  = document.getElementById("exec-panel");
+  if (epFunc) epFunc.textContent = "—";
+  if (epDesc) epDesc.textContent = "";
+  if (epStep) epStep.textContent = "";
+  if (epHint) epHint.textContent = "Press ▶ auto trace or ⏭ step-by-step";
+  if (epBar)  epBar.style.width = "0%";
+  if (panel) {
+    panel.classList.remove("active-exec", "active-step");
+  }
+}
+
+function highlightExecStep() {
+  const timeline = renderCtx._execTimeline;
+  if (!timeline || execStep < 0 || execStep >= timeline.length) return;
+  if (renderCtx._highlightStep) renderCtx._highlightStep(execStep);
   updateExecStepDisplay();
 }
 
 function updateExecStepDisplay() {
   const timeline = renderCtx._execTimeline;
   if (!timeline) return;
-  const bar = document.getElementById("exec-bar");
-  const label = document.getElementById("exec-step-label");
-  if (bar && timeline.length > 0) {
-    bar.style.width = ((execStep + 1) / timeline.length * 100) + "%";
+  const panel  = document.getElementById("exec-panel");
+  const epFunc = document.getElementById("ep-func");
+  const epDesc = document.getElementById("ep-desc");
+  const epStep = document.getElementById("ep-step");
+  const epHint = document.getElementById("ep-hint");
+  const epBar  = document.getElementById("ep-bar");
+  if (execStep < 0) {
+    resetExecPanelDisplay();
+    return;
   }
-  if (label) {
-    if (execStep < 0) {
-      label.textContent = "Space/→ step · ← back · A auto";
-    } else {
-      const step = timeline[execStep];
-      label.textContent = `[${execStep + 1}/${timeline.length}] ${step.label}`;
-    }
+  const step = timeline[execStep];
+  if (epFunc) epFunc.textContent = step.label || "—";
+  if (epDesc) epDesc.textContent = step.desc || "";
+  if (epStep) epStep.textContent = `Step ${execStep + 1} / ${timeline.length}`;
+  if (epHint) epHint.textContent = execAutoMode ? "Auto-tracing..." : "→ next · ← back · A auto";
+  if (epBar)  epBar.style.width = ((execStep + 1) / timeline.length * 100) + "%";
+  if (panel) {
+    panel.classList.toggle("active-exec", execAutoMode);
+    panel.classList.toggle("active-step", execStepMode && !execAutoMode);
   }
 }
 
 function toggleAutoTrace() {
   if (execAutoMode) {
     stopAutoTrace();
-  } else {
-    execAutoMode = true;
-    execStep = -1;
-    if (renderCtx._clearExecDots) renderCtx._clearExecDots();
-    execDots = [];
-    advanceAutoTrace();
-    execAutoTimer = setInterval(advanceAutoTrace, 600);
+    return;
   }
+  execStepMode = false;
+  stepBtn.classList.remove("active");
+  execAutoMode = true;
+  execBtn.classList.add("active");
+  execStep = -1;
+  if (renderCtx._clearExecDots) renderCtx._clearExecDots();
+  execDots = [];
+  advanceAutoTrace();
+  execAutoTimer = setInterval(advanceAutoTrace, EXEC_AUTO_INTERVAL);
 }
 
 function stopAutoTrace() {
   execAutoMode = false;
+  execBtn.classList.remove("active");
   if (execAutoTimer) { clearInterval(execAutoTimer); execAutoTimer = null; }
+  updateExecStepDisplay();
+}
+
+function toggleStepMode() {
+  if (execStepMode) {
+    execStepMode = false;
+    stepBtn.classList.remove("active");
+    return;
+  }
+  if (execAutoMode) stopAutoTrace();
+  execStepMode = true;
+  stepBtn.classList.add("active");
+  execStep = -1;
+  updateExecStepDisplay();
+}
+
+function clearExecTrace() {
+  stopAutoTrace();
+  execStepMode = false;
+  stepBtn.classList.remove("active");
+  execStep = -1;
+  execDots = [];
+  if (renderCtx._clearExecDots) renderCtx._clearExecDots();
+  resetExecPanelDisplay();
 }
 
 function advanceAutoTrace() {
@@ -375,13 +426,14 @@ function advanceAutoTrace() {
   }
   if (renderCtx._highlightStep) renderCtx._highlightStep(execStep);
   updateExecStepDisplay();
-  // Spawn glowing dot along the edge
   const step = timeline[execStep];
-  const key = step.edge[0] + "->" + step.edge[1];
-  const edgeIdx = renderCtx._edgeMap ? renderCtx._edgeMap[key] : undefined;
-  if (edgeIdx !== undefined && renderCtx._spawnExecDot) {
-    const d = renderCtx._spawnExecDot(edgeIdx, "#7aa2f7");
-    if (d) execDots.push(d);
+  if (step.edge) {
+    const key = step.edge[0] + "->" + step.edge[1];
+    const edgeIdx = renderCtx._edgeMap ? renderCtx._edgeMap[key] : undefined;
+    if (edgeIdx !== undefined && renderCtx._spawnExecDot) {
+      const d = renderCtx._spawnExecDot(edgeIdx, "#bb9af7");
+      if (d) execDots.push(d);
+    }
   }
 }
 
@@ -390,17 +442,16 @@ function loop() {
   time++;
   if (flowOn && current) {
     for (const r of current.edgeRecords) {
-      // Use ambDots if available (new format), fall back to single dot
       if (r.ambDots) {
         for (const ad of r.ambDots) {
-          ad.el.setAttribute("opacity", "0.35");
+          ad.el.setAttribute("opacity", String(ad.opacity || 0.3));
           const t = (((time * ad.speed) + ad.offset) % 1 + 1) % 1;
           const pt = cubicPt(r.sx, r.sy, r.c1x, r.c1y, r.c2x, r.c2y, r.tx, r.ty, t);
           ad.el.setAttribute("cx", pt.x);
           ad.el.setAttribute("cy", pt.y);
         }
-      } else {
-        r.dot.setAttribute("opacity", "0.45");
+      } else if (r.dot) {
+        r.dot.setAttribute("opacity", "0.3");
         const t = (((time * r.speed) + r.offset) % 1 + 1) % 1;
         const pt = cubicPt(r.sx, r.sy, r.c1x, r.c1y, r.c2x, r.c2y, r.tx, r.ty, t);
         r.dot.setAttribute("cx", pt.x);
@@ -408,7 +459,6 @@ function loop() {
       }
     }
   }
-  // Animate exec trace dots
   for (let i = execDots.length - 1; i >= 0; i--) {
     const d = execDots[i];
     if (!d.alive) continue;
@@ -431,7 +481,6 @@ function loop() {
       tr.el.setAttribute("cy", tp.y);
     });
   }
-  // Cleanup dead dots periodically
   if (time % 120 === 0) {
     execDots = execDots.filter((d) => d.alive);
   }
@@ -439,33 +488,13 @@ function loop() {
 }
 loop();
 
-setBootStatus("posting ready");
 vscode.postMessage({ type: "ready" });
-
-function loadBoolPref(key, fallback) {
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (raw == null) return fallback;
-    return raw === "true";
-  } catch {
-    return fallback;
-  }
-}
-
-function saveBoolPref(key, value) {
-  try {
-    window.localStorage.setItem(key, String(value));
-  } catch {
-    // ignore persistence failures in the webview sandbox
-  }
-}
 
 // ── Runtime / debug live overlay ──
 let runtimeHighlightedIds = [];
 let runtimePrevFrame = null;
 let runtimePrevPrimaryNodeId = null;
 let runtimeFlashTimer = null;
-const runtimeExecDots = [];
 
 function renderRuntimeFrame(frame, highlightIds) {
   const panel = document.getElementById("runtime-panel");
@@ -643,7 +672,6 @@ function spawnRuntimeParticle(fromId, toId) {
       const d = spawnFn(idx, "#f7e76d");
       if (d) {
         d.speed = Math.max(d.speed || 0.01, 0.012);
-        runtimeExecDots.push(d);
         execDots.push(d);
         return;
       }
@@ -654,7 +682,6 @@ function spawnRuntimeParticle(fromId, toId) {
       const d = spawnFn(idxRev, "#f7e76d");
       if (d) {
         d.speed = Math.max(d.speed || 0.01, 0.012);
-        runtimeExecDots.push(d);
         execDots.push(d);
         return;
       }

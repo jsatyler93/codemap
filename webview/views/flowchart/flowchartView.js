@@ -13,13 +13,14 @@ const BRANCH_GAP = 240;
 
 export function renderFlowchart(graph, ctx) {
   const { root, defs } = ctx;
-  const options = ctx.displayOptions || { showTypes: true, showDetails: true };
+  const canvasState = ctx.canvas?.state;
+  let suppressPointerClicksUntil = 0;
   Object.entries(theme.nodeColor).forEach(([k, c]) => mkArrow(defs, `a-${k}`, c));
   mkArrow(defs, "a-default", "#454a60");
 
   const nodes = graph.nodes.map((n) => ({ ...n }));
   const edges = graph.edges;
-  const prepared = new Map(nodes.map((n) => [n.id, prepareNode(n, options)]));
+  const prepared = new Map(nodes.map((n) => [n.id, prepareNode(n)]));
 
   const incoming = new Map();
   const outgoing = new Map();
@@ -81,12 +82,13 @@ export function renderFlowchart(graph, ctx) {
 
   // --- nodes ---
   const nodeRect = new Map();
+  const nodeEls = new Map();
   for (const n of nodes) {
     const p = positions.get(n.id);
     if (!p) continue;
     const col = theme.nodeColor[n.kind] || theme.nodeColor.process;
     const w = NODE_W;
-    const preparedNode = prepared.get(n.id) || prepareNode(n, options);
+    const preparedNode = prepared.get(n.id) || prepareNode(n);
     const h = preparedNode.h;
     nodeRect.set(n.id, { x: p.x, y: p.y, w, h, color: col });
 
@@ -148,9 +150,71 @@ export function renderFlowchart(graph, ctx) {
     g.addEventListener("mouseenter", (e) => ctx.showTooltip(e, n));
     g.addEventListener("mousemove", (e) => ctx.moveTooltip(e));
     g.addEventListener("mouseleave", () => ctx.hideTooltip());
-    g.addEventListener("click", () => ctx.onNodeClick(n));
+    g.addEventListener("click", (e) => {
+      if (performance.now() < suppressPointerClicksUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      ctx.onNodeClick(n);
+    });
+
+    let dragState = null;
+    g.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      const rect = nodeRect.get(n.id);
+      if (!rect) return;
+      dragState = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startX: rect.x,
+        startY: rect.y,
+        moved: false,
+      };
+      g.setPointerCapture?.(e.pointerId);
+      g.classList.add("node-dragging");
+      ctx.hideTooltip();
+      e.stopPropagation();
+      e.preventDefault();
+    });
+    g.addEventListener("pointermove", (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      const scale = canvasState?.scale || 1;
+      const dx = (e.clientX - dragState.startClientX) / scale;
+      const dy = (e.clientY - dragState.startClientY) / scale;
+      if (!dragState.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+        dragState.moved = true;
+        nodeLayer.appendChild(g);
+      }
+      if (!dragState.moved) return;
+      const rect = nodeRect.get(n.id);
+      if (!rect) return;
+      rect.x = dragState.startX + dx;
+      rect.y = dragState.startY + dy;
+      updateNodePosition(n.id);
+      refreshLayoutForNode(n.id);
+      e.stopPropagation();
+      e.preventDefault();
+    });
+    g.addEventListener("pointerup", (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      if (dragState.moved) {
+        suppressPointerClicksUntil = performance.now() + 250;
+      }
+      g.classList.remove("node-dragging");
+      g.releasePointerCapture?.(e.pointerId);
+      dragState = null;
+      e.stopPropagation();
+    });
+    g.addEventListener("pointercancel", (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      g.classList.remove("node-dragging");
+      dragState = null;
+    });
 
     nodeLayer.appendChild(g);
+    nodeEls.set(n.id, g);
   }
 
   // --- edges ---
@@ -183,8 +247,9 @@ export function renderFlowchart(graph, ctx) {
     path.setAttribute("marker-end", `url(#a-${fromKind})`);
     edgeLayer.appendChild(path);
 
+    let labelEl = null;
     if (e.label) {
-      const mid = cubicPt(sp.x, sp.y, c1x, c1y, c2x, c2y, tp.x, tp.y, 0.5);
+      const mid = cubicPt(sp.x, sp.y, c1x, c1y, c2x, c2y, tp.x, tp.y, 0.35);
       const t = document.createElementNS(NS, "text");
       t.setAttribute("x", String(mid.x + 6));
       t.setAttribute("y", String(mid.y - 4));
@@ -192,6 +257,7 @@ export function renderFlowchart(graph, ctx) {
       t.setAttribute("font-size", "8.5");
       t.textContent = e.label;
       edgeLayer.appendChild(t);
+      labelEl = t;
     }
 
     const dot = document.createElementNS(NS, "circle");
@@ -200,8 +266,65 @@ export function renderFlowchart(graph, ctx) {
     dotLayer.appendChild(dot);
     edgeMap[e.from + "->" + e.to] = edgeRecords.length;
     edgeRecords.push({
+      el: path,
+      src: e.from,
+      tgt: e.to,
+      labelEl,
       sx: sp.x, sy: sp.y, c1x, c1y, c2x, c2y, tx: tp.x, ty: tp.y,
       dot, offset: Math.random(), speed: 0.0006 + Math.random() * 0.0004,
+    });
+  }
+
+  function updateNodePosition(nodeId) {
+    const rect = nodeRect.get(nodeId);
+    const group = nodeEls.get(nodeId);
+    if (!rect || !group) return;
+    group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
+  }
+
+  function updateEdgeGeometry(edge) {
+    const fromR = nodeRect.get(edge.src);
+    const toR = nodeRect.get(edge.tgt);
+    if (!fromR || !toR) return;
+    const sp = { x: fromR.x + fromR.w / 2, y: fromR.y + fromR.h };
+    const tp = { x: toR.x + toR.w / 2, y: toR.y };
+    let c1x;
+    let c1y;
+    let c2x;
+    let c2y;
+    if (Math.abs(tp.x - sp.x) < 1) {
+      c1x = sp.x;
+      c1y = (sp.y + tp.y) / 2;
+      c2x = tp.x;
+      c2y = (sp.y + tp.y) / 2;
+    } else {
+      const my = (sp.y + tp.y) / 2;
+      c1x = sp.x;
+      c1y = my;
+      c2x = tp.x;
+      c2y = my;
+    }
+    edge.sx = sp.x;
+    edge.sy = sp.y;
+    edge.tx = tp.x;
+    edge.ty = tp.y;
+    edge.c1x = c1x;
+    edge.c1y = c1y;
+    edge.c2x = c2x;
+    edge.c2y = c2y;
+    edge.el.setAttribute("d", `M${sp.x},${sp.y} C${c1x},${c1y} ${c2x},${c2y} ${tp.x},${tp.y}`);
+    if (edge.labelEl) {
+      const mid = cubicPt(sp.x, sp.y, c1x, c1y, c2x, c2y, tp.x, tp.y, 0.35);
+      edge.labelEl.setAttribute("x", String(mid.x + 6));
+      edge.labelEl.setAttribute("y", String(mid.y - 4));
+    }
+  }
+
+  function refreshLayoutForNode(nodeId) {
+    edgeRecords.forEach((edge) => {
+      if (edge.src === nodeId || edge.tgt === nodeId) {
+        updateEdgeGeometry(edge);
+      }
     });
   }
 
@@ -255,13 +378,13 @@ export function renderFlowchart(graph, ctx) {
   };
 }
 
-function prepareNode(node, options) {
+function prepareNode(node) {
   const meta = node.metadata || {};
   const rawLines = Array.isArray(meta.displayLines) && meta.displayLines.length
     ? meta.displayLines.map(String)
     : String(node.label || "").split("\n");
-  const displayLines = options.showDetails ? rawLines : [rawLines[0]];
-  const typeLine = options.showTypes && meta.typeLabel ? String(meta.typeLabel) : "";
+  const displayLines = rawLines;
+  const typeLine = meta.typeLabel ? String(meta.typeLabel) : "";
   const totalLineCount = displayLines.length + (typeLine ? 1 : 0);
   const h = Math.max(NODE_MIN_H, 16 + totalLineCount * LINE_H + 8);
   return { lines: displayLines, typeLine, h };

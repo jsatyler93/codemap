@@ -7,7 +7,7 @@ import { NS, mkArrow } from "../../shared/panZoom.js";
 import { theme, moduleColor } from "../../shared/theme.js";
 import { cubicPt } from "../../shared/geometry.js";
 
-const NODE_W = 220, NODE_H = 42, NODE_PAD = 4;
+const NODE_W = 220, NODE_H = 28, NODE_PAD = 4;
 const MOD_PAD_TOP = 32, MOD_PAD_BOTTOM = 12, MOD_PAD_X = 16;
 const COL_GAP = 130, COL_TOP = 30;
 
@@ -16,7 +16,8 @@ export function renderCallGraph(graph, ctx) {
   const nodes = graph.nodes.map((n) => ({ ...n }));
   const edges = graph.edges;
   const isTrace = graph.graphType === "trace";
-  const options = ctx.displayOptions || { showTypes: true, showDetails: true };
+  const canvasState = ctx.canvas?.state;
+  let suppressPointerClicksUntil = 0;
 
   // ── SVG filters (glow) ──
   mkGlow(defs, "glow", 3);
@@ -61,12 +62,14 @@ export function renderCallGraph(graph, ctx) {
 
   // ── Position nodes ──
   const modulePos = new Map();
+  const moduleMembers = new Map();
   const nodePos = new Map();
   let cx = 60;
   for (const col of cols) {
     let cy = COL_TOP;
     for (const { mod, items, h } of col) {
       modulePos.set(mod, { x: cx, y: cy, w: NODE_W + MOD_PAD_X * 2, h, color: moduleColor(mod) });
+      moduleMembers.set(mod, items.map((it) => it.id));
       items.forEach((it, i) => {
         nodePos.set(it.id, {
           x: cx + MOD_PAD_X,
@@ -132,7 +135,6 @@ export function renderCallGraph(graph, ctx) {
     const isClass = n.kind === "class";
     const isRoot = (graph.rootNodeIds || []).includes(n.id);
     const col = moduleColor(n.module || "");
-    const subtitle = options.showDetails ? buildNodeSubtitle(n, options) : "";
     nodeRect.set(n.id, { ...p, color: col });
 
     const g = document.createElementNS(NS, "g");
@@ -156,16 +158,6 @@ export function renderCallGraph(graph, ctx) {
     lb.setAttribute("font-weight", isClass ? "600" : "400");
     lb.textContent = (isClass ? "◆ " : "") + (n.label || n.id);
     g.appendChild(lb);
-
-    if (subtitle) {
-      const sub = document.createElementNS(NS, "text");
-      sub.setAttribute("x", "11");
-      sub.setAttribute("y", "29");
-      sub.setAttribute("fill", col + "88");
-      sub.setAttribute("font-size", "8");
-      sub.textContent = subtitle;
-      g.appendChild(sub);
-    }
 
     // Line number
     const lineNum = n.source && n.source.line ? n.source.line : null;
@@ -192,6 +184,11 @@ export function renderCallGraph(graph, ctx) {
 
     // Click → select node (highlight connected, dim rest)
     g.addEventListener("click", (e) => {
+      if (performance.now() < suppressPointerClicksUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       e.stopPropagation();
       selectNode(n.id);
       ctx.onNodeClick(n);
@@ -199,8 +196,67 @@ export function renderCallGraph(graph, ctx) {
 
     // Double-click → request flowchart for this node
     g.addEventListener("dblclick", (e) => {
+      if (performance.now() < suppressPointerClicksUntil) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       e.stopPropagation();
       if (ctx.onNodeDblClick) ctx.onNodeDblClick(n);
+    });
+
+    let dragState = null;
+    g.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      const pos = nodePos.get(n.id);
+      if (!pos) return;
+      dragState = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startX: pos.x,
+        startY: pos.y,
+        moved: false,
+      };
+      g.setPointerCapture?.(e.pointerId);
+      g.classList.add("node-dragging");
+      ctx.hideTooltip();
+      e.stopPropagation();
+      e.preventDefault();
+    });
+    g.addEventListener("pointermove", (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      const scale = canvasState?.scale || 1;
+      const dx = (e.clientX - dragState.startClientX) / scale;
+      const dy = (e.clientY - dragState.startClientY) / scale;
+      if (!dragState.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+        dragState.moved = true;
+        nodeLayer.appendChild(g);
+      }
+      if (!dragState.moved) return;
+      const pos = nodePos.get(n.id);
+      if (!pos) return;
+      pos.x = dragState.startX + dx;
+      pos.y = dragState.startY + dy;
+      updateNodePosition(n.id);
+      refreshLayoutForNode(n.id);
+      e.stopPropagation();
+      e.preventDefault();
+    });
+    g.addEventListener("pointerup", (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      if (dragState.moved) {
+        suppressPointerClicksUntil = performance.now() + 250;
+      }
+      g.classList.remove("node-dragging");
+      g.releasePointerCapture?.(e.pointerId);
+      dragState = null;
+      e.stopPropagation();
+    });
+    g.addEventListener("pointercancel", (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      g.classList.remove("node-dragging");
+      dragState = null;
     });
 
     nodeLayer.appendChild(g);
@@ -248,27 +304,17 @@ export function renderCallGraph(graph, ctx) {
     if (!sameMod) path.setAttribute("marker-end", `url(#a-${cssId(fromMod || "default")})`);
     edgeLayer.appendChild(path);
 
-    // Type label on edge (param types → return type)
-    const typeLabel = options.showTypes ? buildEdgeTypeLabel(e, nodes) : "";
-    if (e.label || typeLabel) {
+    // Edge label
+    let labelEl = null;
+    if (e.label) {
       const mid = cubicPt(sx, sy, c1x, c1y, c2x, c2y, tx, ty, 0.5);
-      if (e.label) {
-        const lt = document.createElementNS(NS, "text");
-        lt.setAttribute("x", String(mid.x)); lt.setAttribute("y", String(mid.y - (typeLabel ? 10 : 4)));
-        lt.setAttribute("text-anchor", "middle");
-        lt.setAttribute("fill", col + "aa"); lt.setAttribute("font-size", "9");
-        lt.textContent = e.label;
-        edgeLayer.appendChild(lt);
-      }
-      if (typeLabel) {
-        const tt = document.createElementNS(NS, "text");
-        tt.setAttribute("x", String(mid.x)); tt.setAttribute("y", String(mid.y + (e.label ? 4 : -4)));
-        tt.setAttribute("text-anchor", "middle");
-        tt.setAttribute("fill", col + "55"); tt.setAttribute("font-size", "7.5");
-        tt.setAttribute("font-style", "italic");
-        tt.textContent = typeLabel;
-        edgeLayer.appendChild(tt);
-      }
+      const lt = document.createElementNS(NS, "text");
+      lt.setAttribute("x", String(mid.x)); lt.setAttribute("y", String(mid.y - 4));
+      lt.setAttribute("text-anchor", "middle");
+      lt.setAttribute("fill", col + "aa"); lt.setAttribute("font-size", "9");
+      lt.textContent = e.label;
+      edgeLayer.appendChild(lt);
+      labelEl = lt;
     }
 
     // Ambient dots (2 for cross-module, 1 for same-module)
@@ -279,17 +325,120 @@ export function renderCallGraph(graph, ctx) {
       dot.setAttribute("r", "1.2"); dot.setAttribute("fill", col);
       dot.setAttribute("opacity", "0");
       dotLayer.appendChild(dot);
-      ambDots.push({ el: dot, offset: di * 0.5, speed: 0.0005 + Math.random() * 0.0004 });
+      ambDots.push({ el: dot, offset: di * 0.5, speed: 0.0005 + Math.random() * 0.0004, opacity: 0.3 });
     }
 
     const idx = edgeRecords.length;
     edgeMap[e.from + "->" + e.to] = idx;
     edgeRecords.push({
       el: path, src: e.from, tgt: e.to, color: col, sameMod,
+      fromMod, toMod, labelEl,
       sx, sy, c1x, c1y, c2x, c2y, tx, ty,
       dot: ambDots[0]?.el, // compat with main.js animation
       offset: Math.random(), speed: 0.0005 + Math.random() * 0.0004,
       ambDots,
+    });
+  }
+
+  function updateNodePosition(nodeId) {
+    const pos = nodePos.get(nodeId);
+    const node = nodeEls[nodeId];
+    const rect = nodeRect.get(nodeId);
+    if (!pos || !node || !rect) return;
+    node.g.setAttribute("transform", `translate(${pos.x},${pos.y})`);
+    rect.x = pos.x;
+    rect.y = pos.y;
+  }
+
+  function updateModuleFrame(mod) {
+    const memberIds = moduleMembers.get(mod) || [];
+    if (memberIds.length === 0) return;
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    for (const nodeId of memberIds) {
+      const pos = nodePos.get(nodeId);
+      if (!pos) continue;
+      minX = Math.min(minX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxX = Math.max(maxX, pos.x + pos.w);
+      maxY = Math.max(maxY, pos.y + pos.h);
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+    const box = modulePos.get(mod);
+    const el = modEls[mod];
+    if (!box || !el) return;
+    box.x = minX - MOD_PAD_X;
+    box.y = minY - MOD_PAD_TOP;
+    box.w = (maxX - minX) + MOD_PAD_X * 2;
+    box.h = (maxY - minY) + MOD_PAD_TOP + MOD_PAD_BOTTOM;
+    el.rect.setAttribute("x", String(box.x - 6));
+    el.rect.setAttribute("y", String(box.y - 6));
+    el.rect.setAttribute("width", String(box.w + 12));
+    el.rect.setAttribute("height", String(box.h + 12));
+    el.text.setAttribute("x", String(box.x + 10));
+    el.text.setAttribute("y", String(box.y + 14));
+  }
+
+  function updateEdgeGeometry(edge) {
+    const sp = nodePos.get(edge.src);
+    const tp = nodePos.get(edge.tgt);
+    if (!sp || !tp) return;
+    let sx;
+    let sy;
+    let tx;
+    let ty;
+    let c1x;
+    let c1y;
+    let c2x;
+    let c2y;
+    if (edge.sameMod) {
+      const mp = modulePos.get(edge.fromMod);
+      const leftX = (mp ? mp.x : Math.min(sp.x, tp.x)) - 20;
+      sx = sp.x;
+      sy = sp.y + sp.h / 2;
+      tx = tp.x;
+      ty = tp.y + tp.h / 2;
+      c1x = leftX;
+      c1y = sy;
+      c2x = leftX;
+      c2y = ty;
+    } else {
+      const fromOnLeft = sp.x <= tp.x;
+      sx = fromOnLeft ? sp.x + sp.w : sp.x;
+      sy = sp.y + sp.h / 2;
+      tx = fromOnLeft ? tp.x : tp.x + tp.w;
+      ty = tp.y + tp.h / 2;
+      const dx = tx - sx;
+      c1x = sx + dx * 0.42;
+      c1y = sy;
+      c2x = tx - dx * 0.42;
+      c2y = ty;
+    }
+    edge.sx = sx;
+    edge.sy = sy;
+    edge.tx = tx;
+    edge.ty = ty;
+    edge.c1x = c1x;
+    edge.c1y = c1y;
+    edge.c2x = c2x;
+    edge.c2y = c2y;
+    edge.el.setAttribute("d", `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`);
+    if (edge.labelEl) {
+      const mid = cubicPt(sx, sy, c1x, c1y, c2x, c2y, tx, ty, 0.5);
+      edge.labelEl.setAttribute("x", String(mid.x));
+      edge.labelEl.setAttribute("y", String(mid.y - 4));
+    }
+  }
+
+  function refreshLayoutForNode(nodeId) {
+    const mod = nodeToModule[nodeId];
+    updateModuleFrame(mod);
+    edgeRecords.forEach((edge) => {
+      if (edge.src === nodeId || edge.tgt === nodeId || (edge.sameMod && edge.fromMod === mod)) {
+        updateEdgeGeometry(edge);
+      }
     });
   }
 
@@ -380,7 +529,9 @@ export function renderCallGraph(graph, ctx) {
 
   // ── Exec Trace (auto + step-by-step) ──
   let execTimeline = [];
-  if (isTrace) {
+  if (graph.metadata && Array.isArray(graph.metadata.execTimeline)) {
+    execTimeline = graph.metadata.execTimeline;
+  } else if (isTrace) {
     execTimeline = edges
       .filter((e) => e.kind === "execution_step")
       .sort((a, b) => {
@@ -524,54 +675,4 @@ function mkGlow(defs, id, std) {
   defs.appendChild(f);
 }
 
-function buildEdgeTypeLabel(edge, nodes) {
-  const targetNode = nodes.find((n) => n.id === edge.to);
-  if (!targetNode || !targetNode.metadata) return "";
-  const meta = targetNode.metadata;
-  const parts = [];
-  if (meta.params && meta.params.length > 0) {
-    const typed = meta.params.filter((p) => p.type);
-    if (typed.length > 0) {
-      const paramStr = typed.slice(0, 3).map((p) => p.type).join(", ");
-      parts.push(typed.length > 3 ? paramStr + "…" : paramStr);
-    }
-  }
-  if (meta.returnType) {
-    parts.push("→ " + meta.returnType);
-  }
-  return parts.join(" ");
-}
 
-function buildNodeSubtitle(node, options) {
-  const meta = node.metadata || {};
-  if (node.kind === "function" || node.kind === "method") {
-    const params = Array.isArray(meta.params)
-      ? meta.params
-        .filter((param) => param && (options.showTypes ? param.type : true))
-        .slice(0, 2)
-        .map((param) => options.showTypes && param.type ? `${param.name}: ${param.type}` : `${param.name}`)
-      : [];
-    const parts = [];
-    if (params.length) {
-      parts.push(params.join(", "));
-    }
-    if (options.showTypes && meta.returnType) {
-      parts.push(`-> ${meta.returnType}`);
-    }
-    return trimText(parts.join("  "), 34);
-  }
-  if (node.kind === "class") {
-    const bases = Array.isArray(meta.bases) ? meta.bases.filter(Boolean) : [];
-    if (bases.length) {
-      return trimText(`bases: ${bases.join(", ")}`, 34);
-    }
-  }
-  return "";
-}
-
-function trimText(text, maxLen) {
-  if (!text || text.length <= maxLen) {
-    return text;
-  }
-  return text.slice(0, Math.max(0, maxLen - 1)) + "…";
-}

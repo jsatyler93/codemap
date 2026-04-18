@@ -1,4 +1,4 @@
-import { GraphDocument, GraphEdge, GraphNode } from "../model/graphTypes";
+import { GraphDocument, GraphEdge, GraphNode, NavigationPathEntry, ZoomContext } from "../model/graphTypes";
 import { PyAnalysisResult, PySymbol } from "../model/symbolTypes";
 
 /**
@@ -170,8 +170,12 @@ function buildReverseIndex(analysis: PyAnalysisResult): Map<string, string[]> {
   return rev;
 }
 
-/** Workspace-wide module/symbol graph. */
-export function buildWorkspaceGraph(analysis: PyAnalysisResult): GraphDocument {
+/** Workspace-wide module/symbol graph. Attaches a ZoomContext at level 2 (symbol scope)
+ * so the webview can navigate up to packages (L0) or drill into flowcharts (L3). */
+export function buildWorkspaceGraph(
+  analysis: PyAnalysisResult,
+  moduleColorMap?: Record<string, string>,
+): GraphDocument {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const seenEdge = new Set<string>();
@@ -198,6 +202,67 @@ export function buildWorkspaceGraph(analysis: PyAnalysisResult): GraphDocument {
     }
   }
 
+  const colorMap = moduleColorMap ?? {};
+  const navigationPath: NavigationPathEntry[] = [
+    { level: 0, label: "Workspace", id: "root" },
+  ];
+  const zoomContext: ZoomContext = {
+    level: 2,
+    navigationPath,
+    peripherals: [],
+    moduleColorMap: colorMap,
+  };
+
+  // ── Embed execution timeline via DFS from best entry point ──
+  const execTimeline: { edge: [string, string]; label: string; desc: string }[] = [];
+  const incomingCount: Record<string, number> = {};
+  const outgoingCount: Record<string, number> = {};
+  for (const n of nodes) { incomingCount[n.id] = 0; outgoingCount[n.id] = 0; }
+  for (const e of edges) {
+    incomingCount[e.to] = (incomingCount[e.to] || 0) + 1;
+    outgoingCount[e.from] = (outgoingCount[e.from] || 0) + 1;
+  }
+  // Prefer a node named "main", else zero-incoming with most outgoing
+  const nodeIds = nodes.map((n) => n.id);
+  let entryId = nodeIds.find((id) => {
+    const sym = analysis.symbols[id];
+    return sym && (sym.name === "main" || sym.qualifiedName?.endsWith(".main"));
+  });
+  if (!entryId) {
+    const zeroIncoming = nodeIds.filter((id) => (incomingCount[id] || 0) === 0);
+    if (zeroIncoming.length > 0) {
+      zeroIncoming.sort((a, b) => (outgoingCount[b] || 0) - (outgoingCount[a] || 0));
+      entryId = zeroIncoming[0];
+    } else if (nodeIds.length > 0) {
+      entryId = nodeIds[0];
+    }
+  }
+  if (entryId) {
+    const adj: Record<string, { to: string; label: string }[]> = {};
+    for (const e of edges) {
+      if (!adj[e.from]) adj[e.from] = [];
+      adj[e.from].push({ to: e.to, label: e.label || "" });
+    }
+    const visiting = new Set<string>();
+    const maxSteps = 200;
+    function traceWalk(nodeId: string): void {
+      if (execTimeline.length >= maxSteps) return;
+      visiting.add(nodeId);
+      for (const child of (adj[nodeId] || [])) {
+        if (execTimeline.length >= maxSteps) break;
+        const targetNode = nodes.find((n) => n.id === child.to);
+        const label = targetNode ? (targetNode.label || child.to) : child.to;
+        const desc = targetNode?.metadata?.docSummary as string || "";
+        execTimeline.push({ edge: [nodeId, child.to], label, desc });
+        if (!visiting.has(child.to)) {
+          traceWalk(child.to);
+        }
+      }
+      visiting.delete(nodeId);
+    }
+    traceWalk(entryId);
+  }
+
   return {
     graphType: "workspace",
     title: "Python workspace",
@@ -205,8 +270,11 @@ export function buildWorkspaceGraph(analysis: PyAnalysisResult): GraphDocument {
     nodes,
     edges,
     metadata: {
+      zoomContext,
       moduleCount: Object.keys(analysis.modules).length,
       analysisSummary: analysis.summary,
+      execTimeline,
+      moduleColors: colorMap,
     },
   };
 }

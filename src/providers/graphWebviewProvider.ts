@@ -122,35 +122,36 @@ export class GraphWebviewProvider {
   <title>CodeMap</title>
 </head>
 <body>
-  <div id="boot-status" style="position:fixed;top:12px;right:14px;z-index:300;padding:8px 12px;border:1px solid #2a3042;border-radius:8px;background:rgba(10,12,18,0.96);color:#f7e76d;font-family:Consolas, monospace;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.35)">CodeMap booting...</div>
-  <div id="debug-shell" style="position:fixed;top:56px;left:14px;z-index:300;max-width:520px;padding:10px 12px;border:1px solid #2a3042;border-radius:8px;background:rgba(10,12,18,0.96);color:#c0caf5;font-family:Consolas, monospace;font-size:12px;line-height:1.45;white-space:pre-wrap;box-shadow:0 8px 24px rgba(0,0,0,.35)">CodeMap shell created.
-Waiting for graph message...</div>
   <div id="toolbar">
-    <span id="title" class="title">CodeMap</span>
-    <span id="subtitle" class="subtitle"></span>
+    <span class="title" id="title">CodeMap</span>
     <span class="sep"></span>
-    <button class="btn active" id="btn-flow" data-toggle="flow">ambient flow</button>
+    <span class="info" id="stats"></span>
+    <span class="sep"></span>
+    <button class="btn active" id="btn-ambient">ambient</button>
+    <button class="btn exec" id="btn-exec">&#9654; auto trace</button>
+    <button class="btn step" id="btn-step">&#9193; step-by-step</button>
     <button class="btn" id="btn-reset">reset</button>
+    <button class="btn" id="btn-clear">clear</button>
     <button class="btn" id="btn-refresh">refresh</button>
-    <label class="tick"><input id="toggle-types" type="checkbox" checked /> types</label>
-    <label class="tick"><input id="toggle-details" type="checkbox" checked /> details</label>
     <input id="search-box" type="text" placeholder="Search..." />
   </div>
   <div id="canvas"></div>
   <div id="tooltip"></div>
-  <div id="info-panel">
-    <div class="ip-title" id="ip-mode">Graph</div>
-    <div class="ip-func" id="ip-func">\u2014</div>
-    <div class="ip-file" id="ip-file"></div>
-    <div class="ip-stats" id="ip-stats"></div>
-  </div>
   <div id="legend">
-    <div class="lg-title" id="lg-title">Legend</div>
+    <div class="lg-title" id="lg-title">Modules</div>
     <div id="lg-items"></div>
   </div>
+  <div id="exec-panel">
+    <div class="ep-label" id="ep-label">Trace</div>
+    <div class="ep-func" id="ep-func">&mdash;</div>
+    <div class="ep-desc" id="ep-desc"></div>
+    <div class="ep-step" id="ep-step"></div>
+    <div class="ep-hint" id="ep-hint"></div>
+    <div class="ep-progress"><div class="ep-bar" id="ep-bar" style="width:0%"></div></div>
+  </div>
   <div id="runtime-panel" style="display:none;position:fixed;top:56px;right:14px;z-index:200;max-width:340px;padding:10px 12px;border:1px solid #2a3042;border-radius:8px;background:rgba(10,12,18,0.96);color:#c0caf5;font-family:Consolas, monospace;font-size:11px;line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,.35)">
-    <div style="font-size:10px;color:#7aa2f7;margin-bottom:4px;font-weight:600">DEBUG · LIVE</div>
-    <div id="rt-frame" style="color:#9ece6a;font-weight:600;margin-bottom:4px">—</div>
+    <div style="font-size:10px;color:#7aa2f7;margin-bottom:4px;font-weight:600">DEBUG &middot; LIVE</div>
+    <div id="rt-frame" style="color:#9ece6a;font-weight:600;margin-bottom:4px">&mdash;</div>
     <div id="rt-source" style="color:#7d8590;margin-bottom:8px"></div>
     <div id="rt-vars" style="margin-bottom:6px"></div>
     <div id="rt-stack" style="border-top:1px solid #2a3042;padding-top:6px;color:#7d8590;font-size:10px"></div>
@@ -159,49 +160,13 @@ Waiting for graph message...</div>
     (function () {
       const vscode = acquireVsCodeApi();
       window.__codemapVscode = vscode;
-      const boot = document.getElementById("boot-status");
-      const shell = document.getElementById("debug-shell");
-      function setBoot(message) {
-        if (boot) boot.textContent = message;
-        vscode.postMessage({ type: "debug", message: "[boot] " + message });
-      }
-      function setShell(message) {
-        if (shell) shell.textContent = message;
-        const msgStr = typeof message === "string" ? message.replace(/\\n/g, " | ") : "";
-        vscode.postMessage({ type: "debug", message: "[shell] " + msgStr });
-      }
-      window.__codemapSetBoot = setBoot;
-      window.__codemapSetShell = setShell;
       window.addEventListener("error", function (event) {
-        setBoot("runtime error: " + event.message);
+        vscode.postMessage({ type: "debug", message: "runtime error: " + event.message });
       });
       window.addEventListener("unhandledrejection", function (event) {
         const reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
-        setBoot("promise rejection: " + reason);
+        vscode.postMessage({ type: "debug", message: "promise rejection: " + reason });
       });
-      window.addEventListener("message", function (event) {
-        var msg = event.data;
-        if (!msg || msg.type !== "setGraph" || !msg.graph) return;
-        var graph = msg.graph;
-        var meta = graph.metadata || {};
-        var summary = meta.analysisSummary || null;
-        var nodesArr = Array.isArray(graph.nodes) ? graph.nodes : [];
-        var edgesArr = Array.isArray(graph.edges) ? graph.edges : [];
-        var lines = [
-          "Graph message received.",
-          "type: " + graph.graphType,
-          "title: " + (graph.title || "(none)"),
-          "nodes: " + nodesArr.length,
-          "edges: " + edgesArr.length,
-        ];
-        if (summary) {
-          lines.push("typed: " + summary.typeCoveragePct + "%");
-          lines.push("jedi: " + (summary.jediEnabled ? "+" + summary.jediResolved : "off"));
-        }
-        setShell(lines.join("\\n"));
-      });
-      setBoot("shell loaded");
-      setShell("CodeMap shell loaded.\\nWaiting for graph message...");
     })();
   </script>
   <script nonce="${nonce}" src="${mainUri}"></script>

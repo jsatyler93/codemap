@@ -1,4 +1,4 @@
-import { GraphDocument, SourceRef } from "../python/model/graphTypes";
+import { GraphDocument, SourceRef, ZoomLevel } from "../python/model/graphTypes";
 
 // Messages: webview <-> extension host
 
@@ -32,6 +32,18 @@ export interface DebugMessage {
   message: string;
 }
 
+export interface NavigateLevelMessage {
+  type: "navigateLevel";
+  targetLevel: ZoomLevel;
+  targetId: string;
+}
+
+export interface NavigatePeripheralMessage {
+  type: "navigatePeripheral";
+  targetLevel: ZoomLevel;
+  targetId: string;
+}
+
 export interface SetThemeMessage {
   type: "setTheme";
   theme: "dark" | "light";
@@ -62,5 +74,7 @@ export type FromWebviewMessage =
   | RevealNodeMessage
   | RequestRefreshMessage
   | RequestFlowchartMessage
+  | NavigateLevelMessage
+  | NavigatePeripheralMessage
   | ReadyMessage
   | DebugMessage;
