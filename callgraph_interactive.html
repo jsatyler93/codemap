@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>angulotemporalzernike — Execution Flow</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Segoe UI',sans-serif;background:#0a0c12;color:#e0e0e0;overflow:hidden;height:100vh;user-select:none}
+#toolbar{position:fixed;top:0;left:0;right:0;height:44px;background:#0e1018;border-bottom:1px solid #181c28;display:flex;align-items:center;padding:0 16px;z-index:100;gap:8px}
+#toolbar .title{font-family:monospace;font-size:12px;font-weight:600;color:#7aa2f7;letter-spacing:.5px}
+#toolbar .sep{width:1px;height:20px;background:#181c28}
+#toolbar .info{font-size:10px;color:#353a50}
+#search-box{margin-left:auto;background:#12151f;border:1px solid #181c28;border-radius:5px;padding:5px 10px;color:#c0caf5;font-family:monospace;font-size:11px;width:180px;outline:none}
+#search-box:focus{border-color:#7aa2f7}
+#search-box::placeholder{color:#222640}
+.btn{background:#12151f;border:1px solid #181c28;border-radius:5px;color:#606680;font-size:10px;padding:4px 10px;cursor:pointer;font-family:-apple-system,sans-serif;transition:all .15s;white-space:nowrap}
+.btn:hover{background:#181c2a;border-color:#7aa2f7;color:#c0caf5}
+.btn.active{background:#151d35;border-color:#5580cc;color:#7aa2f7}
+.btn.exec{background:#1a1525;border-color:#6640aa;color:#bb9af7}
+.btn.exec.active{background:#201838;border-color:#9966dd;color:#d4b0ff}
+.btn.step{background:#15201a;border-color:#408855;color:#9ece6a}
+.btn.step.active{background:#182818;border-color:#66bb77;color:#b8f080}
+#canvas{position:absolute;top:44px;left:0;right:0;bottom:0;overflow:hidden;cursor:grab}
+#canvas.grabbing{cursor:grabbing}
+svg text{font-family:'Consolas','Menlo','Courier New',monospace}
+#tooltip{position:fixed;background:#12151fee;border:1px solid #252a3e;border-radius:8px;padding:10px 14px;font-family:monospace;font-size:11px;color:#c0caf5;pointer-events:none;opacity:0;z-index:200;max-width:420px;box-shadow:0 12px 48px rgba(0,0,0,.7);transition:opacity .1s;backdrop-filter:blur(6px)}
+#tooltip .tt-module{color:#7aa2f7;font-weight:600;margin-bottom:2px}
+#tooltip .tt-func{color:#bb9af7}
+#tooltip .tt-file{color:#353a50;font-size:10px;margin-top:3px}
+#tooltip .tt-conn{color:#454a60;font-size:10px;margin-top:5px;border-top:1px solid #181c28;padding-top:4px}
+#legend{position:fixed;bottom:14px;left:14px;background:#0e1018ee;border:1px solid #181c28;border-radius:10px;padding:12px 16px;font-size:10px;z-index:100;backdrop-filter:blur(8px)}
+#legend .legend-title{font-weight:600;color:#353a50;margin-bottom:6px;font-size:8px;text-transform:uppercase;letter-spacing:1.5px}
+.legend-item{display:flex;align-items:center;gap:7px;margin-bottom:4px;color:#606680;font-size:10px}
+.legend-dot{width:7px;height:7px;border-radius:2px;flex-shrink:0}
+#exec-panel{position:fixed;bottom:14px;right:14px;background:#0e1018ee;border:1px solid #181c28;border-radius:10px;padding:12px 18px;font-size:10px;z-index:100;backdrop-filter:blur(8px);color:#353a50;font-family:monospace;min-width:260px;transition:border-color .3s}
+#exec-panel.active-exec{border-color:#6640aa44}
+#exec-panel.active-step{border-color:#40885544}
+#exec-panel .ep-label{font-size:8px;text-transform:uppercase;letter-spacing:1.5px;color:#353a50;margin-bottom:5px}
+#exec-panel .ep-func{color:#bb9af7;font-size:12px;font-weight:600;min-height:16px}
+#exec-panel .ep-desc{color:#606680;font-size:10px;margin-top:3px;min-height:14px}
+#exec-panel .ep-step{color:#454a60;font-size:9px;margin-top:6px}
+#exec-panel .ep-hint{color:#2a3040;font-size:9px;margin-top:8px;font-style:italic}
+#exec-panel .ep-progress{margin-top:8px;height:3px;background:#181c28;border-radius:2px;overflow:hidden}
+#exec-panel .ep-bar{height:100%;background:#bb9af7;border-radius:2px;transition:width .3s}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span class="title">angulotemporalzernike</span><span class="sep"></span>
+  <span class="info" id="stats"></span><span class="sep"></span>
+  <button class="btn active" id="btn-ambient" onclick="toggleAmbient()">ambient</button>
+  <button class="btn exec" id="btn-exec" onclick="toggleExec()">▶ auto trace</button>
+  <button class="btn step" id="btn-step" onclick="toggleStep()">⏭ step-by-step</button>
+  <button class="btn" onclick="resetView()">reset</button>
+  <button class="btn" onclick="clearAll()">clear</button>
+  <input type="text" id="search-box" placeholder="Search..." oninput="onSearch(this.value)">
+</div>
+<div id="canvas"></div>
+<div id="tooltip"></div>
+<div id="legend"><div class="legend-title">Modules</div><div id="legend-items"></div></div>
+<div id="exec-panel">
+  <div class="ep-label" id="ep-label">Trace</div>
+  <div class="ep-func" id="ep-func">—</div>
+  <div class="ep-desc" id="ep-desc"></div>
+  <div class="ep-step" id="ep-step"></div>
+  <div class="ep-hint" id="ep-hint"></div>
+  <div class="ep-progress"><div class="ep-bar" id="ep-bar" style="width:0%"></div></div>
+</div>
+<script>
+const modules={ar:{label:"ar.py",color:"#f7768e",items:[{id:"ar.ZernikeAR_Driver",label:"ZernikeAR_Driver",type:"class",line:13},{id:"ar.__init__",label:"__init__",type:"method",line:28},{id:"ar.drive",label:"drive",type:"method",line:51}]},complete_zernike_model:{label:"complete_zernike_model.py",color:"#e0af68",items:[{id:"czm.get_complete_zernike_model",label:"get_complete_zernike_model",type:"function",line:17},{id:"czm._noll_element",label:"_noll_element",type:"function",line:95},{id:"czm._process_mode",label:"_process_mode",type:"function",line:107}]},correlosos_bidim_s:{label:"correlosos_bidim_s.py",color:"#9ece6a",items:[{id:"cor.correlosos_bidim_s",label:"correlosos_bidim_s",type:"function",line:14},{id:"cor.polaire2",label:"polaire2",type:"function",line:177}]},diagnostics:{label:"diagnostics.py",color:"#73daca",items:[{id:"diag._coerce_mode_data",label:"_coerce_mode_data",type:"function",line:17},{id:"diag._extract_mode_temporal_fields",label:"_extract_mode_temporal_fields",type:"function",line:27},{id:"diag._normalize_chassat_covariance",label:"_normalize_chassat_covariance",type:"function",line:37},{id:"diag._center_crop_to_shape",label:"_center_crop_to_shape",type:"function",line:49},{id:"diag.run_diagnostics",label:"run_diagnostics",type:"function",line:63},{id:"diag._save_pdf_asset",label:"_save_pdf_asset",type:"function",line:105},{id:"diag._show",label:"_show",type:"function",line:115},{id:"diag.ar_implied_psd",label:"ar_implied_psd",type:"function",line:278},{id:"diag.averaged_welch_mode",label:"averaged_welch_mode",type:"function",line:291},{id:"diag._plot_noll_mat",label:"_plot_noll_mat",type:"function",line:627}]},innovation:{label:"innovation.py",color:"#bb9af7",items:[{id:"inn.AtmosphericInnovationEngine",label:"AtmosphericInnovationEngine",type:"class",line:11},{id:"inn.__init__",label:"__init__",type:"method",line:39},{id:"inn._build_filters",label:"_build_filters",type:"method",line:53},{id:"inn.generate_innovation_stack",label:"generate_innovation_stack",type:"method",line:89},{id:"inn.generate_innovation_batch",label:"generate_innovation_batch",type:"method",line:108}]},run:{label:"run.py",color:"#7aa2f7",items:[{id:"run.parse_args",label:"parse_args",type:"function",line:24},{id:"run.load_config",label:"load_config",type:"function",line:59},{id:"run.main",label:"main",type:"function",line:82}]},run_all_scenarios:{label:"run_all_scenarios.py",color:"#7dcfff",items:[{id:"ras.parse_args",label:"parse_args",type:"function",line:44},{id:"ras.run_scenario",label:"run_scenario",type:"function",line:80},{id:"ras.main",label:"main",type:"function",line:160}]},temporalspectrum:{label:"temporalspectrum.py",color:"#c0a8e0",items:[{id:"ts.ZernikeTemporalSpectrum",label:"ZernikeTemporalSpectrum",type:"class",line:17},{id:"ts.__init__",label:"__init__",type:"method",line:44},{id:"ts._validate_inputs",label:"_validate_inputs",type:"method",line:77},{id:"ts._setup_layers",label:"_setup_layers",type:"method",line:84},{id:"ts._prepare_orders",label:"_prepare_orders",type:"method",line:89},{id:"ts._integrand",label:"_integrand",type:"method",line:93},{id:"ts._calculate_psd",label:"_calculate_psd",type:"method",line:115},{id:"ts._compute_and_dynamic_trim",label:"_compute_and_dynamic_trim",type:"method",line:178},{id:"ts._solve_yule_walker",label:"_solve_yule_walker",type:"method",line:204},{id:"ts.plot_results",label:"plot_results",type:"method",line:241}]},zern_num:{label:"zern_num.py",color:"#ff9e64",items:[{id:"zn.zern_num",label:"zern_num",type:"function",line:10}]}};
+
+const rawEdges=[["run.main","run.parse_args"],["run.main","run.load_config"],["run.main","czm.get_complete_zernike_model"],["run.main","inn.AtmosphericInnovationEngine"],["run.main","inn.__init__"],["run.main","ar.ZernikeAR_Driver"],["run.main","ar.__init__"],["run.main","ar.drive"],["run.main","diag.run_diagnostics"],["ras.main","ras.parse_args"],["ras.main","ras.run_scenario"],["ras.run_scenario","czm.get_complete_zernike_model"],["ras.run_scenario","inn.AtmosphericInnovationEngine"],["ras.run_scenario","inn.__init__"],["ras.run_scenario","ar.ZernikeAR_Driver"],["ras.run_scenario","ar.__init__"],["ras.run_scenario","ar.drive"],["ras.run_scenario","diag.run_diagnostics"],["ar.drive","inn.generate_innovation_batch"],["czm.get_complete_zernike_model","czm._noll_element"],["czm.get_complete_zernike_model","czm._process_mode"],["czm._noll_element","cor.correlosos_bidim_s"],["czm._process_mode","cor.correlosos_bidim_s"],["czm._process_mode","ts.ZernikeTemporalSpectrum"],["czm._process_mode","ts.__init__"],["cor.correlosos_bidim_s","cor.polaire2"],["cor.correlosos_bidim_s","zn.zern_num"],["diag.run_diagnostics","diag._coerce_mode_data"],["diag.run_diagnostics","diag._extract_mode_temporal_fields"],["diag.run_diagnostics","diag._normalize_chassat_covariance"],["diag.run_diagnostics","diag._center_crop_to_shape"],["diag.run_diagnostics","diag._save_pdf_asset"],["diag.run_diagnostics","diag._show"],["diag.run_diagnostics","diag.ar_implied_psd"],["diag.run_diagnostics","diag.averaged_welch_mode"],["diag.run_diagnostics","diag._plot_noll_mat"],["diag._normalize_chassat_covariance","diag._coerce_mode_data"],["inn.__init__","inn._build_filters"],["ts.__init__","ts._validate_inputs"],["ts.__init__","ts._setup_layers"],["ts.__init__","ts._prepare_orders"],["ts.__init__","ts._calculate_psd"],["ts.__init__","ts._compute_and_dynamic_trim"],["ts.__init__","ts._solve_yule_walker"],["ts._calculate_psd","zn.zern_num"],["ts._integrand","zn.zern_num"],["ts._prepare_orders","zn.zern_num"]];
+
+const execTimeline=[
+  {edge:["run.main","run.parse_args"],label:"parse_args()",desc:"Parse command-line arguments"},
+  {edge:["run.main","run.load_config"],label:"load_config()",desc:"Load JSON scenario configuration"},
+  {edge:["run.main","czm.get_complete_zernike_model"],label:"get_complete_zernike_model()",desc:"Build the full physical + stochastic model"},
+  {edge:["czm.get_complete_zernike_model","czm._noll_element"],label:"_noll_element()",desc:"Process one Noll index — build spatial covariance"},
+  {edge:["czm._noll_element","cor.correlosos_bidim_s"],label:"correlosos_bidim_s()",desc:"Compute 2D spatial correlation for this mode"},
+  {edge:["cor.correlosos_bidim_s","cor.polaire2"],label:"polaire2()",desc:"Convert to polar coordinates"},
+  {edge:["cor.correlosos_bidim_s","zn.zern_num"],label:"zern_num()",desc:"Look up Zernike radial/azimuthal orders"},
+  {edge:["czm.get_complete_zernike_model","czm._process_mode"],label:"_process_mode()",desc:"Process each mode: spectrum + AR coefficients"},
+  {edge:["czm._process_mode","cor.correlosos_bidim_s"],label:"correlosos_bidim_s()",desc:"Spatial correlation for this mode"},
+  {edge:["czm._process_mode","ts.ZernikeTemporalSpectrum"],label:"ZernikeTemporalSpectrum",desc:"Create temporal spectrum object"},
+  {edge:["czm._process_mode","ts.__init__"],label:"__init__()",desc:"Initialize spectrum — triggers full computation chain"},
+  {edge:["ts.__init__","ts._validate_inputs"],label:"_validate_inputs()",desc:"Check parameter consistency"},
+  {edge:["ts.__init__","ts._setup_layers"],label:"_setup_layers()",desc:"Configure atmospheric layer profiles"},
+  {edge:["ts.__init__","ts._prepare_orders"],label:"_prepare_orders()",desc:"Compute Zernike orders for this mode"},
+  {edge:["ts._prepare_orders","zn.zern_num"],label:"zern_num()",desc:"Zernike n,m lookup"},
+  {edge:["ts.__init__","ts._calculate_psd"],label:"_calculate_psd()",desc:"Numerical integration of temporal PSD"},
+  {edge:["ts._calculate_psd","zn.zern_num"],label:"zern_num()",desc:"Zernike orders for PSD integrand"},
+  {edge:["ts.__init__","ts._compute_and_dynamic_trim"],label:"_compute_and_dynamic_trim()",desc:"Trim PSD and compute autocovariance"},
+  {edge:["ts.__init__","ts._solve_yule_walker"],label:"_solve_yule_walker()",desc:"Solve Yule-Walker → AR coefficients + innovation variance"},
+  {edge:["run.main","inn.AtmosphericInnovationEngine"],label:"AtmosphericInnovationEngine",desc:"Create spatial innovation generator"},
+  {edge:["run.main","inn.__init__"],label:"__init__()",desc:"Initialize engine with mode data + Noll covariance"},
+  {edge:["inn.__init__","inn._build_filters"],label:"_build_filters()",desc:"Precompute FFT-domain spatial filters per mode"},
+  {edge:["run.main","ar.ZernikeAR_Driver"],label:"ZernikeAR_Driver",desc:"Create AR time-stepping driver"},
+  {edge:["run.main","ar.__init__"],label:"__init__()",desc:"Store AR coefficients + innovation engine reference"},
+  {edge:["run.main","ar.drive"],label:"drive()",desc:"Run the full time-stepping simulation loop"},
+  {edge:["ar.drive","inn.generate_innovation_batch"],label:"generate_innovation_batch()",desc:"FFT-based spatially correlated innovations × Noll coupling"},
+  {edge:["run.main","diag.run_diagnostics"],label:"run_diagnostics()",desc:"Run all diagnostic checks and plots"},
+  {edge:["diag.run_diagnostics","diag._coerce_mode_data"],label:"_coerce_mode_data()",desc:"Normalize mode data format"},
+  {edge:["diag.run_diagnostics","diag._extract_mode_temporal_fields"],label:"_extract_mode_temporal_fields()",desc:"Extract per-mode time series from 4D array"},
+  {edge:["diag.run_diagnostics","diag._normalize_chassat_covariance"],label:"_normalize_chassat_covariance()",desc:"Normalize Chassat covariance matrix"},
+  {edge:["diag._normalize_chassat_covariance","diag._coerce_mode_data"],label:"_coerce_mode_data()",desc:"Coerce data for normalization"},
+  {edge:["diag.run_diagnostics","diag._center_crop_to_shape"],label:"_center_crop_to_shape()",desc:"Crop spatial fields to target shape"},
+  {edge:["diag.run_diagnostics","diag.ar_implied_psd"],label:"ar_implied_psd()",desc:"Compute PSD implied by fitted AR model"},
+  {edge:["diag.run_diagnostics","diag.averaged_welch_mode"],label:"averaged_welch_mode()",desc:"Welch-averaged PSD from simulated series"},
+  {edge:["diag.run_diagnostics","diag._plot_noll_mat"],label:"_plot_noll_mat()",desc:"Plot Noll covariance matrix heatmap"},
+  {edge:["diag.run_diagnostics","diag._save_pdf_asset"],label:"_save_pdf_asset()",desc:"Save figure as PDF"},
+  {edge:["diag.run_diagnostics","diag._show"],label:"_show()",desc:"Display or save diagnostic plots"},
+];
+
+// Build lookups
+const allNodes={},nodeToModule={};
+Object.entries(modules).forEach(([k,m])=>{m.items.forEach(i=>{allNodes[i.id]={...i,module:k,color:m.color};nodeToModule[i.id]=k})});
+const connCount={};Object.keys(allNodes).forEach(id=>{connCount[id]={out:0,in_:0}});
+rawEdges.forEach(([s,t])=>{if(connCount[s])connCount[s].out++;if(connCount[t])connCount[t].in_++});
+
+// Layout
+const NODE_H=28,NODE_PAD=4,MOD_PAD_TOP=32,MOD_PAD_BOTTOM=12,MOD_PAD_X=16,COL_GAP=130,NODE_W=210;
+const columns=[["run","run_all_scenarios"],["complete_zernike_model","innovation","ar"],["diagnostics","temporalspectrum"],["correlosos_bidim_s","zern_num"]];
+const modulePos={},nodePos={};
+let cxx=70;
+columns.forEach(col=>{let cy=70;col.forEach(mk=>{const m=modules[mk];const mh=MOD_PAD_TOP+m.items.length*(NODE_H+NODE_PAD)+MOD_PAD_BOTTOM;modulePos[mk]={x:cxx,y:cy,w:NODE_W+MOD_PAD_X*2,h:mh,color:m.color};m.items.forEach((it,i)=>{nodePos[it.id]={x:cxx+MOD_PAD_X,y:cy+MOD_PAD_TOP+i*(NODE_H+NODE_PAD),w:NODE_W,h:NODE_H}});cy+=mh+26});cxx+=NODE_W+MOD_PAD_X*2+COL_GAP});
+
+document.getElementById('stats').textContent=`${Object.keys(allNodes).length} nodes · ${rawEdges.length} edges`;
+const legEl=document.getElementById('legend-items');
+Object.values(modules).forEach(m=>{const d=document.createElement('div');d.className='legend-item';d.innerHTML=`<span class="legend-dot" style="background:${m.color}"></span>${m.label}`;legEl.appendChild(d)});
+
+// SVG setup
+const NS='http://www.w3.org/2000/svg';
+const canvasEl=document.getElementById('canvas');
+const svg=document.createElementNS(NS,'svg');svg.setAttribute('width','100%');svg.setAttribute('height','100%');canvasEl.appendChild(svg);
+const mainG=document.createElementNS(NS,'g');svg.appendChild(mainG);
+const defs=document.createElementNS(NS,'defs');svg.appendChild(defs);
+
+function mkGlow(id,std){const f=document.createElementNS(NS,'filter');f.setAttribute('id',id);f.setAttribute('x','-100%');f.setAttribute('y','-100%');f.setAttribute('width','300%');f.setAttribute('height','300%');const gb=document.createElementNS(NS,'feGaussianBlur');gb.setAttribute('stdDeviation',String(std));gb.setAttribute('result','b');f.appendChild(gb);const fm=document.createElementNS(NS,'feMerge');[['b'],['SourceGraphic']].forEach(a=>{const n=document.createElementNS(NS,'feMergeNode');n.setAttribute('in',a[0]);fm.appendChild(n)});f.appendChild(fm);defs.appendChild(f)}
+mkGlow('glow',3);mkGlow('glow-big',8);
+
+function mkMarker(id,col){const m=document.createElementNS(NS,'marker');m.setAttribute('id',id);m.setAttribute('viewBox','0 0 10 6');m.setAttribute('refX','10');m.setAttribute('refY','3');m.setAttribute('markerWidth','6');m.setAttribute('markerHeight','4');m.setAttribute('orient','auto');const p=document.createElementNS(NS,'path');p.setAttribute('d','M0,.8 L9,3 L0,5.2 Z');p.setAttribute('fill',col);m.appendChild(p);defs.appendChild(m)}
+Object.entries(modules).forEach(([k,m])=>mkMarker('a-'+k,m.color));mkMarker('a-dim','#0e1018');
+
+// Layers
+const modLayerG=document.createElementNS(NS,'g');mainG.appendChild(modLayerG);
+const edgeLayerG=document.createElementNS(NS,'g');mainG.appendChild(edgeLayerG);
+const ambientLayerG=document.createElementNS(NS,'g');mainG.appendChild(ambientLayerG);
+const execLayerG=document.createElementNS(NS,'g');mainG.appendChild(execLayerG);
+const nodeLayerG=document.createElementNS(NS,'g');mainG.appendChild(nodeLayerG);
+
+// Module boxes
+Object.entries(modulePos).forEach(([mk,p])=>{const m=modules[mk];const g=document.createElementNS(NS,'g');g.dataset.module=mk;g.classList.add('mg');
+const r=document.createElementNS(NS,'rect');r.setAttribute('x',p.x-6);r.setAttribute('y',p.y-6);r.setAttribute('width',p.w+12);r.setAttribute('height',p.h+12);r.setAttribute('rx','12');r.setAttribute('ry','12');r.setAttribute('fill',p.color+'08');r.setAttribute('stroke',p.color+'18');r.setAttribute('stroke-width','1');g.appendChild(r);
+const t=document.createElementNS(NS,'text');t.setAttribute('x',p.x+10);t.setAttribute('y',p.y+14);t.setAttribute('fill',p.color+'70');t.setAttribute('font-size','10');t.setAttribute('font-weight','600');t.setAttribute('letter-spacing','0.5');t.textContent=m.label;g.appendChild(t);
+modLayerG.appendChild(g)});
+
+// Bezier
+function cubicPt(sx,sy,c1x,c1y,c2x,c2y,tx,ty,t){const u=1-t;return{x:u*u*u*sx+3*u*u*t*c1x+3*u*t*t*c2x+t*t*t*tx,y:u*u*u*sy+3*u*u*t*c1y+3*u*t*t*c2y+t*t*t*ty}}
+
+function buildEdgePath(src,tgt){
+  const sp=nodePos[src],tp=nodePos[tgt];if(!sp||!tp)return null;
+  const sm=nodeToModule[src],tm=nodeToModule[tgt];
+  if(sm===tm){
+    const mp=modulePos[sm];const leftX=mp.x-20;
+    const sy=sp.y+sp.h/2,ty=tp.y+tp.h/2,sx=sp.x,tx=tp.x;
+    return{d:`M${sx},${sy} C${leftX},${sy} ${leftX},${ty} ${tx},${ty}`,sx,sy,c1x:leftX,c1y:sy,c2x:leftX,c2y:ty,tx,ty,sameModule:true};
+  }
+  const sx=sp.x+sp.w,sy=sp.y+sp.h/2,tx=tp.x,ty=tp.y+tp.h/2,dx=tx-sx;
+  return{d:`M${sx},${sy} C${sx+dx*.42},${sy} ${tx-dx*.42},${ty} ${tx},${ty}`,sx,sy,c1x:sx+dx*.42,c1y:sy,c2x:tx-dx*.42,c2y:ty,tx,ty,sameModule:false};
+}
+
+// Edges
+const edgeEls=[];const edgeMap={};
+rawEdges.forEach(([s,t])=>{
+  const ep=buildEdgePath(s,t);if(!ep)return;
+  const sm=nodeToModule[s];const col=modules[sm]?modules[sm].color:'#3b3f54';
+  const p=document.createElementNS(NS,'path');
+  p.setAttribute('d',ep.d);p.setAttribute('fill','none');p.setAttribute('stroke',col+'22');p.setAttribute('stroke-width','1');
+  if(!ep.sameModule)p.setAttribute('marker-end',`url(#a-${sm})`);
+  edgeLayerG.appendChild(p);
+  // Ambient dots
+  const ambDots=[];
+  for(let di=0;di<(ep.sameModule?1:2);di++){
+    const dot=document.createElementNS(NS,'circle');dot.setAttribute('r','1.2');dot.setAttribute('fill',col);dot.setAttribute('opacity','0');
+    ambientLayerG.appendChild(dot);
+    ambDots.push({el:dot,offset:di*0.5,speed:0.0005+Math.random()*0.0004});
+  }
+  const idx=edgeEls.length;edgeMap[s+'->'+t]=idx;
+  edgeEls.push({el:p,src:s,tgt:t,color:col,...ep,ambDots});
+});
+
+// Nodes
+const nodeEls={};const tooltip=document.getElementById('tooltip');
+Object.entries(nodePos).forEach(([id,p])=>{const n=allNodes[id];const m=modules[n.module];const ic=n.type==='class';
+const g=document.createElementNS(NS,'g');g.setAttribute('transform',`translate(${p.x},${p.y})`);g.dataset.id=id;g.style.cursor='pointer';
+const r=document.createElementNS(NS,'rect');r.setAttribute('width',p.w);r.setAttribute('height',p.h);r.setAttribute('rx','5');r.setAttribute('ry','5');
+r.setAttribute('fill',ic?m.color+'12':'#111420');r.setAttribute('stroke',m.color+'30');r.setAttribute('stroke-width','1');g.appendChild(r);
+const lb=document.createElementNS(NS,'text');lb.setAttribute('x','11');lb.setAttribute('y',String(p.h/2+1));lb.setAttribute('dominant-baseline','middle');
+lb.setAttribute('fill',ic?m.color+'dd':'#8890aa');lb.setAttribute('font-size','10');lb.setAttribute('font-weight',ic?'600':'400');
+lb.textContent=(ic?'◆ ':'')+n.label;g.appendChild(lb);
+const lt=document.createElementNS(NS,'text');lt.setAttribute('x',String(p.w-7));lt.setAttribute('y',String(p.h/2+1));lt.setAttribute('dominant-baseline','middle');
+lt.setAttribute('text-anchor','end');lt.setAttribute('fill','#222640');lt.setAttribute('font-size','8');lt.textContent=':'+n.line;g.appendChild(lt);
+const cc=connCount[id];
+g.addEventListener('click',e=>{e.stopPropagation();selectNode(id)});
+g.addEventListener('mouseenter',e=>{tooltip.innerHTML=`<div class="tt-module">${m.label}</div><div class="tt-func">${n.label}</div><div class="tt-file">${n.type} · line ${n.line}</div><div class="tt-conn">↗ ${cc.out} out · ↙ ${cc.in_} in</div>`;tooltip.style.opacity='1';tooltip.style.left=(e.clientX+16)+'px';tooltip.style.top=(e.clientY-10)+'px'});
+g.addEventListener('mousemove',e=>{tooltip.style.left=(e.clientX+16)+'px';tooltip.style.top=(e.clientY-10)+'px'});
+g.addEventListener('mouseleave',()=>{tooltip.style.opacity='0'});
+nodeLayerG.appendChild(g);nodeEls[id]={g,rect:r,node:n}});
+
+// Pan & Zoom
+let scale=0.82,panX=30,panY=10,isPanning=false,psx,psy;
+function applyT(){mainG.setAttribute('transform',`translate(${panX},${panY}) scale(${scale})`)}applyT();
+canvasEl.addEventListener('wheel',e=>{e.preventDefault();const rc=canvasEl.getBoundingClientRect();const mx=e.clientX-rc.left,my=e.clientY-rc.top;const os=scale;scale=Math.min(4,Math.max(0.12,scale*(e.deltaY<0?1.08:0.93)));panX=mx-(mx-panX)*(scale/os);panY=my-(my-panY)*(scale/os);applyT()},{passive:false});
+canvasEl.addEventListener('mousedown',e=>{if(e.target.closest('g[data-id]'))return;isPanning=true;psx=e.clientX-panX;psy=e.clientY-panY;canvasEl.classList.add('grabbing')});
+window.addEventListener('mousemove',e=>{if(!isPanning)return;panX=e.clientX-psx;panY=e.clientY-psy;applyT()});
+window.addEventListener('mouseup',()=>{isPanning=false;canvasEl.classList.remove('grabbing')});
+
+// ── Selection ──
+let sel=null;
+function selectNode(id){
+  if(execMode||stepMode)return;
+  sel=id;const conn=new Set([id]);const ce=new Set();
+  edgeEls.forEach((e,i)=>{if(e.src===id||e.tgt===id){conn.add(e.src);conn.add(e.tgt);ce.add(i)}});
+  const cm=new Set();conn.forEach(n=>cm.add(nodeToModule[n]));
+  Object.entries(nodeEls).forEach(([nid,ne])=>{const hit=conn.has(nid);const m=modules[ne.node.module];
+    ne.rect.setAttribute('opacity',hit?'1':'0.06');ne.g.querySelectorAll('text').forEach(t=>t.setAttribute('opacity',hit?'1':'0.06'));
+    if(hit&&nid===id){ne.rect.setAttribute('stroke',m.color);ne.rect.setAttribute('stroke-width','2');ne.rect.setAttribute('filter','url(#glow)')}
+    else if(hit){ne.rect.setAttribute('stroke',m.color+'88');ne.rect.setAttribute('stroke-width','1.5');ne.rect.removeAttribute('filter')}
+    else{ne.rect.setAttribute('stroke-width','.5');ne.rect.removeAttribute('filter')}});
+  edgeEls.forEach((e,i)=>{if(ce.has(i)){e.el.setAttribute('stroke',e.color+'88');e.el.setAttribute('stroke-width','1.5');e.ambDots.forEach(d=>d.el.setAttribute('opacity','0.6'))}
+    else{e.el.setAttribute('stroke','#0a0c12');e.el.setAttribute('stroke-width','.3');e.ambDots.forEach(d=>d.el.setAttribute('opacity','0'))}});
+  mainG.querySelectorAll('.mg').forEach(mg=>{const hit=cm.has(mg.dataset.module);mg.querySelector('rect').setAttribute('opacity',hit?'1':'0.04');mg.querySelector('text').setAttribute('opacity',hit?'1':'0.04')});
+}
+function resetGraph(){
+  sel=null;
+  Object.entries(nodeEls).forEach(([nid,ne])=>{const m=modules[ne.node.module];ne.rect.setAttribute('opacity','1');ne.rect.setAttribute('stroke',m.color+'30');ne.rect.setAttribute('stroke-width','1');ne.rect.removeAttribute('filter');ne.g.querySelectorAll('text').forEach(t=>t.setAttribute('opacity','1'))});
+  edgeEls.forEach(e=>{e.el.setAttribute('stroke',e.color+'22');e.el.setAttribute('stroke-width','1');if(!e.sameModule)e.el.setAttribute('marker-end',`url(#a-${nodeToModule[e.src]})`);e.ambDots.forEach(d=>d.el.setAttribute('opacity',ambientOn?'0.3':'0'))});
+  mainG.querySelectorAll('.mg').forEach(mg=>{mg.querySelector('rect').setAttribute('opacity','1');mg.querySelector('text').setAttribute('opacity','1')});
+}
+function clearAll(){stopExec();stopStep();resetGraph();updatePanel('—','','','');document.getElementById('ep-bar').style.width='0%';document.getElementById('exec-panel').className=''}
+function resetView(){clearAll();scale=0.82;panX=30;panY=10;applyT()}
+function onSearch(q){if(sel||execMode||stepMode)return;q=q.toLowerCase().trim();Object.entries(nodeEls).forEach(([id,ne])=>{const m=modules[ne.node.module];if(q&&ne.node.label.toLowerCase().includes(q)){ne.rect.setAttribute('stroke','#ff9e64');ne.rect.setAttribute('stroke-width','2.5');ne.rect.setAttribute('filter','url(#glow)')}else{ne.rect.setAttribute('stroke',m.color+'30');ne.rect.setAttribute('stroke-width','1');ne.rect.removeAttribute('filter')}})}
+canvasEl.addEventListener('click',e=>{if(!e.target.closest('g[data-id]'))resetGraph()});
+
+// ── Panel ──
+function updatePanel(func,desc,step,hint){
+  document.getElementById('ep-func').textContent=func;
+  document.getElementById('ep-desc').textContent=desc;
+  document.getElementById('ep-step').textContent=step;
+  document.getElementById('ep-hint').textContent=hint;
+}
+
+// ── Highlight a step ──
+function highlightStep(stepIdx){
+  const step=execTimeline[stepIdx];
+  const key=step.edge[0]+'->'+step.edge[1];
+  const ei=edgeMap[key];
+  // Dim everything first
+  Object.entries(nodeEls).forEach(([nid,ne])=>{const m=modules[ne.node.module];ne.rect.setAttribute('opacity','0.12');ne.rect.setAttribute('stroke',m.color+'15');ne.rect.setAttribute('stroke-width','.5');ne.rect.removeAttribute('filter');ne.g.querySelectorAll('text').forEach(t=>t.setAttribute('opacity','0.12'))});
+  edgeEls.forEach(e=>{e.el.setAttribute('stroke',e.color+'08');e.el.setAttribute('stroke-width','.5');e.ambDots.forEach(d=>d.el.setAttribute('opacity','0'))});
+  mainG.querySelectorAll('.mg').forEach(mg=>{mg.querySelector('rect').setAttribute('opacity','0.06');mg.querySelector('text').setAttribute('opacity','0.06')});
+  // Highlight source + target
+  if(ei!==undefined){
+    const e=edgeEls[ei];
+    e.el.setAttribute('stroke',e.color+'cc');e.el.setAttribute('stroke-width','2.5');
+    [e.src,e.tgt].forEach(nid=>{
+      if(!nodeEls[nid])return;const m=modules[nodeEls[nid].node.module];
+      nodeEls[nid].rect.setAttribute('opacity','1');nodeEls[nid].rect.setAttribute('stroke',m.color);nodeEls[nid].rect.setAttribute('stroke-width','2');nodeEls[nid].rect.setAttribute('filter','url(#glow)');
+      nodeEls[nid].g.querySelectorAll('text').forEach(t=>t.setAttribute('opacity','1'));
+    });
+    // Highlight modules
+    const mods=new Set([nodeToModule[e.src],nodeToModule[e.tgt]]);
+    mainG.querySelectorAll('.mg').forEach(mg=>{const hit=mods.has(mg.dataset.module);mg.querySelector('rect').setAttribute('opacity',hit?'0.8':'0.06');mg.querySelector('text').setAttribute('opacity',hit?'1':'0.06')});
+  }
+  const pct=((stepIdx+1)/execTimeline.length*100).toFixed(0);
+  document.getElementById('ep-bar').style.width=pct+'%';
+  updatePanel(step.label,step.desc,`step ${stepIdx+1} / ${execTimeline.length}`,stepMode?'Space or → for next · ← for previous':'');
+}
+
+// ── Exec dot animation ──
+let activeExecDots=[];
+function spawnExecDot(edgeIdx,color){
+  const e=edgeEls[edgeIdx];
+  const dot=document.createElementNS(NS,'circle');dot.setAttribute('r','5');dot.setAttribute('fill',color);dot.setAttribute('opacity','0.9');dot.setAttribute('filter','url(#glow-big)');
+  execLayerG.appendChild(dot);
+  const trails=[];for(let i=0;i<5;i++){const tr=document.createElementNS(NS,'circle');tr.setAttribute('r',String(4-i*.7));tr.setAttribute('fill',color);tr.setAttribute('opacity',String(.35-i*.06));execLayerG.appendChild(tr);trails.push({el:tr})}
+  activeExecDots.push({el:dot,trails,t:0,speed:0.006,edge:e,alive:true});
+}
+function clearExecDots(){activeExecDots.forEach(d=>{d.el.remove();d.trails.forEach(tr=>tr.el.remove())});activeExecDots=[]}
+
+// ── AUTO TRACE ──
+let execMode=false;let execIdx=0;let execTimer=null;
+function toggleExec(){
+  if(execMode){stopExec();return}
+  stopStep();resetGraph();
+  execMode=true;execIdx=0;
+  document.getElementById('btn-exec').textContent='■ stop';document.getElementById('btn-exec').classList.add('active');
+  document.getElementById('exec-panel').className='active-exec';
+  document.getElementById('ep-label').textContent='Auto Trace';
+  runExecAuto();
+}
+function stopExec(){execMode=false;clearTimeout(execTimer);clearExecDots();document.getElementById('btn-exec').textContent='▶ auto trace';document.getElementById('btn-exec').classList.remove('active')}
+function runExecAuto(){
+  if(!execMode||execIdx>=execTimeline.length){
+    stopExec();updatePanel('✓ Complete','Execution trace finished',`${execTimeline.length}/${execTimeline.length}`,'');return;
+  }
+  highlightStep(execIdx);
+  const key=execTimeline[execIdx].edge[0]+'->'+execTimeline[execIdx].edge[1];
+  const ei=edgeMap[key];
+  if(ei!==undefined)spawnExecDot(ei,edgeEls[ei].color);
+  execIdx++;
+  execTimer=setTimeout(runExecAuto,1800);// 1.8s per step — slow enough to follow
+}
+
+// ── STEP-BY-STEP ──
+let stepMode=false;let stepIdx=0;
+function toggleStep(){
+  if(stepMode){stopStep();resetGraph();updatePanel('—','','','');return}
+  stopExec();resetGraph();
+  stepMode=true;stepIdx=0;
+  document.getElementById('btn-step').textContent='■ exit steps';document.getElementById('btn-step').classList.add('active');
+  document.getElementById('exec-panel').className='active-step';
+  document.getElementById('ep-label').textContent='Step-by-Step';
+  highlightStep(0);
+  updatePanel(execTimeline[0].label,execTimeline[0].desc,`step 1 / ${execTimeline.length}`,'Space or → for next · ← for previous');
+  // Spawn dot for first step
+  const key=execTimeline[0].edge[0]+'->'+execTimeline[0].edge[1];
+  const ei=edgeMap[key];if(ei!==undefined)spawnExecDot(ei,edgeEls[ei].color);
+}
+function stopStep(){stepMode=false;clearExecDots();document.getElementById('btn-step').textContent='⏭ step-by-step';document.getElementById('btn-step').classList.remove('active')}
+function stepForward(){
+  if(!stepMode)return;
+  if(stepIdx<execTimeline.length-1){stepIdx++;clearExecDots();highlightStep(stepIdx);
+    const key=execTimeline[stepIdx].edge[0]+'->'+execTimeline[stepIdx].edge[1];
+    const ei=edgeMap[key];if(ei!==undefined)spawnExecDot(ei,edgeEls[ei].color);
+  }else{updatePanel('✓ Complete','Execution trace finished',`${execTimeline.length}/${execTimeline.length}`,'Press ← to go back')}
+}
+function stepBack(){
+  if(!stepMode||stepIdx<=0)return;
+  stepIdx--;clearExecDots();highlightStep(stepIdx);
+  const key=execTimeline[stepIdx].edge[0]+'->'+execTimeline[stepIdx].edge[1];
+  const ei=edgeMap[key];if(ei!==undefined)spawnExecDot(ei,edgeEls[ei].color);
+}
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){clearAll();return}
+  if(stepMode){
+    if(e.key===' '||e.key==='ArrowRight'){e.preventDefault();stepForward()}
+    else if(e.key==='ArrowLeft'){e.preventDefault();stepBack()}
+  }
+});
+
+// ── AMBIENT ──
+let ambientOn=true;let time=0;
+function toggleAmbient(){ambientOn=!ambientOn;document.getElementById('btn-ambient').classList.toggle('active',ambientOn);if(!ambientOn)edgeEls.forEach(e=>e.ambDots.forEach(d=>d.el.setAttribute('opacity','0')))}
+edgeEls.forEach(e=>e.ambDots.forEach(d=>d.el.setAttribute('opacity','0.3')));
+
+// ── Main loop ──
+function mainLoop(){
+  time++;
+  // Ambient
+  if(ambientOn&&!sel&&!execMode&&!stepMode){
+    edgeEls.forEach(e=>{e.ambDots.forEach(d=>{const t=((time*d.speed+d.offset)%1+1)%1;const pt=cubicPt(e.sx,e.sy,e.c1x,e.c1y,e.c2x,e.c2y,e.tx,e.ty,t);d.el.setAttribute('cx',pt.x);d.el.setAttribute('cy',pt.y)})});
+  }
+  // Exec dots
+  for(let i=activeExecDots.length-1;i>=0;i--){
+    const d=activeExecDots[i];if(!d.alive)continue;
+    d.t+=d.speed;
+    if(d.t>=1){
+      if(stepMode){d.t=0;continue}// loop in step mode
+      d.alive=false;d.el.setAttribute('opacity','0');d.trails.forEach(tr=>tr.el.setAttribute('opacity','0'));
+      setTimeout(()=>{d.el.remove();d.trails.forEach(tr=>tr.el.remove())},50);
+      activeExecDots.splice(i,1);continue;
+    }
+    const e=d.edge;const pt=cubicPt(e.sx,e.sy,e.c1x,e.c1y,e.c2x,e.c2y,e.tx,e.ty,d.t);
+    d.el.setAttribute('cx',pt.x);d.el.setAttribute('cy',pt.y);
+    const fade=d.t>.8?Math.max(0,(1-d.t)/.2):Math.min(1,d.t/.1);
+    d.el.setAttribute('opacity',String(.9*fade));
+    d.trails.forEach((tr,ti)=>{const tt=Math.max(0,d.t-(ti+1)*.035);const tp=cubicPt(e.sx,e.sy,e.c1x,e.c1y,e.c2x,e.c2y,e.tx,e.ty,tt);tr.el.setAttribute('cx',tp.x);tr.el.setAttribute('cy',tp.y);tr.el.setAttribute('opacity',String(Math.max(0,(.3-ti*.05)*fade)))});
+  }
+  requestAnimationFrame(mainLoop);
+}
+mainLoop();
+</script>
+</body>
+</html>

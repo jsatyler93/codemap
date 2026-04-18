@@ -1,0 +1,102 @@
+{
+  "name": "codemap",
+  "displayName": "CodeMap",
+  "description": "Python-first interactive flowcharts, call graphs, and workspace visualization for VS Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Visualization",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codemap.showFlowchart",
+        "title": "CodeMap: Show Python Flowchart for Current Function",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.showCallGraph",
+        "title": "CodeMap: Show Call Graph for Current Symbol",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.showWorkspaceGraph",
+        "title": "CodeMap: Show Python Workspace Graph",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.showStaticTrace",
+        "title": "CodeMap: Show Static Trace for Current Function",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.refresh",
+        "title": "CodeMap: Refresh Visualization",
+        "category": "CodeMap"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "resourceLangId == python",
+          "command": "codemap.showFlowchart",
+          "group": "codemap@1"
+        },
+        {
+          "when": "resourceLangId == python",
+          "command": "codemap.showCallGraph",
+          "group": "codemap@2"
+        }
+      ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "CodeMap",
+      "properties": {
+        "codemap.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a Python 3 interpreter used to run the static analyzer. If blank, uses 'python' on PATH."
+        },
+        "codemap.callGraph.depth": {
+          "type": "number",
+          "default": 1,
+          "description": "Default depth for symbol-centric call graphs (callees and callers)."
+        },
+        "codemap.workspace.maxFiles": {
+          "type": "number",
+          "default": 400,
+          "description": "Cap on number of Python files to index in workspace graph."
+        },
+        "codemap.useJedi": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true and the 'jedi' package is installed in the analyzer's interpreter, use it to upgrade unresolved call sites with type-aware resolution."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "npm run compile:ext && npm run bundle:webview",
+    "compile:ext": "tsc -p ./",
+    "bundle:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --outfile=dist/webview/main.js",
+    "watch": "tsc -watch -p ./",
+    "watch:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --outfile=dist/webview/main.js --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.4.0"
+  }
+}

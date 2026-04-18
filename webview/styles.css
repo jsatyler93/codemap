@@ -1,0 +1,105 @@
+/* CodeMap webview shared styles. Colors borrowed from the provided templates
+   for visual continuity. */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  background: #0a0c12;
+  color: #e0e0e0;
+  overflow: hidden;
+  height: 100vh;
+  user-select: none;
+}
+#boot-status {
+  position: fixed;
+  top: 12px;
+  right: 14px;
+  z-index: 300;
+  padding: 6px 10px;
+  border: 1px solid #2a3042;
+  border-radius: 8px;
+  background: rgba(10, 12, 18, 0.92);
+  color: #f7e76d;
+  font-family: monospace;
+  font-size: 11px;
+}
+#toolbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 44px; background: #0e1018;
+  border-bottom: 1px solid #181c28;
+  display: flex; align-items: center;
+  padding: 0 16px; z-index: 100; gap: 10px;
+}
+#toolbar .title {
+  font-family: monospace; font-size: 12px; font-weight: 600;
+  color: #7aa2f7; letter-spacing: .5px;
+}
+#toolbar .subtitle {
+  font-family: monospace; font-size: 10px; color: #454a60;
+}
+#toolbar .sep { width: 1px; height: 20px; background: #181c28; }
+.btn {
+  background: #12151f; border: 1px solid #181c28; border-radius: 5px;
+  color: #606680; font-size: 10px; padding: 4px 10px;
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+  font-family: -apple-system, sans-serif;
+}
+.btn:hover { background: #181c2a; border-color: #7aa2f7; color: #c0caf5; }
+.btn.active { background: #151d35; border-color: #5580cc; color: #7aa2f7; }
+#search-box {
+  margin-left: auto; background: #12151f; border: 1px solid #181c28;
+  border-radius: 5px; padding: 5px 10px; color: #c0caf5;
+  font-family: monospace; font-size: 11px; width: 180px; outline: none;
+}
+#search-box:focus { border-color: #7aa2f7; }
+#search-box::placeholder { color: #222640; }
+#canvas {
+  position: absolute; top: 44px; left: 0; right: 0; bottom: 0;
+  overflow: hidden; cursor: grab;
+}
+#canvas.grabbing { cursor: grabbing; }
+svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
+#tooltip {
+  position: fixed; background: #12151fee; border: 1px solid #252a3e;
+  border-radius: 8px; padding: 10px 14px;
+  font-family: monospace; font-size: 11px; color: #c0caf5;
+  pointer-events: none; opacity: 0; z-index: 200;
+  max-width: 450px; box-shadow: 0 12px 48px rgba(0, 0, 0, .7);
+  backdrop-filter: blur(6px); transition: opacity .1s; line-height: 1.5;
+}
+#tooltip .tt-type {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px;
+}
+#tooltip .tt-code {
+  color: #bb9af7; font-size: 10px; margin-top: 4px;
+  padding: 4px 6px; background: #0a0c1288; border-radius: 4px; white-space: pre-wrap;
+}
+#info-panel, #legend {
+  position: fixed; bottom: 14px;
+  background: #0e1018ee; border: 1px solid #181c28; border-radius: 10px;
+  padding: 12px 16px; font-size: 10px; z-index: 100; backdrop-filter: blur(8px);
+}
+#info-panel { left: 14px; max-width: 320px; }
+#legend     { right: 14px; max-width: 280px; }
+#info-panel .ip-title, #legend .lg-title {
+  font-size: 8px; text-transform: uppercase; letter-spacing: 1.5px;
+  color: #353a50; margin-bottom: 6px;
+}
+#info-panel .ip-func {
+  color: #9ece6a; font-size: 12px; font-weight: 600;
+}
+#info-panel .ip-file { color: #454a60; font-size: 10px; margin-top: 2px; }
+#info-panel .ip-stats {
+  color: #9aa5ce; font-size: 10px; margin-top: 8px;
+  border-top: 1px solid #181c28; padding-top: 6px;
+}
+.lg-item {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  color: #606680; font-size: 10px;
+}
+.lg-shape { width: 18px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+.lg-diamond {
+  width: 14px; height: 14px; transform: rotate(45deg);
+  flex-shrink: 0; margin: 0 2px;
+}
+.search-hit { stroke: #f7e76d !important; stroke-width: 2 !important; }
+.search-dim { opacity: 0.18; }
