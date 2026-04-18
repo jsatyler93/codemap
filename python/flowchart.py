@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import json
 import sys
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 FuncNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
@@ -50,17 +51,64 @@ def find_target_function(tree: ast.AST, line: int) -> Optional[FuncNode]:
 # ---------------------------------------------------------------------------
 
 class FlowBuilder:
-    def __init__(self, file_path: str) -> None:
+    def __init__(
+        self,
+        file_path: str,
+        symbol: Optional[Dict[str, Any]] = None,
+        symbols_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         self.file_path: str = file_path
         self.nodes: List[NodeDict] = []
         self.edges: List[EdgeDict] = []
         self._counter: int = 0
+        self.var_types: Dict[str, str] = {}
+        self.return_type: Optional[str] = None
+        self.symbol = symbol or {}
+        self.symbols_by_id = symbols_by_id or {}
+        self.call_return_types: Dict[Tuple[int, int], str] = {}
+        self.call_return_types_by_text: Dict[Tuple[int, str], str] = {}
+        self.member_return_types: Dict[Tuple[str, str], str] = {}
+        self.attribute_types: Dict[Tuple[str, str], str] = {}
+        for target in self.symbols_by_id.values():
+            if target.get("kind") == "method" and target.get("className"):
+                return_type = target.get("returnType")
+                if return_type:
+                    self.member_return_types[(str(target.get("className")), str(target.get("name")))] = return_type
+            if target.get("kind") == "class":
+                class_name = str(target.get("name") or "")
+                for attr in (target.get("classAttributes") or []) + (target.get("instanceAttributes") or []):
+                    if isinstance(attr, dict) and attr.get("name") and attr.get("type"):
+                        self.attribute_types[(class_name, str(attr.get("name")))] = str(attr.get("type"))
+        for call in self.symbol.get("calls", []) or []:
+            resolved_to = call.get("resolvedTo")
+            if not resolved_to:
+                continue
+            target = self.symbols_by_id.get(resolved_to)
+            if not target:
+                continue
+            return_type = target.get("returnType")
+            if not return_type and target.get("kind") == "class":
+                return_type = target.get("name")
+            if return_type:
+                line_no = int(call.get("line", 0))
+                col_no = int(call.get("column", 0))
+                self.call_return_types[(line_no, col_no)] = return_type
+                call_text = str(call.get("text") or "")
+                if call_text:
+                    self.call_return_types_by_text[(line_no, call_text)] = return_type
 
     def _id(self, prefix: str) -> str:
         self._counter += 1
         return f"{prefix}_{self._counter}"
 
-    def _add_node(self, kind: str, label: str, line: int, detail: str = "") -> str:
+    def _add_node(
+        self,
+        kind: str,
+        label: str,
+        line: int,
+        detail: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         nid = self._id(kind)
         self.nodes.append({
             "id": nid,
@@ -68,6 +116,7 @@ class FlowBuilder:
             "label": label,
             "detail": detail,
             "source": {"file": self.file_path, "line": line},
+            "metadata": metadata or {},
         })
         return nid
 
@@ -82,11 +131,41 @@ class FlowBuilder:
 
     def build(self, func: FuncNode) -> Tuple[GraphDoc, str]:
         name = func.name
-        args = ", ".join(a.arg for a in func.args.args)
-        entry = self._add_node("entry", f"{name}({args})", func.lineno)
+        params = _extract_params(func, self.symbol)
+        self.var_types = {p["name"]: p["type"] for p in params if p.get("type")}
+        self.var_types.update(_collect_local_types(
+            func,
+            self.call_return_types,
+            self.call_return_types_by_text,
+            self.member_return_types,
+            self.attribute_types,
+        ))
+        self.return_type = self.symbol.get("returnType") or _annotation_text(func.returns)
+        doc_summary = self.symbol.get("docSummary")
+        signature = _format_signature(name, params, self.return_type)
+        entry = self._add_node(
+            "entry",
+            name,
+            func.lineno,
+            detail=signature,
+            metadata={
+                "params": params,
+                "returnType": self.return_type,
+                "docSummary": doc_summary,
+                "displayLines": [name, signature] if signature else [name],
+            },
+        )
         terminal = self._build_block(func.body, entry)
         if terminal is not None:
-            ret = self._add_node("return", "implicit return", getattr(func, "end_lineno", func.lineno))
+            ret = self._add_node(
+                "return",
+                "implicit return",
+                getattr(func, "end_lineno", func.lineno),
+                metadata={
+                    "returnType": self.return_type,
+                    "typeLabel": f"returns {self.return_type}" if self.return_type else "",
+                },
+            )
             self._add_edge(terminal, ret)
         return ({
             "graphType": "flowchart",
@@ -95,7 +174,11 @@ class FlowBuilder:
             "nodes": self.nodes,
             "edges": self.edges,
             "rootNodeIds": [entry],
-            "metadata": {"function": name},
+            "metadata": {
+                "function": name,
+                "params": params,
+                "returnType": self.return_type,
+            },
         }, name)
 
     # Build a block of statements. Returns the id of the last node, or None
@@ -111,7 +194,13 @@ class FlowBuilder:
                 return last
             label = self._summarize_run(run)
             kind = "compute" if any(_is_compute(s) for s in run) else "process"
-            nid = self._add_node(kind, label, run[0].lineno)
+            type_label = self._summarize_types(run)
+            nid = self._add_node(
+                kind,
+                label,
+                run[0].lineno,
+                metadata={"typeLabel": type_label} if type_label else None,
+            )
             if last is not None:
                 self._add_edge(last, nid)
             last = nid
@@ -139,7 +228,24 @@ class FlowBuilder:
             elif isinstance(stmt, ast.Return):
                 flush_run()
                 lbl = "return " + (_short(stmt.value) if stmt.value else "")
-                nid = self._add_node("return", lbl.strip(), stmt.lineno)
+                inferred = _infer_expr_type(
+                    stmt.value,
+                    self.var_types,
+                    self.call_return_types,
+                    self.call_return_types_by_text,
+                    self.member_return_types,
+                    self.attribute_types,
+                )
+                ret_type = inferred or self.return_type
+                nid = self._add_node(
+                    "return",
+                    lbl.strip(),
+                    stmt.lineno,
+                    metadata={
+                        "returnType": ret_type,
+                        "typeLabel": f"returns {ret_type}" if ret_type else "",
+                    },
+                )
                 if last is not None:
                     self._add_edge(last, nid)
                 return None
@@ -194,9 +300,29 @@ class FlowBuilder:
     def _build_loop(self, stmt: LoopNode, prev: Optional[str]) -> Optional[str]:
         if isinstance(stmt, ast.While):
             label = "while " + _short(stmt.test) + "?"
+            type_label = ""
         else:  # for / async for
             label = "for " + _short(stmt.target) + " in " + _short(stmt.iter) + "?"
-        header = self._add_node("decision", label, stmt.lineno)
+            target_names = _target_names(stmt.target)
+            loop_type = _infer_iter_item_type(
+                stmt.iter,
+                self.var_types,
+                self.call_return_types,
+                self.call_return_types_by_text,
+                self.member_return_types,
+                self.attribute_types,
+            )
+            for target_name in target_names:
+                if loop_type:
+                    self.var_types[target_name] = loop_type
+            typed_targets = [f"{target_name}: {self.var_types[target_name]}" for target_name in target_names if target_name in self.var_types]
+            type_label = ", ".join(typed_targets)
+        header = self._add_node(
+            "decision",
+            label,
+            stmt.lineno,
+            metadata={"typeLabel": type_label} if type_label else None,
+        )
         if prev is not None:
             self._add_edge(prev, header)
         body_end = self._build_block(stmt.body, header)
@@ -239,6 +365,29 @@ class FlowBuilder:
             lines.append(f"... +{len(run) - 3} more")
         return "\n".join(lines)
 
+    def _summarize_types(self, run: List[ast.stmt]) -> str:
+        typed: List[str] = []
+        for stmt in run:
+            typed.extend(_statement_type_bits(
+                stmt,
+                self.var_types,
+                self.call_return_types,
+                self.call_return_types_by_text,
+                self.member_return_types,
+                self.attribute_types,
+            ))
+        if not typed:
+            return ""
+        unique: List[str] = []
+        seen = set()
+        for item in typed:
+            if item not in seen:
+                unique.append(item)
+                seen.add(item)
+        if len(unique) > 3:
+            return "; ".join(unique[:3]) + f"; +{len(unique) - 3} more"
+        return "; ".join(unique)
+
 
 def _is_compute(stmt: ast.stmt) -> bool:
     """Heuristic: assignment with arithmetic/numeric call on RHS."""
@@ -271,6 +420,657 @@ def _with_text(item: ast.withitem) -> str:
     return s
 
 
+def _annotation_text(node: Optional[ast.AST]) -> Optional[str]:
+    if node is None:
+        return None
+    text = _short(node)
+    return text or None
+
+
+def _extract_params(func: FuncNode, symbol: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    symbol_params = {
+        param.get("name"): param
+        for param in ((symbol or {}).get("params", []) or [])
+        if isinstance(param, dict) and param.get("name")
+    }
+    params: List[Dict[str, Any]] = []
+    for arg in list(func.args.posonlyargs) + list(func.args.args):
+        entry: Dict[str, Any] = {"name": arg.arg}
+        arg_type = symbol_params.get(arg.arg, {}).get("type") or _annotation_text(arg.annotation)
+        if arg_type:
+            entry["type"] = arg_type
+        params.append(entry)
+    if func.args.vararg is not None:
+        entry = {"name": func.args.vararg.arg, "vararg": True}
+        arg_type = symbol_params.get(func.args.vararg.arg, {}).get("type") or _annotation_text(func.args.vararg.annotation)
+        if arg_type:
+            entry["type"] = arg_type
+        params.append(entry)
+    for arg in func.args.kwonlyargs:
+        entry = {"name": arg.arg, "kwOnly": True}
+        arg_type = symbol_params.get(arg.arg, {}).get("type") or _annotation_text(arg.annotation)
+        if arg_type:
+            entry["type"] = arg_type
+        params.append(entry)
+    if func.args.kwarg is not None:
+        entry = {"name": func.args.kwarg.arg, "kwarg": True}
+        arg_type = symbol_params.get(func.args.kwarg.arg, {}).get("type") or _annotation_text(func.args.kwarg.annotation)
+        if arg_type:
+            entry["type"] = arg_type
+        params.append(entry)
+    return params
+
+
+def _format_signature(name: str, params: List[Dict[str, Any]], return_type: Optional[str]) -> str:
+    parts: List[str] = []
+    for param in params:
+        label = param["name"]
+        if param.get("vararg"):
+            label = "*" + label
+        if param.get("kwarg"):
+            label = "**" + label
+        if param.get("type"):
+            label += f": {param['type']}"
+        parts.append(label)
+    signature = f"({', '.join(parts)})"
+    if return_type:
+        signature += f" -> {return_type}"
+    return signature
+
+
+class _LocalTypeCollector(ast.NodeVisitor):
+    def __init__(
+        self,
+        call_return_types: Dict[Tuple[int, int], str],
+        call_return_types_by_text: Dict[Tuple[int, str], str],
+        member_return_types: Dict[Tuple[str, str], str],
+        attribute_types: Dict[Tuple[str, str], str],
+    ) -> None:
+        self.types: Dict[str, str] = {}
+        self.call_return_types = call_return_types
+        self.call_return_types_by_text = call_return_types_by_text
+        self.member_return_types = member_return_types
+        self.attribute_types = attribute_types
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        ann = _annotation_text(node.annotation)
+        if ann:
+            for name in _target_names(node.target):
+                self.types[name] = ann
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        inferred = _infer_expr_type(
+            node.value,
+            self.types,
+            self.call_return_types,
+            self.call_return_types_by_text,
+            self.member_return_types,
+            self.attribute_types,
+        )
+        if inferred:
+            for target in node.targets:
+                # Tuple unpacking: a, b = func() where func returns tuple[X, Y]
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    elem_types = _parse_tuple_element_types(inferred)
+                    if elem_types:
+                        names = _target_names(target)
+                        for i, name in enumerate(names):
+                            if i < len(elem_types):
+                                self.types[name] = elem_types[i]
+                        continue
+                # Dict subscript assignment: d[key] = value
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    dict_name = target.value.id
+                    dict_type = self.types.get(dict_name)
+                    if dict_type and _base_type_name(dict_type) == "dict":
+                        key_type = _infer_expr_type(
+                            target.slice,
+                            self.types,
+                            self.call_return_types,
+                            self.call_return_types_by_text,
+                            self.member_return_types,
+                            self.attribute_types,
+                        )
+                        if key_type and inferred:
+                            refined = _refine_dict_type(dict_type, key_type, inferred)
+                            if refined:
+                                self.types[dict_name] = refined
+                    continue
+                for name in _target_names(target):
+                    self.types[name] = inferred
+        self.generic_visit(node)
+
+    def visit_Expr(self, node: ast.Expr) -> None:
+        if isinstance(node.value, ast.Call):
+            _apply_container_mutation(
+                node.value,
+                self.types,
+                self.call_return_types,
+                self.call_return_types_by_text,
+                self.member_return_types,
+                self.attribute_types,
+            )
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        inferred = _infer_iter_item_type(
+            node.iter,
+            self.types,
+            self.call_return_types,
+            self.call_return_types_by_text,
+            self.member_return_types,
+            self.attribute_types,
+        )
+        if inferred:
+            for name in _target_names(node.target):
+                self.types[name] = inferred
+        self.generic_visit(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        inferred = _infer_iter_item_type(
+            node.iter,
+            self.types,
+            self.call_return_types,
+            self.call_return_types_by_text,
+            self.member_return_types,
+            self.attribute_types,
+        )
+        if inferred:
+            for name in _target_names(node.target):
+                self.types[name] = inferred
+        self.generic_visit(node)
+
+
+def _collect_local_types(
+    func: FuncNode,
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> Dict[str, str]:
+    collector = _LocalTypeCollector(
+        call_return_types,
+        call_return_types_by_text,
+        member_return_types,
+        attribute_types,
+    )
+    for stmt in func.body:
+        collector.visit(stmt)
+    return collector.types
+
+
+def _target_names(node: ast.AST) -> List[str]:
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: List[str] = []
+        for elt in node.elts:
+            names.extend(_target_names(elt))
+        return names
+    return []
+
+
+def _statement_type_bits(
+    stmt: ast.stmt,
+    known_types: Dict[str, str],
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> List[str]:
+    if isinstance(stmt, ast.AnnAssign):
+        ann = _annotation_text(stmt.annotation)
+        if ann:
+            return [f"{name}: {ann}" for name in _target_names(stmt.target)]
+    if isinstance(stmt, ast.Assign):
+        inferred = _infer_expr_type(
+            stmt.value,
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if inferred:
+            bits: List[str] = []
+            for target in stmt.targets:
+                # Tuple unpacking
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    elem_types = _parse_tuple_element_types(inferred)
+                    if elem_types:
+                        names = _target_names(target)
+                        for i, name in enumerate(names):
+                            if i < len(elem_types):
+                                bits.append(f"{name}: {elem_types[i]}")
+                        continue
+                # Dict subscript assignment
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    dict_name = target.value.id
+                    dict_type = known_types.get(dict_name)
+                    if dict_type and _base_type_name(dict_type) == "dict":
+                        key_type = _infer_expr_type(
+                            target.slice,
+                            known_types,
+                            call_return_types,
+                            call_return_types_by_text,
+                            member_return_types,
+                            attribute_types,
+                        )
+                        if key_type and inferred:
+                            refined = _refine_dict_type(dict_type, key_type, inferred)
+                            if refined:
+                                bits.append(f"{dict_name}: {refined}")
+                    continue
+                bits.extend(f"{name}: {inferred}" for name in _target_names(target))
+            # Add attribute access type bits from RHS
+            bits.extend(_attribute_access_bits(stmt.value, known_types, attribute_types))
+            return bits
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        refined = _container_mutation_bits(
+            stmt.value,
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if refined:
+            return refined
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        inferred = _infer_iter_item_type(
+            stmt.iter,
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if inferred:
+            return [f"{name}: {inferred}" for name in _target_names(stmt.target)]
+    # Fallback: scan for attribute accesses in any statement
+    stmt_attr_bits = _attribute_access_bits(stmt, known_types, attribute_types)
+    if stmt_attr_bits:
+        return stmt_attr_bits
+    return []
+
+
+def _infer_iter_item_type(
+    node: ast.AST,
+    known_types: Dict[str, str],
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> Optional[str]:
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "range":
+        return "int"
+    inferred = _infer_expr_type(
+        node,
+        known_types,
+        call_return_types,
+        call_return_types_by_text,
+        member_return_types,
+        attribute_types,
+    )
+    if not inferred:
+        return None
+    if inferred.startswith("list[") and inferred.endswith("]"):
+        return inferred[5:-1]
+    if inferred.startswith("tuple[") and inferred.endswith("]"):
+        inner = inferred[6:-1]
+        parts = _split_type_args(inner)
+        if len(parts) == 1:
+            return parts[0]
+        return None  # heterogeneous tuple, can't determine single item type
+    if inferred.startswith("dict[") and inferred.endswith("]"):
+        parts = _split_type_args(inferred[5:-1])
+        if parts:
+            return parts[0]  # iterating a dict yields keys
+    if inferred.startswith("set[") and inferred.endswith("]"):
+        return inferred[4:-1]
+    return None
+
+
+def _infer_expr_type(
+    node: Optional[ast.AST],
+    known_types: Dict[str, str],
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> Optional[str]:
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return "None"
+        return type(node.value).__name__
+    if isinstance(node, ast.Name):
+        return known_types.get(node.id)
+    if isinstance(node, ast.Attribute):
+        receiver_type = _infer_expr_type(
+            node.value,
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if receiver_type:
+            return attribute_types.get((_base_type_name(receiver_type), node.attr))
+        return None
+    if isinstance(node, ast.List):
+        item_type = _infer_expr_type(node.elts[0], known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types) if node.elts else "Any"
+        if node.elts and not item_type:
+            return None
+        return f"list[{item_type}]"
+    if isinstance(node, ast.Tuple):
+        if not node.elts:
+            return "tuple[Any]"
+        elem_types = [_infer_expr_type(e, known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types) for e in node.elts]
+        if any(t is None for t in elem_types):
+            return None
+        return f"tuple[{', '.join(elem_types)}]"
+    if isinstance(node, ast.Set):
+        item_type = _infer_expr_type(node.elts[0], known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types) if node.elts else "Any"
+        if node.elts and not item_type:
+            return None
+        return f"set[{item_type}]"
+    if isinstance(node, ast.Dict):
+        if not node.keys:
+            return "dict[Any, Any]"
+        key_type = _infer_expr_type(node.keys[0], known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types) if node.keys[0] is not None else None
+        val_type = _infer_expr_type(node.values[0], known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types)
+        if not key_type or not val_type:
+            return "dict[Any, Any]"
+        return f"dict[{key_type}, {val_type}]"
+    if isinstance(node, ast.JoinedStr):
+        return "str"
+    if isinstance(node, ast.Compare):
+        return "bool"
+    if isinstance(node, ast.UnaryOp):
+        return _infer_expr_type(node.operand, known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types)
+    if isinstance(node, ast.BinOp):
+        left = _infer_expr_type(node.left, known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types)
+        right = _infer_expr_type(node.right, known_types, call_return_types, call_return_types_by_text, member_return_types, attribute_types)
+        if left == right and left:
+            return left
+        if left in {"int", "float"} and right in {"int", "float"}:
+            return "float" if "float" in {left, right} else "int"
+        return left or right
+    if isinstance(node, ast.Call):
+        if hasattr(node, "lineno") and hasattr(node, "col_offset"):
+            resolved = call_return_types.get((int(node.lineno), int(node.col_offset)))
+            if resolved:
+                return resolved
+        call_text = _call_text(node)
+        if call_text:
+            resolved = call_return_types_by_text.get((int(getattr(node, "lineno", 0)), call_text))
+            if resolved:
+                return resolved
+        inferred_member_return = _infer_method_call_type(node, known_types, member_return_types)
+        if inferred_member_return:
+            return inferred_member_return
+        if isinstance(node.func, ast.Name):
+            known = {
+                "str": "str",
+                "int": "int",
+                "float": "float",
+                "bool": "bool",
+                "list": "list[Any]",
+                "dict": "dict[Any, Any]",
+                "set": "set[Any]",
+                "tuple": "tuple[Any]",
+            }
+            return known.get(node.func.id)
+        return None
+    return None
+
+
+def _infer_method_call_type(
+    node: ast.Call,
+    known_types: Dict[str, str],
+    member_return_types: Dict[Tuple[str, str], str],
+) -> Optional[str]:
+    if not isinstance(node.func, ast.Attribute):
+        return None
+    receiver_type = _infer_simple_name_type(node.func.value, known_types)
+    if not receiver_type:
+        return None
+    return member_return_types.get((_base_type_name(receiver_type), node.func.attr))
+
+
+def _infer_simple_name_type(node: ast.AST, known_types: Dict[str, str]) -> Optional[str]:
+    if isinstance(node, ast.Name):
+        return known_types.get(node.id)
+    return None
+
+
+def _base_type_name(type_name: str) -> str:
+    if "[" in type_name:
+        return type_name.split("[", 1)[0]
+    return type_name
+
+
+def _container_mutation_bits(
+    call: ast.Call,
+    known_types: Dict[str, str],
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> List[str]:
+    refined = _apply_container_mutation(
+        call,
+        known_types,
+        call_return_types,
+        call_return_types_by_text,
+        member_return_types,
+        attribute_types,
+    )
+    return [refined] if refined else []
+
+
+def _apply_container_mutation(
+    call: ast.Call,
+    known_types: Dict[str, str],
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> str:
+    if not isinstance(call.func, ast.Attribute) or not isinstance(call.func.value, ast.Name):
+        return ""
+    container_name = call.func.value.id
+    container_type = known_types.get(container_name)
+    if not container_type:
+        return ""
+    method = call.func.attr
+    if method in {"append", "add"} and call.args:
+        item_type = _infer_expr_type(
+            call.args[0],
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if not item_type:
+            return ""
+        refined = _refine_container_type(container_type, item_type)
+        if refined and refined != container_type:
+            known_types[container_name] = refined
+        return f"{container_name}: {known_types.get(container_name, container_type)}"
+    if method == "extend" and call.args:
+        item_type = _infer_iter_item_type(
+            call.args[0],
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if not item_type:
+            return ""
+        refined = _refine_container_type(container_type, item_type)
+        if refined and refined != container_type:
+            known_types[container_name] = refined
+        return f"{container_name}: {known_types.get(container_name, container_type)}"
+    if method == "update" and call.args:
+        arg_type = _infer_expr_type(
+            call.args[0],
+            known_types,
+            call_return_types,
+            call_return_types_by_text,
+            member_return_types,
+            attribute_types,
+        )
+        if arg_type and _base_type_name(container_type) == "dict" and _base_type_name(arg_type) == "dict":
+            # Merge dict types: refine Any slots from the argument dict
+            arg_parts = _split_type_args(arg_type[5:-1]) if arg_type.startswith("dict[") and arg_type.endswith("]") else []
+            if len(arg_parts) == 2:
+                refined = _refine_dict_type(container_type, arg_parts[0], arg_parts[1])
+                if refined:
+                    known_types[container_name] = refined
+        elif arg_type and arg_type != container_type:
+            known_types[container_name] = arg_type if container_type in {"dict", "dict[Any, Any]"} else container_type
+        return f"{container_name}: {known_types.get(container_name, container_type)}"
+    return ""
+
+
+def _refine_container_type(container_type: str, item_type: str) -> Optional[str]:
+    if container_type.startswith("list[") and container_type.endswith("]"):
+        current = container_type[5:-1]
+        if current == "Any" or current == item_type:
+            return f"list[{item_type}]"
+        return container_type
+    if container_type.startswith("set[") and container_type.endswith("]"):
+        current = container_type[4:-1]
+        if current == "Any" or current == item_type:
+            return f"set[{item_type}]"
+        return container_type
+    if container_type == "list[Any]":
+        return f"list[{item_type}]"
+    if container_type == "set[Any]":
+        return f"set[{item_type}]"
+    return None
+
+
+def _refine_dict_type(dict_type: str, key_type: str, val_type: str) -> Optional[str]:
+    """Refine a dict type with observed key/value types."""
+    if dict_type.startswith("dict[") and dict_type.endswith("]"):
+        parts = _split_type_args(dict_type[5:-1])
+        if len(parts) == 2:
+            cur_k, cur_v = parts
+            new_k = key_type if cur_k == "Any" else cur_k
+            new_v = val_type if cur_v == "Any" else cur_v
+            return f"dict[{new_k}, {new_v}]"
+    if dict_type == "dict":
+        return f"dict[{key_type}, {val_type}]"
+    return None
+
+
+def _parse_tuple_element_types(type_str: str) -> Optional[List[str]]:
+    """Parse tuple[X, Y, Z] into individual element types."""
+    if not type_str.startswith("tuple[") or not type_str.endswith("]"):
+        return None
+    inner = type_str[6:-1]
+    parts = _split_type_args(inner)
+    if len(parts) <= 1:
+        return None  # single-element tuple, not unpacking
+    return parts
+
+
+def _split_type_args(s: str) -> List[str]:
+    """Split comma-separated type arguments respecting nested brackets."""
+    parts: List[str] = []
+    depth = 0
+    current: List[str] = []
+    for ch in s:
+        if ch in "([":
+            depth += 1
+            current.append(ch)
+        elif ch in ")]":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
+def _attribute_access_bits(
+    node: ast.AST,
+    known_types: Dict[str, str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> List[str]:
+    """Scan an AST node for attribute accesses and return type bits."""
+    bits: List[str] = []
+    seen: set = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name):
+            receiver_type = known_types.get(child.value.id)
+            if receiver_type:
+                attr_type = attribute_types.get((_base_type_name(receiver_type), child.attr))
+                if attr_type:
+                    key = f"{child.value.id}.{child.attr}"
+                    if key not in seen:
+                        bits.append(f"{key}: {attr_type}")
+                        seen.add(key)
+    return bits
+
+
+def _call_text(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return _short(node.func)
+    return ""
+
+
+def _find_analysis_symbol(
+    analysis: Optional[Dict[str, Any]],
+    file_path: str,
+    line: int,
+) -> Optional[Dict[str, Any]]:
+    if not analysis:
+        return None
+    symbols = analysis.get("symbols") or {}
+    file_norm = os.path.normcase(os.path.abspath(file_path))
+    candidates: List[Dict[str, Any]] = []
+    for symbol in symbols.values():
+        if symbol.get("kind") not in {"function", "method"}:
+            continue
+        symbol_file = symbol.get("file")
+        if not symbol_file:
+            continue
+        if os.path.normcase(os.path.abspath(symbol_file)) != file_norm:
+            continue
+        source = symbol.get("source") or {}
+        start = int(source.get("line", 0) or 0)
+        end = int(source.get("endLine", start) or start)
+        if start <= line <= end:
+            candidates.append(symbol)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda sym: int((sym.get("source") or {}).get("line", 0) or 0), reverse=True)
+    return candidates[0]
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -284,6 +1084,7 @@ def main() -> None:
         return
     file_path = req.get("file")
     line = int(req.get("line", 1))
+    analysis = req.get("analysis")
     if not file_path:
         emit({"error": "missing 'file'"})
         return
@@ -298,7 +1099,9 @@ def main() -> None:
     if func is None:
         emit({"error": f"no function found at line {line}"})
         return
-    builder = FlowBuilder(file_path)
+    symbol = _find_analysis_symbol(analysis, file_path, line)
+    symbols_by_id = (analysis or {}).get("symbols") or {}
+    builder = FlowBuilder(file_path, symbol=symbol, symbols_by_id=symbols_by_id)
     doc, _name = builder.build(func)
     emit(doc)
 

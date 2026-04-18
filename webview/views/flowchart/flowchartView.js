@@ -5,18 +5,21 @@ import { NS, mkArrow } from "../../shared/panZoom.js";
 import { theme } from "../../shared/theme.js";
 import { cubicPt } from "../../shared/geometry.js";
 
-const NODE_W = 220;
-const NODE_H = 36;
+const NODE_W = 240;
+const NODE_MIN_H = 36;
+const LINE_H = 12;
 const ROW_GAP = 30;
 const BRANCH_GAP = 240;
 
 export function renderFlowchart(graph, ctx) {
   const { root, defs } = ctx;
+  const options = ctx.displayOptions || { showTypes: true, showDetails: true };
   Object.entries(theme.nodeColor).forEach(([k, c]) => mkArrow(defs, `a-${k}`, c));
   mkArrow(defs, "a-default", "#454a60");
 
   const nodes = graph.nodes.map((n) => ({ ...n }));
   const edges = graph.edges;
+  const prepared = new Map(nodes.map((n) => [n.id, prepareNode(n, options)]));
 
   const incoming = new Map();
   const outgoing = new Map();
@@ -40,10 +43,10 @@ export function renderFlowchart(graph, ctx) {
   function place(nodeId, x) {
     if (visited.has(nodeId)) return;
     visited.add(nodeId);
-    const n = nodes.find((nn) => nn.id === nodeId);
+    const n = prepared.get(nodeId);
     if (!n) return;
-    positions.set(nodeId, { x: x - NODE_W / 2, y: cursorY });
-    cursorY += NODE_H + ROW_GAP;
+    positions.set(nodeId, { x: x - NODE_W / 2, y: cursorY, h: n.h });
+    cursorY += n.h + ROW_GAP;
     const outs = (outgoing.get(nodeId) || []);
     if (outs.length === 0) return;
     if (outs.length === 1) {
@@ -65,8 +68,9 @@ export function renderFlowchart(graph, ctx) {
   // Place orphans (nodes not reachable from entry) below.
   for (const n of nodes) {
     if (!positions.has(n.id)) {
-      positions.set(n.id, { x: 100, y: cursorY });
-      cursorY += NODE_H + ROW_GAP;
+      const preparedNode = prepared.get(n.id);
+      positions.set(n.id, { x: 100, y: cursorY, h: preparedNode ? preparedNode.h : NODE_MIN_H });
+      cursorY += (preparedNode ? preparedNode.h : NODE_MIN_H) + ROW_GAP;
     }
   }
 
@@ -82,7 +86,8 @@ export function renderFlowchart(graph, ctx) {
     if (!p) continue;
     const col = theme.nodeColor[n.kind] || theme.nodeColor.process;
     const w = NODE_W;
-    const h = NODE_H;
+    const preparedNode = prepared.get(n.id) || prepareNode(n, options);
+    const h = preparedNode.h;
     nodeRect.set(n.id, { x: p.x, y: p.y, w, h, color: col });
 
     const g = document.createElementNS(NS, "g");
@@ -114,18 +119,31 @@ export function renderFlowchart(graph, ctx) {
     shape.setAttribute("stroke-width", "1.2");
     g.appendChild(shape);
 
-    const lines = String(n.label || "").split("\n");
-    lines.forEach((line, i) => {
+    const textLines = preparedNode.lines;
+    const totalLineCount = textLines.length + (preparedNode.typeLine ? 1 : 0);
+    const totalH = totalLineCount * LINE_H;
+    textLines.forEach((line, i) => {
       const t = document.createElementNS(NS, "text");
       t.setAttribute("x", String(w / 2));
-      const totalH = lines.length * 12;
-      t.setAttribute("y", String(h / 2 - totalH / 2 + i * 12 + 9));
+      t.setAttribute("y", String(h / 2 - totalH / 2 + i * LINE_H + 9));
       t.setAttribute("text-anchor", "middle");
       t.setAttribute("fill", col + "dd");
       t.setAttribute("font-size", "10");
       t.textContent = line;
       g.appendChild(t);
     });
+
+    if (preparedNode.typeLine) {
+      const typeText = document.createElementNS(NS, "text");
+      typeText.setAttribute("x", String(w / 2));
+      typeText.setAttribute("y", String(h / 2 - totalH / 2 + textLines.length * LINE_H + 9));
+      typeText.setAttribute("text-anchor", "middle");
+      typeText.setAttribute("fill", col + "88");
+      typeText.setAttribute("font-size", "8");
+      typeText.setAttribute("font-style", "italic");
+      typeText.textContent = preparedNode.typeLine;
+      g.appendChild(typeText);
+    }
 
     g.addEventListener("mouseenter", (e) => ctx.showTooltip(e, n));
     g.addEventListener("mousemove", (e) => ctx.moveTooltip(e));
@@ -137,6 +155,7 @@ export function renderFlowchart(graph, ctx) {
 
   // --- edges ---
   const edgeRecords = [];
+  const edgeMap = {};
   for (const e of edges) {
     const fromR = nodeRect.get(e.from);
     const toR   = nodeRect.get(e.to);
@@ -179,11 +198,39 @@ export function renderFlowchart(graph, ctx) {
     dot.setAttribute("r", "1.3"); dot.setAttribute("fill", col);
     dot.setAttribute("opacity", "0");
     dotLayer.appendChild(dot);
+    edgeMap[e.from + "->" + e.to] = edgeRecords.length;
     edgeRecords.push({
       sx: sp.x, sy: sp.y, c1x, c1y, c2x, c2y, tx: tp.x, ty: tp.y,
       dot, offset: Math.random(), speed: 0.0006 + Math.random() * 0.0004,
     });
   }
+
+  // Exec dot layer for live debug particle
+  const execLayer = document.createElementNS(NS, "g");
+  root.appendChild(execLayer);
+  ctx._edgeMap = edgeMap;
+  ctx._edgeRecords = edgeRecords;
+  ctx._spawnExecDot = function (edgeIdx, color) {
+    const e = edgeRecords[edgeIdx];
+    if (!e) return null;
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("r", "5"); dot.setAttribute("fill", color);
+    dot.setAttribute("opacity", "0.95");
+    execLayer.appendChild(dot);
+    const trails = [];
+    for (let i = 0; i < 5; i++) {
+      const tr = document.createElementNS(NS, "circle");
+      tr.setAttribute("r", String(4 - i * 0.7));
+      tr.setAttribute("fill", color);
+      tr.setAttribute("opacity", String(0.35 - i * 0.06));
+      execLayer.appendChild(tr);
+      trails.push({ el: tr });
+    }
+    return { el: dot, trails, t: 0, speed: 0.012, edge: e, alive: true };
+  };
+  ctx._clearExecDots = function () {
+    while (execLayer.firstChild) execLayer.removeChild(execLayer.firstChild);
+  };
 
   // Legend (node kinds present in this graph).
   const lgItems = document.getElementById("lg-items");
@@ -206,4 +253,16 @@ export function renderFlowchart(graph, ctx) {
     nodes,
     initialView: { scale: 0.75, panX: 60, panY: 20 },
   };
+}
+
+function prepareNode(node, options) {
+  const meta = node.metadata || {};
+  const rawLines = Array.isArray(meta.displayLines) && meta.displayLines.length
+    ? meta.displayLines.map(String)
+    : String(node.label || "").split("\n");
+  const displayLines = options.showDetails ? rawLines : [rawLines[0]];
+  const typeLine = options.showTypes && meta.typeLabel ? String(meta.typeLabel) : "";
+  const totalLineCount = displayLines.length + (typeLine ? 1 : 0);
+  const h = Math.max(NODE_MIN_H, 16 + totalLineCount * LINE_H + 8);
+  return { lines: displayLines, typeLine, h };
 }

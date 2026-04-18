@@ -20,6 +20,8 @@ const flowBtn   = document.getElementById("btn-flow");
 const resetBtn  = document.getElementById("btn-reset");
 const refreshBtn = document.getElementById("btn-refresh");
 const searchBox = document.getElementById("search-box");
+const toggleTypes = document.getElementById("toggle-types");
+const toggleDetails = document.getElementById("toggle-details");
 
 function setBootStatus(message) {
   if (typeof window.__codemapSetBoot === "function") {
@@ -38,17 +40,25 @@ setShellStatus("Main module loaded.\nInitializing SVG canvas...");
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
+let currentGraph = null;
 let flowOn = true;
 let time = 0;
+const displayOptions = {
+  showTypes: loadBoolPref("codemap.showTypes", true),
+  showDetails: loadBoolPref("codemap.showDetails", true),
+};
+
+toggleTypes.checked = displayOptions.showTypes;
+toggleDetails.checked = displayOptions.showDetails;
 
 function showTooltip(e, n) {
   const kind = n.kind || "node";
   const meta = n.metadata || {};
   const sigParts = [];
-  if (meta.params) {
+  if (displayOptions.showTypes && displayOptions.showDetails && meta.params) {
     sigParts.push(`(${meta.params.map(formatParam).join(", ")})`);
   }
-  if (meta.returnType) {
+  if (displayOptions.showTypes && meta.returnType) {
     sigParts.push(` -> ${escapeHtml(meta.returnType)}`);
   }
   const sig = sigParts.length ? `<div class="tt-code">${sigParts.join("")}</div>` : "";
@@ -58,6 +68,9 @@ function showTooltip(e, n) {
   const decos = meta.decorators && meta.decorators.length
     ? `<div style="color:#bb9af7;margin-top:4px">${meta.decorators.map((d) => "@" + escapeHtml(d)).join(" ")}</div>`
     : "";
+  const typeLine = displayOptions.showTypes && meta.typeLabel
+    ? `<div class="tt-code" style="color:#bb9af7">${escapeHtml(meta.typeLabel)}</div>`
+    : "";
   // Connection counts (injected by callGraphView)
   const connLine = (typeof n._connOut === "number")
     ? `<div style="color:#454a60;margin-top:2px;font-size:10px">↗ ${n._connOut} out · ↙ ${n._connIn} in</div>`
@@ -66,9 +79,10 @@ function showTooltip(e, n) {
     <div class="tt-type" style="color:#7aa2f7">${escapeHtml(kind)}${meta.isAsync ? " · async" : ""}</div>
     <div>${escapeHtml(n.label || n.id)}</div>
     ${sig}
+    ${typeLine}
     ${decos}
     ${doc}
-    ${n.detail ? `<div class="tt-code">${escapeHtml(n.detail)}</div>` : ""}
+    ${displayOptions.showDetails && n.detail ? `<div class="tt-code">${escapeHtml(n.detail)}</div>` : ""}
     ${n.module ? `<div style="color:#454a60;margin-top:4px">${escapeHtml(n.module)}</div>` : ""}
     ${connLine}
   `;
@@ -151,6 +165,7 @@ function renderGraph(graph) {
   }
   if (!Array.isArray(graph.nodes)) graph.nodes = [];
   if (!Array.isArray(graph.edges)) graph.edges = [];
+  currentGraph = graph;
   setBootStatus(`rendering ${graph.graphType}`);
   setShellStatus(`Rendering ${graph.graphType}...`);
 
@@ -159,6 +174,9 @@ function renderGraph(graph) {
   execAutoMode = false;
   if (execAutoTimer) { clearInterval(execAutoTimer); execAutoTimer = null; }
   execDots = [];
+  // Reset runtime debug state too (graph layout changed → invalidate node refs)
+  runtimeHighlightedIds = [];
+  runtimePrevPrimaryNodeId = null;
   // Reset shared context
   Object.keys(renderCtx).forEach((k) => delete renderCtx[k]);
 
@@ -169,6 +187,7 @@ function renderGraph(graph) {
       defs: canvas.defs,
       showTooltip, moveTooltip, hideTooltip, onNodeClick,
       onNodeDblClick,
+      displayOptions,
     };
     let result;
     if (graph.graphType === "flowchart") {
@@ -205,7 +224,21 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   if (msg && msg.type === "setGraph") {
     renderGraph(msg.graph);
+  } else if (msg && msg.type === "setRuntimeFrame") {
+    renderRuntimeFrame(msg.frame, msg.highlightNodeIds || []);
   }
+});
+
+toggleTypes.addEventListener("change", () => {
+  displayOptions.showTypes = toggleTypes.checked;
+  saveBoolPref("codemap.showTypes", displayOptions.showTypes);
+  if (currentGraph) renderGraph(currentGraph);
+});
+
+toggleDetails.addEventListener("change", () => {
+  displayOptions.showDetails = toggleDetails.checked;
+  saveBoolPref("codemap.showDetails", displayOptions.showDetails);
+  if (currentGraph) renderGraph(currentGraph);
 });
 
 flowBtn.addEventListener("click", () => {
@@ -408,3 +441,319 @@ loop();
 
 setBootStatus("posting ready");
 vscode.postMessage({ type: "ready" });
+
+function loadBoolPref(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw == null) return fallback;
+    return raw === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function saveBoolPref(key, value) {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // ignore persistence failures in the webview sandbox
+  }
+}
+
+// ── Runtime / debug live overlay ──
+let runtimeHighlightedIds = [];
+let runtimePrevFrame = null;
+let runtimePrevPrimaryNodeId = null;
+let runtimeFlashTimer = null;
+const runtimeExecDots = [];
+
+function renderRuntimeFrame(frame, highlightIds) {
+  const panel = document.getElementById("runtime-panel");
+  if (!panel) return;
+  // Clear previous static highlights.
+  for (const prevId of runtimeHighlightedIds) {
+    const g = canvasEl.querySelector('g[data-id="' + cssEscape(prevId) + '"]');
+    if (g) g.classList.remove("runtime-active");
+  }
+  runtimeHighlightedIds = [];
+
+  if (!frame) {
+    panel.style.display = "none";
+    runtimePrevFrame = null;
+    runtimePrevPrimaryNodeId = null;
+    return;
+  }
+  panel.style.display = "block";
+
+  // ── Compute touched variables (changed value or new since last frame) ──
+  const touched = computeTouchedVarNames(frame, runtimePrevFrame);
+
+  // ── Header / source / call stack (no values) ──
+  const frameEl  = document.getElementById("rt-frame");
+  const sourceEl = document.getElementById("rt-source");
+  const varsEl   = document.getElementById("rt-vars");
+  const stackEl  = document.getElementById("rt-stack");
+
+  if (frameEl)  frameEl.textContent  = frame.name || "(frame)";
+  if (sourceEl) {
+    sourceEl.textContent = frame.source
+      ? shortPath(frame.source.file) + ":" + frame.source.line
+      : "";
+  }
+
+  // ── Variable list: name + type only, with touched ones flashed ──
+  if (varsEl) {
+    if (!frame.variables || frame.variables.length === 0) {
+      varsEl.innerHTML = '<div style="color:#454a60">no variables</div>';
+    } else {
+      const grouped = {};
+      for (const v of frame.variables) {
+        const scope = v.scope || "Locals";
+        if (!grouped[scope]) grouped[scope] = [];
+        grouped[scope].push(v);
+      }
+      const html = [];
+      for (const scope of Object.keys(grouped)) {
+        html.push('<div style="color:#7d8590;font-size:10px;margin-top:4px">' + escapeHtml(scope) + '</div>');
+        for (const v of grouped[scope].slice(0, 16)) {
+          const isTouched = touched.has(varKey(scope, v.name));
+          const typeStr = v.type
+            ? ' <span style="color:#bb9af7">: ' + escapeHtml(v.type) + '</span>'
+            : '';
+          const cls = isTouched ? ' class="rt-var-touched"' : '';
+          html.push(
+            '<div' + cls + '>' +
+              '<span style="color:#7aa2f7">' + escapeHtml(v.name) + '</span>' +
+              typeStr +
+            '</div>'
+          );
+        }
+        if (grouped[scope].length > 16) {
+          html.push('<div style="color:#454a60">+' + (grouped[scope].length - 16) + ' more</div>');
+        }
+      }
+      varsEl.innerHTML = html.join("");
+    }
+  }
+
+  // ── Call stack (no values, just function names + locations) ──
+  if (stackEl) {
+    if (!frame.callStack || frame.callStack.length === 0) {
+      stackEl.textContent = "";
+    } else {
+      const items = frame.callStack.slice(0, 8).map((sf, i) => {
+        const arrow = i === 0 ? "▶" : " ";
+        const where = sf.file ? shortPath(sf.file) + ":" + (sf.line || "?") : "";
+        return arrow + " " + escapeHtml(sf.name) + (where ? "  " + where : "");
+      });
+      stackEl.innerHTML = items.join("<br>");
+    }
+  }
+
+  // ── Resolve current node + flash touched-var occurrences in graph ──
+  const primaryNodeId = resolvePrimaryNodeId(frame, highlightIds);
+  if (primaryNodeId) {
+    const g = canvasEl.querySelector('g[data-id="' + cssEscape(primaryNodeId) + '"]');
+    if (g) {
+      g.classList.add("runtime-active");
+      runtimeHighlightedIds.push(primaryNodeId);
+    }
+  }
+  // Highlight ancestors from the call stack as a softer pulse.
+  if (Array.isArray(highlightIds)) {
+    for (const id of highlightIds) {
+      if (id === primaryNodeId) continue;
+      const g = canvasEl.querySelector('g[data-id="' + cssEscape(id) + '"]');
+      if (g) {
+        g.classList.add("runtime-ancestor");
+        runtimeHighlightedIds.push(id);
+      }
+    }
+  }
+
+  // ── Spawn bright execution particle on node transitions ──
+  if (primaryNodeId && primaryNodeId !== runtimePrevPrimaryNodeId) {
+    spawnRuntimeParticle(runtimePrevPrimaryNodeId, primaryNodeId);
+  }
+  runtimePrevPrimaryNodeId = primaryNodeId;
+
+  // ── Briefly flash any node that mentions a touched variable name ──
+  if (touched.size > 0 && currentGraph) {
+    flashNodesMentioningVars(touched);
+  }
+
+  runtimePrevFrame = frame;
+}
+
+function varKey(scope, name) {
+  return scope + "::" + name;
+}
+
+function computeTouchedVarNames(frame, prevFrame) {
+  const touched = new Set();
+  if (!frame || !frame.variables) return touched;
+  const prevMap = new Map();
+  if (prevFrame && prevFrame.variables) {
+    for (const v of prevFrame.variables) {
+      prevMap.set(varKey(v.scope || "Locals", v.name), v.value);
+    }
+  }
+  // If we're in the same call frame as last time, diff. If we stepped into
+  // a new frame entirely (different name + source), treat all new locals as
+  // touched so the user sees what came in.
+  const sameFrame = prevFrame
+    && prevFrame.name === frame.name
+    && prevFrame.source && frame.source
+    && prevFrame.source.file === frame.source.file;
+  for (const v of frame.variables) {
+    const key = varKey(v.scope || "Locals", v.name);
+    if (!sameFrame) {
+      touched.add(key);
+      touched.add(v.name); // also raw name for graph-text matching
+      continue;
+    }
+    const prevVal = prevMap.get(key);
+    if (prevVal === undefined || prevVal !== v.value) {
+      touched.add(key);
+      touched.add(v.name);
+    }
+  }
+  return touched;
+}
+
+function resolvePrimaryNodeId(frame, highlightIds) {
+  if (Array.isArray(highlightIds) && highlightIds.length > 0) {
+    return highlightIds[0];
+  }
+  if (frame.source && currentGraph) {
+    return findNodeIdByLocation(currentGraph, frame.source);
+  }
+  return null;
+}
+
+function spawnRuntimeParticle(fromId, toId) {
+  if (!toId) return;
+  const edgeMap = renderCtx._edgeMap;
+  const spawnFn = renderCtx._spawnExecDot;
+  if (!spawnFn) return;
+  // 1) Direct edge fromId -> toId
+  if (fromId && edgeMap) {
+    const idx = edgeMap[fromId + "->" + toId];
+    if (typeof idx === "number") {
+      const d = spawnFn(idx, "#f7e76d");
+      if (d) {
+        d.speed = Math.max(d.speed || 0.01, 0.012);
+        runtimeExecDots.push(d);
+        execDots.push(d);
+        return;
+      }
+    }
+    // 2) Reverse edge (e.g. return path)
+    const idxRev = edgeMap[toId + "->" + fromId];
+    if (typeof idxRev === "number") {
+      const d = spawnFn(idxRev, "#f7e76d");
+      if (d) {
+        d.speed = Math.max(d.speed || 0.01, 0.012);
+        runtimeExecDots.push(d);
+        execDots.push(d);
+        return;
+      }
+    }
+  }
+  // 3) No edge: pulse the destination node so user still sees a "step happened"
+  const g = canvasEl.querySelector('g[data-id="' + cssEscape(toId) + '"]');
+  if (g) {
+    g.classList.add("runtime-step-pulse");
+    setTimeout(() => g.classList.remove("runtime-step-pulse"), 700);
+  }
+}
+
+function flashNodesMentioningVars(touchedNames) {
+  if (!currentGraph || !currentGraph.nodes) return;
+  // Build a quick set of plain variable names to look for in node text.
+  const names = [];
+  for (const k of touchedNames) {
+    const idx = k.indexOf("::");
+    const name = idx >= 0 ? k.slice(idx + 2) : k;
+    if (name && name.length >= 2 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      names.push(name);
+    }
+  }
+  if (names.length === 0) return;
+  const nameSet = new Set(names);
+  const flashed = [];
+  for (const n of currentGraph.nodes) {
+    const haystack = collectNodeText(n);
+    if (!haystack) continue;
+    let hit = false;
+    for (const nm of nameSet) {
+      // Word-boundary-ish check
+      const re = new RegExp("(^|[^A-Za-z0-9_])" + escapeRegex(nm) + "($|[^A-Za-z0-9_])");
+      if (re.test(haystack)) { hit = true; break; }
+    }
+    if (hit) {
+      const g = canvasEl.querySelector('g[data-id="' + cssEscape(n.id) + '"]');
+      if (g) {
+        g.classList.add("runtime-var-flash");
+        flashed.push(g);
+      }
+    }
+  }
+  if (runtimeFlashTimer) clearTimeout(runtimeFlashTimer);
+  runtimeFlashTimer = setTimeout(() => {
+    for (const g of flashed) g.classList.remove("runtime-var-flash");
+    runtimeFlashTimer = null;
+  }, 800);
+}
+
+function collectNodeText(n) {
+  const parts = [n.label || "", n.detail || ""];
+  const m = n.metadata || {};
+  if (m.typeLabel) parts.push(String(m.typeLabel));
+  if (m.signature) parts.push(String(m.signature));
+  if (Array.isArray(m.displayLines)) parts.push(m.displayLines.join(" "));
+  if (Array.isArray(m.params)) {
+    for (const p of m.params) parts.push(p && p.name ? p.name : "");
+  }
+  return parts.join(" ");
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findNodeIdByLocation(graph, source) {
+  if (!graph || !graph.nodes || !source) return null;
+  const targetFile = (source.file || "").replace(/\\/g, "/").toLowerCase();
+  const targetLine = source.line;
+  let best = null;
+  let bestDist = Infinity;
+  for (const n of graph.nodes) {
+    if (!n.source || !n.source.file) continue;
+    const nf = n.source.file.replace(/\\/g, "/").toLowerCase();
+    if (nf !== targetFile) continue;
+    const start = n.source.line || 0;
+    const end = n.source.endLine || start;
+    if (targetLine >= start && targetLine <= end) {
+      const dist = targetLine - start;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = n.id;
+      }
+    }
+  }
+  return best;
+}
+
+function shortPath(p) {
+  if (!p) return "";
+  const parts = String(p).replace(/\\/g, "/").split("/");
+  return parts.slice(-2).join("/");
+}
+
+function cssEscape(s) {
+  if (window.CSS && typeof window.CSS.escape === "function") {
+    return window.CSS.escape(s);
+  }
+  return String(s).replace(/(["\\])/g, "\\$1");
+}

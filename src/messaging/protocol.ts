@@ -37,7 +37,27 @@ export interface SetThemeMessage {
   theme: "dark" | "light";
 }
 
-export type FromExtensionMessage = SetGraphMessage | SetThemeMessage;
+export interface RuntimeFrameView {
+  frameId: number;
+  name: string;
+  source?: { file: string; line: number; column?: number };
+  callStack: { name: string; file?: string; line?: number }[];
+  variables: { name: string; type?: string; value: string; scope: string }[];
+  threadId?: number;
+  sessionId: string;
+}
+
+export interface SetRuntimeFrameMessage {
+  type: "setRuntimeFrame";
+  frame: RuntimeFrameView | null;
+  // Optional list of node IDs to highlight (computed by the host).
+  highlightNodeIds?: string[];
+}
+
+export type FromExtensionMessage =
+  | SetGraphMessage
+  | SetThemeMessage
+  | SetRuntimeFrameMessage;
 export type FromWebviewMessage =
   | RevealNodeMessage
   | RequestRefreshMessage

@@ -1,11 +1,12 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { GraphDocument } from "../python/model/graphTypes";
-import { FromWebviewMessage } from "../messaging/protocol";
+import { FromWebviewMessage, RuntimeFrameView } from "../messaging/protocol";
 
 export class GraphWebviewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private lastGraph: GraphDocument | undefined;
+  private lastRuntime: { frame: RuntimeFrameView | null; highlightNodeIds?: string[] } | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -46,6 +47,13 @@ export class GraphWebviewProvider {
           if (this.lastGraph) {
             this.postGraph(this.lastGraph);
           }
+          if (this.lastRuntime) {
+            this.panel?.webview.postMessage({
+              type: "setRuntimeFrame",
+              frame: this.lastRuntime.frame,
+              highlightNodeIds: this.lastRuntime.highlightNodeIds,
+            });
+          }
         }
       });
       const html = this.buildHtml(this.panel.webview);
@@ -64,6 +72,24 @@ export class GraphWebviewProvider {
     const numEdges = graph.edges ? graph.edges.length : 0;
     this.onDebugMessage(`postGraph ${graph.graphType} ${graph.title} (${numNodes} nodes, ${numEdges} edges)`);
     this.panel?.webview.postMessage({ type: "setGraph", graph });
+  }
+
+  postRuntimeFrame(frame: RuntimeFrameView | null, highlightNodeIds?: string[]): void {
+    this.lastRuntime = { frame, highlightNodeIds };
+    if (!this.panel) return;
+    this.panel.webview.postMessage({
+      type: "setRuntimeFrame",
+      frame,
+      highlightNodeIds,
+    });
+  }
+
+  isVisible(): boolean {
+    return !!this.panel;
+  }
+
+  getCurrentGraph(): GraphDocument | undefined {
+    return this.lastGraph;
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -106,6 +132,8 @@ Waiting for graph message...</div>
     <button class="btn active" id="btn-flow" data-toggle="flow">ambient flow</button>
     <button class="btn" id="btn-reset">reset</button>
     <button class="btn" id="btn-refresh">refresh</button>
+    <label class="tick"><input id="toggle-types" type="checkbox" checked /> types</label>
+    <label class="tick"><input id="toggle-details" type="checkbox" checked /> details</label>
     <input id="search-box" type="text" placeholder="Search..." />
   </div>
   <div id="canvas"></div>
@@ -119,6 +147,13 @@ Waiting for graph message...</div>
   <div id="legend">
     <div class="lg-title" id="lg-title">Legend</div>
     <div id="lg-items"></div>
+  </div>
+  <div id="runtime-panel" style="display:none;position:fixed;top:56px;right:14px;z-index:200;max-width:340px;padding:10px 12px;border:1px solid #2a3042;border-radius:8px;background:rgba(10,12,18,0.96);color:#c0caf5;font-family:Consolas, monospace;font-size:11px;line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,.35)">
+    <div style="font-size:10px;color:#7aa2f7;margin-bottom:4px;font-weight:600">DEBUG · LIVE</div>
+    <div id="rt-frame" style="color:#9ece6a;font-weight:600;margin-bottom:4px">—</div>
+    <div id="rt-source" style="color:#7d8590;margin-bottom:8px"></div>
+    <div id="rt-vars" style="margin-bottom:6px"></div>
+    <div id="rt-stack" style="border-top:1px solid #2a3042;padding-top:6px;color:#7d8590;font-size:10px"></div>
   </div>
   <script nonce="${nonce}">
     (function () {

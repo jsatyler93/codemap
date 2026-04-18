@@ -26,3 +26,10 @@ def polygon_area(points):
         x2, y2 = points[(i + 1) % n]
         total += x1 * y2 - x2 * y1
     return abs(total) / 2.0
+
+
+if __name__ == "__main__":
+    c = Circle(radius=2.0)
+    print("Circle area:", c.area())
+    print("Circle circumference:", c.circumference())
+    print("Polygon area:", polygon_area([(0, 0), (3, 0), (3, 4)]))

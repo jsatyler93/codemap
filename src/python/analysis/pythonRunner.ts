@@ -187,9 +187,11 @@ export async function buildFlowchartFor(
   extensionPath: string,
   file: string,
   line: number,
+  analysis?: PyAnalysisResult,
 ): Promise<GraphDocument> {
   return runPythonHelper<GraphDocument>(extensionPath, "flowchart.py", {
     file,
     line,
+    analysis,
   });
 }

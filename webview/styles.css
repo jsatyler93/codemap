@@ -45,6 +45,16 @@ body {
 }
 .btn:hover { background: #181c2a; border-color: #7aa2f7; color: #c0caf5; }
 .btn.active { background: #151d35; border-color: #5580cc; color: #7aa2f7; }
+.tick {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #8890aa; font-size: 10px; user-select: none;
+  font-family: monospace;
+}
+.tick input {
+  accent-color: #7aa2f7;
+  width: 12px; height: 12px;
+}
+.tick:hover { color: #c0caf5; }
 #search-box {
   margin-left: auto; background: #12151f; border: 1px solid #181c28;
   border-radius: 5px; padding: 5px 10px; color: #c0caf5;
@@ -103,3 +113,71 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
 }
 .search-hit { stroke: #f7e76d !important; stroke-width: 2 !important; }
 .search-dim { opacity: 0.18; }
+
+/* Live debug runtime highlight */
+.runtime-active rect,
+.runtime-active polygon,
+.runtime-active circle,
+.runtime-active path {
+  stroke: #f7768e !important;
+  stroke-width: 3 !important;
+  filter: drop-shadow(0 0 12px rgba(247, 118, 142, 0.85));
+}
+.runtime-active {
+  animation: runtime-pulse 1.4s ease-in-out infinite;
+}
+@keyframes runtime-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.78; }
+}
+
+/* Softer pulse for ancestor frames in the call stack */
+.runtime-ancestor rect,
+.runtime-ancestor polygon,
+.runtime-ancestor circle,
+.runtime-ancestor path {
+  stroke: #f7e76d !important;
+  stroke-width: 2 !important;
+  filter: drop-shadow(0 0 6px rgba(247, 231, 109, 0.55));
+}
+
+/* One-shot bright pulse when execution lands on a node with no traceable edge */
+.runtime-step-pulse rect,
+.runtime-step-pulse polygon,
+.runtime-step-pulse circle,
+.runtime-step-pulse path {
+  stroke: #f7e76d !important;
+  stroke-width: 3 !important;
+  filter: drop-shadow(0 0 14px rgba(247, 231, 109, 0.95));
+  animation: runtime-step-flash 0.7s ease-out;
+}
+@keyframes runtime-step-flash {
+  0%   { filter: drop-shadow(0 0 18px rgba(247, 231, 109, 1)); }
+  100% { filter: drop-shadow(0 0 4px rgba(247, 231, 109, 0.2)); }
+}
+
+/* Variable-touched flash inside the runtime panel */
+.rt-var-touched {
+  background: rgba(247, 231, 109, 0.12);
+  border-left: 2px solid #f7e76d;
+  padding-left: 4px;
+  margin-left: -6px;
+  animation: rt-var-flash 0.8s ease-out;
+}
+@keyframes rt-var-flash {
+  0%   { background: rgba(247, 231, 109, 0.45); }
+  100% { background: rgba(247, 231, 109, 0.12); }
+}
+
+/* Brief flash on graph nodes that mention a touched variable name */
+.runtime-var-flash rect,
+.runtime-var-flash polygon {
+  stroke: #f7e76d !important;
+  stroke-width: 2 !important;
+  filter: drop-shadow(0 0 8px rgba(247, 231, 109, 0.7));
+  animation: runtime-var-flash-anim 0.8s ease-out;
+}
+@keyframes runtime-var-flash-anim {
+  0%   { filter: drop-shadow(0 0 14px rgba(247, 231, 109, 1)); }
+  100% { filter: drop-shadow(0 0 0 rgba(247, 231, 109, 0)); }
+}

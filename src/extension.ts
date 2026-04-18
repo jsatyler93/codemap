@@ -8,12 +8,17 @@ import {
   buildWorkspaceGraph,
   findSymbolAt,
 } from "./python/analysis/pythonCallGraphBuilder";
+import { buildLiveCallGraph, buildLiveOutline } from "./live/vscodeGraphBuilder";
+import { DebugSyncService } from "./live/debugSync";
 
 export function activate(context: vscode.ExtensionContext): void {
   const indexer = new PythonWorkspaceIndexer(context.extensionPath);
   context.subscriptions.push(indexer);
   const output = vscode.window.createOutputChannel("CodeMap");
   context.subscriptions.push(output);
+
+  const debugSync = new DebugSyncService();
+  context.subscriptions.push(debugSync);
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -62,9 +67,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
+        const analysis = await indexer.getAnalysis();
         const graph = await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Window, title: "CodeMap: building flowchart..." },
-          () => buildFlowchartFor(context.extensionPath, source.file, source.line),
+          () => buildFlowchartFor(context.extensionPath, source.file, source.line, analysis),
         );
         if (graph && graph.nodes && graph.nodes.length > 0) {
           logGraph(graph);
@@ -153,6 +159,45 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("CodeMap: workspace re-indexed.");
       }
     }),
+    vscode.commands.registerCommand("codemap.showLiveCallGraph", async () => {
+      lastCommand = runShowLiveCallGraph;
+      await runShowLiveCallGraph();
+    }),
+    vscode.commands.registerCommand("codemap.showLiveOutline", async () => {
+      lastCommand = runShowLiveOutline;
+      await runShowLiveOutline();
+    }),
+    vscode.commands.registerCommand("codemap.toggleDebugSync", () => {
+      if (debugSync.isActive()) {
+        debugSync.stop();
+        vscode.window.setStatusBarMessage("CodeMap: debug sync OFF", 3000);
+        provider.postRuntimeFrame(null);
+      } else {
+        debugSync.start();
+        vscode.window.setStatusBarMessage("CodeMap: debug sync ON", 3000);
+      }
+    }),
+  );
+
+  // Debug sync wiring: when active, push runtime frames + computed highlights
+  // to whatever graph is currently shown in the webview.
+  context.subscriptions.push(
+    debugSync.onRuntime((frame) => {
+      if (!provider.isVisible()) return;
+      const graph = provider.getCurrentGraph();
+      const highlights: string[] = [];
+      if (frame && graph && frame.source) {
+        const matchId = findGraphNodeByLocation(graph, frame.source);
+        if (matchId) highlights.push(matchId);
+        // Highlight call-stack ancestors that map onto graph nodes too.
+        for (const sf of frame.callStack) {
+          if (!sf.file || !sf.line) continue;
+          const id = findGraphNodeByLocation(graph, { file: sf.file, line: sf.line });
+          if (id && !highlights.includes(id)) highlights.push(id);
+        }
+      }
+      provider.postRuntimeFrame(frame, highlights);
+    }),
   );
 
   async function requireActivePython(): Promise<vscode.TextEditor | undefined> {
@@ -170,9 +215,14 @@ export function activate(context: vscode.ExtensionContext): void {
     const file = editor.document.uri.fsPath;
     const line = editor.selection.active.line + 1;
     try {
+      const analysis = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
+        () => indexer.getAnalysis(),
+      );
+      logAnalysis(analysis, "flowchart");
       const graph = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: building flowchart..." },
-        () => buildFlowchartFor(context.extensionPath, file, line),
+        () => buildFlowchartFor(context.extensionPath, file, line, analysis),
       );
       logGraph(graph);
       provider.show(graph);
@@ -244,6 +294,80 @@ export function activate(context: vscode.ExtensionContext): void {
       showError(e);
     }
   }
+
+  async function runShowLiveCallGraph(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage("CodeMap: open a file first.");
+      return;
+    }
+    try {
+      const depth = vscode.workspace
+        .getConfiguration("codemap")
+        .get<number>("liveCallGraph.depth", 2);
+      const graph = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Window,
+          title: "CodeMap: querying call hierarchy...",
+        },
+        () =>
+          buildLiveCallGraph(editor.document.uri, editor.selection.active, {
+            depth,
+            direction: "both",
+          }),
+      );
+      logGraph(graph);
+      provider.show(graph);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function runShowLiveOutline(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage("CodeMap: open a file first.");
+      return;
+    }
+    try {
+      const graph = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Window,
+          title: "CodeMap: querying document symbols...",
+        },
+        () => buildLiveOutline(editor.document.uri),
+      );
+      logGraph(graph);
+      provider.show(graph);
+    } catch (e) {
+      showError(e);
+    }
+  }
+}
+
+function findGraphNodeByLocation(
+  graph: { nodes: { id: string; source?: { file: string; line: number; endLine?: number } }[] },
+  source: { file: string; line: number },
+): string | undefined {
+  if (!graph.nodes || !source.file) return undefined;
+  const target = source.file.replace(/\\/g, "/").toLowerCase();
+  let best: string | undefined;
+  let bestDist = Infinity;
+  for (const node of graph.nodes) {
+    if (!node.source || !node.source.file) continue;
+    const nf = node.source.file.replace(/\\/g, "/").toLowerCase();
+    if (nf !== target) continue;
+    const start = node.source.line ?? 0;
+    const end = node.source.endLine ?? start;
+    if (source.line >= start && source.line <= end) {
+      const dist = source.line - start;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = node.id;
+      }
+    }
+  }
+  return best;
 }
 
 export function deactivate(): void {

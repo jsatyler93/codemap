@@ -7,7 +7,7 @@ import { NS, mkArrow } from "../../shared/panZoom.js";
 import { theme, moduleColor } from "../../shared/theme.js";
 import { cubicPt } from "../../shared/geometry.js";
 
-const NODE_W = 220, NODE_H = 28, NODE_PAD = 4;
+const NODE_W = 220, NODE_H = 42, NODE_PAD = 4;
 const MOD_PAD_TOP = 32, MOD_PAD_BOTTOM = 12, MOD_PAD_X = 16;
 const COL_GAP = 130, COL_TOP = 30;
 
@@ -16,6 +16,7 @@ export function renderCallGraph(graph, ctx) {
   const nodes = graph.nodes.map((n) => ({ ...n }));
   const edges = graph.edges;
   const isTrace = graph.graphType === "trace";
+  const options = ctx.displayOptions || { showTypes: true, showDetails: true };
 
   // ── SVG filters (glow) ──
   mkGlow(defs, "glow", 3);
@@ -131,6 +132,7 @@ export function renderCallGraph(graph, ctx) {
     const isClass = n.kind === "class";
     const isRoot = (graph.rootNodeIds || []).includes(n.id);
     const col = moduleColor(n.module || "");
+    const subtitle = options.showDetails ? buildNodeSubtitle(n, options) : "";
     nodeRect.set(n.id, { ...p, color: col });
 
     const g = document.createElementNS(NS, "g");
@@ -148,13 +150,22 @@ export function renderCallGraph(graph, ctx) {
 
     // Label with class diamond prefix
     const lb = document.createElementNS(NS, "text");
-    lb.setAttribute("x", "11"); lb.setAttribute("y", String(p.h / 2 + 1));
-    lb.setAttribute("dominant-baseline", "middle");
+    lb.setAttribute("x", "11"); lb.setAttribute("y", "14");
     lb.setAttribute("fill", isClass ? col + "dd" : "#8890aa");
     lb.setAttribute("font-size", "10");
     lb.setAttribute("font-weight", isClass ? "600" : "400");
     lb.textContent = (isClass ? "◆ " : "") + (n.label || n.id);
     g.appendChild(lb);
+
+    if (subtitle) {
+      const sub = document.createElementNS(NS, "text");
+      sub.setAttribute("x", "11");
+      sub.setAttribute("y", "29");
+      sub.setAttribute("fill", col + "88");
+      sub.setAttribute("font-size", "8");
+      sub.textContent = subtitle;
+      g.appendChild(sub);
+    }
 
     // Line number
     const lineNum = n.source && n.source.line ? n.source.line : null;
@@ -162,9 +173,8 @@ export function renderCallGraph(graph, ctx) {
     if (rightText) {
       const rt = document.createElementNS(NS, "text");
       rt.setAttribute("x", String(p.w - 7));
-      rt.setAttribute("y", String(p.h / 2 + 1));
+      rt.setAttribute("y", "13");
       rt.setAttribute("text-anchor", "end");
-      rt.setAttribute("dominant-baseline", "middle");
       rt.setAttribute("fill", "#222640");
       rt.setAttribute("font-size", "8");
       rt.textContent = rightText;
@@ -239,7 +249,7 @@ export function renderCallGraph(graph, ctx) {
     edgeLayer.appendChild(path);
 
     // Type label on edge (param types → return type)
-    const typeLabel = buildEdgeTypeLabel(e, nodes);
+    const typeLabel = options.showTypes ? buildEdgeTypeLabel(e, nodes) : "";
     if (e.label || typeLabel) {
       const mid = cubicPt(sx, sy, c1x, c1y, c2x, c2y, tx, ty, 0.5);
       if (e.label) {
@@ -530,4 +540,38 @@ function buildEdgeTypeLabel(edge, nodes) {
     parts.push("→ " + meta.returnType);
   }
   return parts.join(" ");
+}
+
+function buildNodeSubtitle(node, options) {
+  const meta = node.metadata || {};
+  if (node.kind === "function" || node.kind === "method") {
+    const params = Array.isArray(meta.params)
+      ? meta.params
+        .filter((param) => param && (options.showTypes ? param.type : true))
+        .slice(0, 2)
+        .map((param) => options.showTypes && param.type ? `${param.name}: ${param.type}` : `${param.name}`)
+      : [];
+    const parts = [];
+    if (params.length) {
+      parts.push(params.join(", "));
+    }
+    if (options.showTypes && meta.returnType) {
+      parts.push(`-> ${meta.returnType}`);
+    }
+    return trimText(parts.join("  "), 34);
+  }
+  if (node.kind === "class") {
+    const bases = Array.isArray(meta.bases) ? meta.bases.filter(Boolean) : [];
+    if (bases.length) {
+      return trimText(`bases: ${bases.join(", ")}`, 34);
+    }
+  }
+  return "";
+}
+
+function trimText(text, maxLen) {
+  if (!text || text.length <= maxLen) {
+    return text;
+  }
+  return text.slice(0, Math.max(0, maxLen - 1)) + "…";
 }

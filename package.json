@@ -13,7 +13,11 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:python"
+    "onLanguage:python",
+    "onCommand:codemap.showLiveCallGraph",
+    "onCommand:codemap.showLiveOutline",
+    "onCommand:codemap.toggleDebugSync",
+    "onDebug"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -41,6 +45,21 @@
       {
         "command": "codemap.refresh",
         "title": "CodeMap: Refresh Visualization",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.showLiveCallGraph",
+        "title": "CodeMap: Show Live Call Graph (any language)",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.showLiveOutline",
+        "title": "CodeMap: Show Live Document Outline (any language)",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.toggleDebugSync",
+        "title": "CodeMap: Toggle Live Debug Sync",
         "category": "CodeMap"
       }
     ],
@@ -81,6 +100,11 @@
           "type": "boolean",
           "default": true,
           "description": "If true and the 'jedi' package is installed in the analyzer's interpreter, use it to upgrade unresolved call sites with type-aware resolution."
+        },
+        "codemap.liveCallGraph.depth": {
+          "type": "number",
+          "default": 2,
+          "description": "Default depth for the live (VS Code-native) call graph in either direction."
         }
       }
     }
