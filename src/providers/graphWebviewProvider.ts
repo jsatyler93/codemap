@@ -149,7 +149,7 @@ export class GraphWebviewProvider {
     <button class="btn step" id="btn-step">&#9193; step-by-step</button>
     <button class="btn" id="btn-reset">reset</button>
     <button class="btn" id="btn-clear">clear</button>
-    <button class="btn" id="btn-refresh">refresh</button>
+    <button class="btn" id="btn-refresh">&#x21bb; refresh</button>
     <label class="tick"><input id="toggle-overlay-legacy" type="checkbox" checked /> last-writer</label>
     <label class="tick"><input id="toggle-overlay-modern" type="checkbox" checked /> reaching-defs + interproc</label>
     <input id="search-box" type="text" placeholder="Search..." />

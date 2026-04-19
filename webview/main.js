@@ -217,7 +217,7 @@ function renderGraph(graph, options = {}) {
       safeRenderSuperimposed(graph, result, ctx);
     } else {
       result = renderCallGraph(graph, ctx);
-      updateOverlayBadge(graph, result);
+      safeRenderSuperimposed(graph, result, ctx);
     }
     current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
 
@@ -250,7 +250,10 @@ function renderGraph(graph, options = {}) {
 }
 
 function safeRenderSuperimposed(graph, result, ctx) {
-  if (graph.graphType !== "flowchart") {
+  const supported = graph.graphType === "flowchart"
+    || graph.graphType === "callgraph"
+    || graph.graphType === "workspace";
+  if (!supported) {
     updateOverlayBadge(graph, result);
     return;
   }
@@ -265,7 +268,12 @@ function safeRenderSuperimposed(graph, result, ctx) {
 
 function updateOverlayBadge(graph, result) {
   if (!overlayBadge) return;
-  if (!graph || graph.graphType !== "flowchart") {
+  const supported = graph && (
+    graph.graphType === "flowchart"
+    || graph.graphType === "callgraph"
+    || graph.graphType === "workspace"
+  );
+  if (!supported) {
     overlayBadge.classList.remove("visible");
     overlayBadge.textContent = "";
     return;
@@ -275,7 +283,8 @@ function updateOverlayBadge(graph, result) {
   if (overlayPrefs.showModernOverlay) modeParts.push("Reaching-Defs + Interprocedural");
   const modeLabel = modeParts.length ? modeParts.join(" + ") : "off";
   const nodeCount = result?.nodeRect ? result.nodeRect.size : (Array.isArray(graph.nodes) ? graph.nodes.length : 0);
-  overlayBadge.textContent = `Flowchart Overlay: ${modeLabel} (${nodeCount} nodes)`;
+  const titlePrefix = graph.graphType === "flowchart" ? "Flowchart Overlay" : "Call Graph Overlay";
+  overlayBadge.textContent = `${titlePrefix}: ${modeLabel} (${nodeCount} nodes)`;
   overlayBadge.classList.add("visible");
 }
 
