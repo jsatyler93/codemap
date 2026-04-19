@@ -7,7 +7,12 @@ export class GraphWebviewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private lastGraph: GraphDocument | undefined;
   private lastRuntime: { frame: RuntimeFrameView | null; highlightNodeIds?: string[] } | undefined;
-  private uiState: UiStateView = { showEvidence: false };
+  private uiState: UiStateView = {
+    showEvidence: false,
+    repelStrength: 0.45,
+    attractStrength: 0.32,
+    ambientRepelStrength: 0.18,
+  };
 
   constructor(
     private readonly context: vscode.ExtensionContext,

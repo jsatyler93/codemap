@@ -19,6 +19,11 @@ const GROUP_TOGGLE_R = 8;
 export function renderFlowchart(graph, ctx) {
   const { root, defs } = ctx;
   const canvasState = ctx.canvas?.state;
+  const forceOptions = {
+    overlapRepel: clamp01(ctx.uiState?.repelStrength ?? 0.35),
+    linkAttract: clamp01(ctx.uiState?.attractStrength ?? 0.28),
+    ambientRepel: clamp01(ctx.uiState?.ambientRepelStrength ?? 0.18),
+  };
   const savedSnapshot = ctx.layoutSnapshot || {};
   const savedNodes = savedSnapshot.nodes || {};
   const savedGroups = savedSnapshot.groups || {};
@@ -89,6 +94,8 @@ export function renderFlowchart(graph, ctx) {
     pos.y = saved.y;
   }
 
+  applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOptions);
+
   const nodeRectAll = new Map();
   for (const node of nodes) {
     const pos = positions.get(node.id);
@@ -102,6 +109,7 @@ export function renderFlowchart(graph, ctx) {
       color: theme.nodeColor[node.kind] || theme.nodeColor.process,
     });
   }
+  const collisionAnchors = new Map(Array.from(nodeRectAll.entries()).map(([nodeId, rect]) => [nodeId, { x: rect.x, y: rect.y }]));
 
   const groups = normalizeGroups(graph.metadata?.groups || []);
   const groupById = new Map(groups.map((group) => [group.id, group]));
@@ -115,6 +123,7 @@ export function renderFlowchart(graph, ctx) {
   const groupDepth = buildGroupDepthMap(groups);
 
   const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
+  resolveFlowNodeSeparation(new Set(), visibility.visibleNodeIds);
   let loopLaneRanks = buildLoopLaneRanks(nodes, positions, visibility.visibleNodeIds, groupDepth);
 
   const groupLayer = document.createElementNS(NS, "g"); root.appendChild(groupLayer);
@@ -226,8 +235,9 @@ export function renderFlowchart(graph, ctx) {
       if (!dragState.moved) return;
       rect.x = dragState.startX + dx;
       rect.y = dragState.startY + dy;
+      syncPositionFromRect(node.id);
       updateNodePosition(node.id);
-      refreshAllGeometry();
+      refreshAllGeometry(new Set([node.id]), visibility.visibleNodeIds);
       event.stopPropagation();
       event.preventDefault();
     });
@@ -375,6 +385,7 @@ export function renderFlowchart(graph, ctx) {
       const state = groupState.get(group.id);
       if (state) state.collapsed = false;
     });
+    resolveFlowNodeSeparation(new Set(), new Set(nodes.map((node) => node.id)));
     persistLayout();
     ctx.requestRender?.();
   };
@@ -498,6 +509,7 @@ export function renderFlowchart(graph, ctx) {
       if (!rect) continue;
       rect.x += dx;
       rect.y += dy;
+      syncPositionFromRect(nodeId);
     }
     const ids = [groupId, ...(groupDescendants.get(groupId) || [])];
     for (const id of ids) {
@@ -515,7 +527,83 @@ export function renderFlowchart(graph, ctx) {
     group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
   }
 
-  function refreshAllGeometry() {
+  function syncPositionFromRect(nodeId) {
+    const rect = nodeRectAll.get(nodeId);
+    const pos = positions.get(nodeId);
+    if (!rect || !pos) return;
+    pos.x = rect.x;
+    pos.y = rect.y;
+  }
+
+  function resolveFlowNodeSeparation(fixedIds = new Set(), activeNodeIds = visibility.visibleNodeIds) {
+    const ids = Array.from(activeNodeIds || []).filter((nodeId) => nodeRectAll.has(nodeId));
+    if (ids.length < 2) return;
+    for (let pass = 0; pass < 4; pass++) {
+      for (let i = 0; i < ids.length; i++) {
+        const leftId = ids[i];
+        const left = nodeRectAll.get(leftId);
+        if (!left) continue;
+        for (let j = i + 1; j < ids.length; j++) {
+          const rightId = ids[j];
+          const right = nodeRectAll.get(rightId);
+          if (!right) continue;
+          const overlapX = Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x);
+          const overlapY = Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y);
+          if (overlapX <= 0 || overlapY <= 0) continue;
+          const leftFixed = fixedIds.has(leftId);
+          const rightFixed = fixedIds.has(rightId);
+          if (leftFixed && rightFixed) continue;
+          const xDirection = Math.sign((left.x + left.w / 2) - (right.x + right.w / 2))
+            || Math.sign((collisionAnchors.get(leftId)?.x || 0) - (collisionAnchors.get(rightId)?.x || 0))
+            || (((left.x + left.w / 2) <= (right.x + right.w / 2)) ? -1 : 1);
+          const xShift = overlapX / 2 + 10;
+          applyFlowHorizontalSeparation(leftId, rightId, xDirection, xShift, leftFixed, rightFixed);
+          if (overlapY > 10) {
+            const yDirection = Math.sign((collisionAnchors.get(leftId)?.y || 0) - (collisionAnchors.get(rightId)?.y || 0)) || (i % 2 === 0 ? -1 : 1);
+            const yShift = Math.min(12, overlapY / 4 + 2);
+            applyFlowVerticalSeparation(leftId, rightId, yDirection, yShift, leftFixed, rightFixed);
+          }
+        }
+      }
+      const ordered = ids.slice().sort((leftId, rightId) => (nodeRectAll.get(leftId).y - nodeRectAll.get(rightId).y));
+      for (let index = 1; index < ordered.length; index++) {
+        const prev = nodeRectAll.get(ordered[index - 1]);
+        const currId = ordered[index];
+        const curr = nodeRectAll.get(currId);
+        if (!prev || !curr || fixedIds.has(currId)) continue;
+        const minY = prev.y + prev.h + ROW_GAP * 0.35;
+        if (curr.y < minY) curr.y = minY;
+      }
+    }
+    ids.forEach((nodeId) => syncPositionFromRect(nodeId));
+  }
+
+  function applyFlowHorizontalSeparation(leftId, rightId, direction, shift, leftFixed, rightFixed) {
+    const left = nodeRectAll.get(leftId);
+    const right = nodeRectAll.get(rightId);
+    if (!left || !right) return;
+    const leftShare = rightFixed ? 1 : leftFixed ? 0 : 0.5;
+    const rightShare = leftFixed ? 1 : rightFixed ? 0 : 0.5;
+    const leftAnchor = collisionAnchors.get(leftId) || left;
+    const rightAnchor = collisionAnchors.get(rightId) || right;
+    const travel = Math.sign(direction || 1) * shift;
+    if (!leftFixed) left.x = clamp(left.x + travel * leftShare, leftAnchor.x - 160, leftAnchor.x + 160);
+    if (!rightFixed) right.x = clamp(right.x - travel * rightShare, rightAnchor.x - 160, rightAnchor.x + 160);
+  }
+
+  function applyFlowVerticalSeparation(leftId, rightId, direction, shift, leftFixed, rightFixed) {
+    const left = nodeRectAll.get(leftId);
+    const right = nodeRectAll.get(rightId);
+    if (!left || !right) return;
+    const leftShare = rightFixed ? 1 : leftFixed ? 0 : 0.5;
+    const rightShare = leftFixed ? 1 : rightFixed ? 0 : 0.5;
+    const travel = Math.sign(direction || 1) * shift;
+    if (!leftFixed) left.y += travel * leftShare;
+    if (!rightFixed) right.y -= travel * rightShare;
+  }
+
+  function refreshAllGeometry(fixedIds = new Set(), activeNodeIds = visibility.visibleNodeIds) {
+    resolveFlowNodeSeparation(fixedIds, activeNodeIds);
     collapsedGroupRects = computeCollapsedGroupRects(visibility.visibleCollapsedGroupIds, groupById, groupState, nodeRectAll);
     expandedGroupBounds = computeExpandedGroupBounds(
       visibility.visibleExpandedGroupIds,
@@ -566,6 +654,7 @@ export function renderFlowchart(graph, ctx) {
   function toggleGroup(groupId) {
     const state = groupState.get(groupId);
     if (!state) return;
+    const expanding = !!state.collapsed;
     if (!state.collapsed) {
       const rect = expandedGroupBounds.get(groupId);
       if (rect) {
@@ -574,6 +663,11 @@ export function renderFlowchart(graph, ctx) {
       }
     }
     state.collapsed = !state.collapsed;
+    if (expanding) {
+      const group = groupById.get(groupId);
+      const nextVisibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
+      resolveFlowNodeSeparation(new Set(group?.nodeIds || []), nextVisibility.visibleNodeIds);
+    }
     persistLayout();
     ctx.requestRender?.();
   }
@@ -1138,4 +1232,108 @@ function prepareNode(node) {
 
 function groupKey(groupId) {
   return `group:${groupId}`;
+}
+
+function applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOptions) {
+  const overlapRepel = clamp01(forceOptions?.overlapRepel ?? 0.35);
+  const linkAttract = clamp01(forceOptions?.linkAttract ?? 0.28);
+  const ambientRepel = clamp01(forceOptions?.ambientRepel ?? 0.18);
+  if (overlapRepel <= 0.001 && linkAttract <= 0.001 && ambientRepel <= 0.001) return;
+  const ids = Array.from(positions.keys());
+  const anchors = new Map(ids.map((nodeId) => [nodeId, {
+    x: positions.get(nodeId).x,
+    y: positions.get(nodeId).y,
+  }]));
+  const order = ids
+    .map((nodeId) => ({ nodeId, y: positions.get(nodeId).y }))
+    .sort((left, right) => left.y - right.y)
+    .map((entry) => entry.nodeId);
+  const laneBias = new Map();
+  ids.forEach((nodeId) => {
+    const outs = outgoing.get(nodeId) || [];
+    if (outs.length <= 1) {
+      laneBias.set(nodeId, 0);
+      return;
+    }
+    const bias = outs.reduce((sum, edge) => sum + ((positions.get(edge.to)?.x || 0) - positions.get(nodeId).x), 0) / outs.length;
+    laneBias.set(nodeId, bias);
+  });
+  const neighbors = new Map();
+  ids.forEach((nodeId) => neighbors.set(nodeId, new Set()));
+  outgoing.forEach((outs, nodeId) => {
+    outs.forEach((edge) => {
+      neighbors.get(nodeId)?.add(edge.to);
+      neighbors.get(edge.to)?.add(nodeId);
+    });
+  });
+
+  const passes = Math.round(4 + Math.max(overlapRepel, linkAttract, ambientRepel) * 8);
+  const gapX = 28 + overlapRepel * 66 + ambientRepel * 22;
+  const gapY = 20 + overlapRepel * 26;
+  const ambientRadiusX = NODE_W + 54 + ambientRepel * 110;
+  for (let pass = 0; pass < passes; pass++) {
+    for (let i = 0; i < ids.length; i++) {
+      const leftId = ids[i];
+      const left = positions.get(leftId);
+      const leftAnchor = anchors.get(leftId);
+      const leftH = prepared.get(leftId)?.h || NODE_MIN_H;
+      for (let j = i + 1; j < ids.length; j++) {
+        const rightId = ids[j];
+        const right = positions.get(rightId);
+        const rightAnchor = anchors.get(rightId);
+        const rightH = prepared.get(rightId)?.h || NODE_MIN_H;
+        const centerDx = (left.x + NODE_W / 2) - (right.x + NODE_W / 2);
+        const centerDy = (left.y + leftH / 2) - (right.y + rightH / 2);
+        const isLinked = neighbors.get(leftId)?.has(rightId) || false;
+        if (isLinked && linkAttract > 0.001) {
+          const xPull = ((leftAnchor.x + rightAnchor.x) / 2 - (left.x + right.x) / 2) * (0.018 + linkAttract * 0.042);
+          left.x += xPull;
+          right.x += xPull;
+          const avgY = ((leftAnchor.y + rightAnchor.y) / 2) - ((left.y + right.y) / 2);
+          left.y += avgY * (0.01 + linkAttract * 0.015);
+          right.y += avgY * (0.01 + linkAttract * 0.015);
+        }
+        if (!isLinked && ambientRepel > 0.001 && Math.abs(centerDx) < ambientRadiusX && Math.abs(centerDy) < gapY * 1.4) {
+          const push = (1 - Math.abs(centerDx) / ambientRadiusX) * (1.2 + ambientRepel * 3.6);
+          const signedX = centerDx === 0 ? ((laneBias.get(leftId) || 0) >= (laneBias.get(rightId) || 0) ? -1 : 1) : Math.sign(centerDx);
+          left.x += signedX * push;
+          right.x -= signedX * push;
+        }
+        const overlapX = NODE_W + gapX - Math.abs(centerDx);
+        const overlapY = (leftH + rightH) / 2 + gapY - Math.abs(centerDy);
+        if (overlapX > 0 && overlapY > 0 && overlapRepel > 0.001) {
+          const push = Math.min(overlapX, overlapY) * (0.045 + overlapRepel * 0.07);
+          const signedX = centerDx === 0 ? ((laneBias.get(leftId) || 0) >= (laneBias.get(rightId) || 0) ? -1 : 1) : Math.sign(centerDx);
+          const bias = ((laneBias.get(leftId) || 0) - (laneBias.get(rightId) || 0)) * 0.0025;
+          left.x += (signedX + bias) * push;
+          right.x -= (signedX + bias) * push;
+        }
+      }
+    }
+
+    ids.forEach((nodeId) => {
+      const pos = positions.get(nodeId);
+      const anchor = anchors.get(nodeId);
+      pos.x = anchor.x + (pos.x - anchor.x) * (0.7 + linkAttract * 0.08);
+    });
+
+    for (let index = 1; index < order.length; index++) {
+      const prevId = order[index - 1];
+      const currId = order[index];
+      const prev = positions.get(prevId);
+      const curr = positions.get(currId);
+      const prevH = prepared.get(prevId)?.h || NODE_MIN_H;
+      const minY = prev.y + prevH + ROW_GAP * 0.55;
+      if (curr.y < minY) curr.y = minY;
+    }
+  }
+}
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0.35;
+  return Math.max(0, Math.min(1, value));
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }

@@ -68,6 +68,9 @@ export interface SetRuntimeFrameMessage {
 
 export interface UiStateView {
   showEvidence: boolean;
+  repelStrength: number;
+  attractStrength: number;
+  ambientRepelStrength: number;
 }
 
 export interface SetUiStateMessage {

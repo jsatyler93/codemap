@@ -13,8 +13,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("CodeMap");
   context.subscriptions.push(output);
   let provider: GraphWebviewProvider;
-  const actionsViewProvider = new ActionsViewProvider(context, (enabled) => {
-    provider.updateUiState({ showEvidence: enabled });
+  const actionsViewProvider = new ActionsViewProvider(context, (state) => {
+    provider.updateUiState(state);
   });
   const fileTreeProvider = new FileTreeProvider(context);
   context.subscriptions.push(
@@ -94,7 +94,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     },
   );
-  provider.updateUiState({ showEvidence: actionsViewProvider.getShowEvidence() });
+  provider.updateUiState(actionsViewProvider.getUiState());
 
   const navController = new NavigationController(
     context.extensionPath,

@@ -20,6 +20,11 @@ export function renderCallGraph(graph, ctx) {
   const edges = graph.edges;
   const isTrace = graph.graphType === "trace";
   const canvasState = ctx.canvas?.state;
+  const forceOptions = {
+    overlapRepel: clamp01(ctx.uiState?.repelStrength ?? 0.35),
+    linkAttract: clamp01(ctx.uiState?.attractStrength ?? 0.28),
+    ambientRepel: clamp01(ctx.uiState?.ambientRepelStrength ?? 0.18),
+  };
   const savedNodes = ctx.layoutSnapshot?.nodes || {};
   const savedGroups = ctx.layoutSnapshot?.groups || {};
   let suppressPointerClicksUntil = 0;
@@ -138,6 +143,9 @@ export function renderCallGraph(graph, ctx) {
   if (Object.keys(savedNodes).length === 0) {
     applyOrganicLayout(moduleOrder, moduleNodes, nodePos, edges);
   }
+  applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMembers, edges, forceOptions);
+  const collisionAnchors = new Map(Array.from(nodePos.entries()).map(([nodeId, pos]) => [nodeId, { x: pos.x, y: pos.y }]));
+  resolveCallGraphNodeSeparation();
   function computeModuleBounds(mod) {
     if (isModuleCollapsed(mod)) return computeCollapsedModuleBounds(moduleMembers.get(mod) || [], nodePos);
     return computeModuleBoundsForItems((moduleMembers.get(mod) || []).filter((nodeId) => isNodeVisible(nodeId)), nodePos);
@@ -224,15 +232,9 @@ export function renderCallGraph(graph, ctx) {
           if (!pos) return;
           pos.x = member.x + dx;
           pos.y = member.y + dy;
-          updateNodePosition(member.nodeId);
         });
-        updateClassFrame(group.id);
-        updateModuleFrame(group.module);
-        edgeRecords.forEach((edge) => {
-          if (group.memberIds.includes(edge.src) || group.memberIds.includes(edge.tgt)) {
-            updateEdgeGeometry(edge);
-          }
-        });
+        resolveCallGraphNodeSeparation(new Set(group.memberIds));
+        refreshAllLayoutGeometry();
         e.stopPropagation();
         e.preventDefault();
       };
@@ -313,15 +315,9 @@ export function renderCallGraph(graph, ctx) {
         if (!pos) return;
         pos.x = member.x + dx;
         pos.y = member.y + dy;
-        updateNodePosition(member.nodeId);
       });
-      updateClassFramesForModule(mod);
-      updateModuleFrame(mod);
-      edgeRecords.forEach((edge) => {
-        if (edge.fromMod === mod || edge.toMod === mod) {
-          updateEdgeGeometry(edge);
-        }
-      });
+      resolveCallGraphNodeSeparation(new Set(moduleMembers.get(mod) || []));
+      refreshAllLayoutGeometry();
       e.stopPropagation();
       e.preventDefault();
     };
@@ -468,8 +464,8 @@ export function renderCallGraph(graph, ctx) {
       if (!pos) return;
       pos.x = dragState.startX + dx;
       pos.y = dragState.startY + dy;
-      updateNodePosition(n.id);
-      refreshLayoutForNode(n.id);
+      resolveCallGraphNodeSeparation(new Set([n.id]));
+      refreshAllLayoutGeometry();
       e.stopPropagation();
       e.preventDefault();
     });
@@ -624,6 +620,84 @@ export function renderCallGraph(graph, ctx) {
     classGroups.forEach((group) => {
       if (group.module === mod) updateClassFrame(group.id);
     });
+  }
+
+  function visibleNodeIds() {
+    return nodes.map((node) => node.id).filter((nodeId) => nodePos.has(nodeId) && isNodeVisible(nodeId));
+  }
+
+  function refreshAllLayoutGeometry() {
+    visibleNodeIds().forEach((nodeId) => updateNodePosition(nodeId));
+    classGroups.forEach((group) => updateClassFrame(group.id));
+    moduleOrder.forEach((mod) => updateModuleFrame(mod));
+    edgeRecords.forEach((edge) => updateEdgeGeometry(edge));
+  }
+
+  function resolveCallGraphNodeSeparation(fixedIds = new Set()) {
+    const ids = visibleNodeIds();
+    if (ids.length < 2) return;
+    const moduleIndex = new Map(moduleOrder.map((mod, index) => [mod, index]));
+    const passes = 4;
+    for (let pass = 0; pass < passes; pass++) {
+      for (let i = 0; i < ids.length; i++) {
+        const leftId = ids[i];
+        const left = nodePos.get(leftId);
+        if (!left) continue;
+        for (let j = i + 1; j < ids.length; j++) {
+          const rightId = ids[j];
+          const right = nodePos.get(rightId);
+          if (!right) continue;
+          const overlapX = Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x);
+          const overlapY = Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y);
+          if (overlapX <= 0 || overlapY <= 0) continue;
+          const sameModule = nodeToModule[leftId] === nodeToModule[rightId];
+          const leftFixed = fixedIds.has(leftId);
+          const rightFixed = fixedIds.has(rightId);
+          if (leftFixed && rightFixed) continue;
+          if (sameModule) {
+            const direction = Math.sign((left.y + left.h / 2) - (right.y + right.h / 2))
+              || Math.sign((collisionAnchors.get(leftId)?.y || 0) - (collisionAnchors.get(rightId)?.y || 0))
+              || (i % 2 === 0 ? -1 : 1);
+            const shift = overlapY / 2 + 6;
+            applyVerticalSeparation(leftId, rightId, direction, shift, leftFixed, rightFixed);
+          } else {
+            const direction = Math.sign((left.x + left.w / 2) - (right.x + right.w / 2))
+              || Math.sign((moduleIndex.get(nodeToModule[leftId]) || 0) - (moduleIndex.get(nodeToModule[rightId]) || 0))
+              || (i % 2 === 0 ? -1 : 1);
+            const shift = overlapX / 2 + 10;
+            applyHorizontalSeparation(leftId, rightId, direction, shift, leftFixed, rightFixed);
+            if (overlapY > 10) {
+              const vertical = Math.min(14, overlapY / 3);
+              applyVerticalSeparation(leftId, rightId, i % 2 === 0 ? -1 : 1, vertical, leftFixed, rightFixed);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function applyHorizontalSeparation(leftId, rightId, direction, shift, leftFixed, rightFixed) {
+    const left = nodePos.get(leftId);
+    const right = nodePos.get(rightId);
+    if (!left || !right) return;
+    const leftShare = rightFixed ? 1 : leftFixed ? 0 : 0.5;
+    const rightShare = leftFixed ? 1 : rightFixed ? 0 : 0.5;
+    const leftAnchor = collisionAnchors.get(leftId) || left;
+    const rightAnchor = collisionAnchors.get(rightId) || right;
+    const travel = Math.sign(direction || 1) * shift;
+    if (!leftFixed) left.x = clamp(left.x + travel * leftShare, leftAnchor.x - 70, leftAnchor.x + 70);
+    if (!rightFixed) right.x = clamp(right.x - travel * rightShare, rightAnchor.x - 70, rightAnchor.x + 70);
+  }
+
+  function applyVerticalSeparation(leftId, rightId, direction, shift, leftFixed, rightFixed) {
+    const left = nodePos.get(leftId);
+    const right = nodePos.get(rightId);
+    if (!left || !right) return;
+    const leftShare = rightFixed ? 1 : leftFixed ? 0 : 0.5;
+    const rightShare = leftFixed ? 1 : rightFixed ? 0 : 0.5;
+    const travel = Math.sign(direction || 1) * shift;
+    if (!leftFixed) left.y += travel * leftShare;
+    if (!rightFixed) right.y -= travel * rightShare;
   }
 
   function updateEdgeGeometry(edge) {
@@ -841,6 +915,7 @@ export function renderCallGraph(graph, ctx) {
       const state = classGroupState.get(group.id);
       if (state) state.collapsed = false;
     });
+    resolveCallGraphNodeSeparation();
     persistLayout();
     ctx.requestRender?.();
   };
@@ -1014,7 +1089,11 @@ export function renderCallGraph(graph, ctx) {
   function toggleModuleGroup(mod) {
     const state = moduleState.get(mod);
     if (!state) return;
+    const expanding = !!state.collapsed;
     state.collapsed = !state.collapsed;
+    if (expanding) {
+      resolveCallGraphNodeSeparation(new Set(moduleMembers.get(mod) || []));
+    }
     persistLayout();
     ctx.requestRender?.();
   }
@@ -1022,7 +1101,12 @@ export function renderCallGraph(graph, ctx) {
   function toggleClassGroup(groupId) {
     const state = classGroupState.get(groupId);
     if (!state) return;
+    const expanding = !!state.collapsed;
     state.collapsed = !state.collapsed;
+    if (expanding) {
+      const group = classGroupMap.get(groupId);
+      resolveCallGraphNodeSeparation(new Set(group?.memberIds || []));
+    }
     persistLayout();
     ctx.requestRender?.();
   }
@@ -1338,6 +1422,97 @@ function pickAnchor(source, target, laneOffset = 0) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0.35;
+  return Math.max(0, Math.min(1, value));
+}
+
+function applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMembers, edges, forceOptions) {
+  const overlapRepel = clamp01(forceOptions?.overlapRepel ?? 0.35);
+  const linkAttract = clamp01(forceOptions?.linkAttract ?? 0.28);
+  const ambientRepel = clamp01(forceOptions?.ambientRepel ?? 0.18);
+  if (overlapRepel <= 0.001 && linkAttract <= 0.001 && ambientRepel <= 0.001) return;
+  const anchors = new Map();
+  nodePos.forEach((pos, nodeId) => {
+    anchors.set(nodeId, { x: pos.x, y: pos.y });
+  });
+  const neighbors = new Map();
+  edges.forEach((edge) => {
+    if (!neighbors.has(edge.from)) neighbors.set(edge.from, new Set());
+    if (!neighbors.has(edge.to)) neighbors.set(edge.to, new Set());
+    neighbors.get(edge.from).add(edge.to);
+    neighbors.get(edge.to).add(edge.from);
+  });
+  const passes = Math.round(4 + Math.max(overlapRepel, linkAttract, ambientRepel) * 8);
+  const minGapY = NODE_H + NODE_PAD + 4 + overlapRepel * 10 + ambientRepel * 8;
+  const maxModuleShift = 26 + overlapRepel * 32 + ambientRepel * 26;
+  const intraShift = 12 + overlapRepel * 18 + ambientRepel * 8;
+  const attractRadiusY = NODE_H + 56 + linkAttract * 60;
+  const ambientRadiusY = NODE_H + 30 + ambientRepel * 26;
+
+  for (let pass = 0; pass < passes; pass++) {
+    for (const mod of moduleOrder) {
+      const itemIds = (moduleNodes.get(mod) || []).map((item) => item.id).filter((nodeId) => nodePos.has(nodeId));
+      itemIds.sort((left, right) => (nodePos.get(left).y - nodePos.get(right).y));
+      for (let i = 1; i < itemIds.length; i++) {
+        const prev = nodePos.get(itemIds[i - 1]);
+        const curr = nodePos.get(itemIds[i]);
+        const overlap = prev.y + minGapY - curr.y;
+        if (overlap > 0) curr.y += overlap;
+      }
+      const moduleAnchorX = average(itemIds.map((nodeId) => anchors.get(nodeId)?.x || 0));
+      itemIds.forEach((nodeId) => {
+        const pos = nodePos.get(nodeId);
+        const anchor = anchors.get(nodeId);
+        pos.x = clamp(
+          moduleAnchorX + (pos.x - moduleAnchorX) * 0.82 + (anchor.x - moduleAnchorX) * 0.18,
+          moduleAnchorX - maxModuleShift,
+          moduleAnchorX + maxModuleShift,
+        );
+      });
+      for (let i = 0; i < itemIds.length; i++) {
+        const leftId = itemIds[i];
+        const left = nodePos.get(leftId);
+        const leftAnchor = anchors.get(leftId);
+        for (let j = i + 1; j < itemIds.length; j++) {
+          const rightId = itemIds[j];
+          const right = nodePos.get(rightId);
+          const rightAnchor = anchors.get(rightId);
+          const dy = (left.y + NODE_H / 2) - (right.y + NODE_H / 2);
+          const isLinked = neighbors.get(leftId)?.has(rightId) || false;
+          if (isLinked && linkAttract > 0.001 && Math.abs(dy) < attractRadiusY) {
+            const targetMidY = (leftAnchor.y + rightAnchor.y) / 2;
+            left.y += (targetMidY - left.y) * (0.025 + linkAttract * 0.035);
+            right.y += (targetMidY - right.y) * (0.025 + linkAttract * 0.035);
+            const desiredDeltaX = (leftAnchor.x - rightAnchor.x) * 0.55;
+            const currentDeltaX = left.x - right.x;
+            const pullX = (desiredDeltaX - currentDeltaX) * (0.02 + linkAttract * 0.03);
+            left.x = clamp(left.x + pullX, moduleAnchorX - maxModuleShift, moduleAnchorX + maxModuleShift);
+            right.x = clamp(right.x - pullX, moduleAnchorX - maxModuleShift, moduleAnchorX + maxModuleShift);
+          }
+          if (ambientRepel > 0.001 && !isLinked && Math.abs(dy) <= ambientRadiusY) {
+            const push = (1 - Math.abs(dy) / ambientRadiusY) * (1.4 + ambientRepel * 4.2);
+            const direction = (leftAnchor.x - rightAnchor.x) || (i % 2 === 0 ? -1 : 1);
+            left.x = clamp(left.x + Math.sign(direction) * push, moduleAnchorX - intraShift, moduleAnchorX + intraShift);
+            right.x = clamp(right.x - Math.sign(direction) * push, moduleAnchorX - intraShift, moduleAnchorX + intraShift);
+          }
+          if (overlapRepel > 0.001 && Math.abs(dy) <= NODE_H + 28 + overlapRepel * 14) {
+            const push = (1 - Math.abs(dy) / (NODE_H + 28 + overlapRepel * 14)) * (1.8 + overlapRepel * 4.5);
+            const direction = (leftAnchor.x - rightAnchor.x) || (i % 2 === 0 ? -1 : 1);
+            left.x = clamp(left.x + Math.sign(direction) * push, moduleAnchorX - intraShift, moduleAnchorX + intraShift);
+            right.x = clamp(right.x - Math.sign(direction) * push, moduleAnchorX - intraShift, moduleAnchorX + intraShift);
+          }
+        }
+      }
+    }
+  }
+}
+
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function cssId(s) {

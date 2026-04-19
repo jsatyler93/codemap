@@ -26,8 +26,9 @@ const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let time = 0;
-let uiState = { showEvidence: false };
+let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18 };
 let lastStepParticleAt = 0;
+let pendingUiStateRender = null;
 const LAYOUT_STORAGE_PREFIX = "codemap.layout.v1:";
 const STEP_PARTICLE_INTERVAL_MS = 1150;
 
@@ -182,6 +183,7 @@ function renderGraph(graph, options = {}) {
       root: canvas.root,
       defs: canvas.defs,
       canvas: canvas,
+      uiState,
       layoutSnapshot: loadLayoutSnapshot(layoutKey),
       onLayoutChanged: (snapshot) => saveLayoutSnapshot(layoutKey, snapshot),
       requestRender: () => {
@@ -225,6 +227,15 @@ function renderGraph(graph, options = {}) {
     const msg = err && err.stack ? err.stack : String(err);
     vscode.postMessage({ type: "debug", message: "[render-error] " + msg });
   }
+}
+
+function scheduleUiStateRender() {
+  if (!currentGraph) return;
+  if (pendingUiStateRender) clearTimeout(pendingUiStateRender);
+  pendingUiStateRender = setTimeout(() => {
+    pendingUiStateRender = null;
+    renderGraph(currentGraph, { preserveView: true });
+  }, 70);
 }
 
 function updateLegend(graph) {
@@ -282,6 +293,7 @@ window.addEventListener("message", (event) => {
   } else if (msg && msg.type === "setUiState") {
     uiState = { ...uiState, ...(msg.state || {}) };
     hideTooltip();
+    scheduleUiStateRender();
   }
 });
 
