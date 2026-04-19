@@ -20,6 +20,8 @@ export function renderCallGraph(graph, ctx) {
   const nodes = graph.nodes.map((n) => ({ ...n }));
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const edges = graph.edges;
+  const savedNodes = ctx.layoutSnapshot?.nodes || {};
+  const savedGroups = ctx.layoutSnapshot?.groups || {};
   const hasPersistedNodeCircleState = nodes.some((node) => typeof savedNodes[node.id]?.circleCollapsed === "boolean");
   const isTrace = graph.graphType === "trace";
   const canvasState = ctx.canvas?.state;
@@ -29,8 +31,6 @@ export function renderCallGraph(graph, ctx) {
     ambientRepel: clamp01(ctx.uiState?.ambientRepelStrength ?? 0.18),
     cohesion: clamp01(ctx.uiState?.cohesionStrength ?? 0.34),
   };
-  const savedNodes = ctx.layoutSnapshot?.nodes || {};
-  const savedGroups = ctx.layoutSnapshot?.groups || {};
   let suppressPointerClicksUntil = 0;
 
   // ── SVG filters (glow) ──
