@@ -4,6 +4,8 @@ const SHOW_EVIDENCE_KEY = "codemap.showEvidence";
 const REPEL_STRENGTH_KEY = "codemap.repelStrength";
 const ATTRACT_STRENGTH_KEY = "codemap.attractStrength";
 const AMBIENT_REPEL_STRENGTH_KEY = "codemap.ambientRepelStrength";
+const COHESION_STRENGTH_KEY = "codemap.cohesionStrength";
+const TREE_VIEW_KEY = "codemap.treeView";
 
 interface ExecuteCommandMessage {
   type: "executeCommand";
@@ -30,11 +32,21 @@ interface SetAmbientRepelStrengthMessage {
   value: number;
 }
 
+interface SetCohesionStrengthMessage {
+  type: "setCohesionStrength";
+  value: number;
+}
+
+interface ToggleTreeViewMessage {
+  type: "toggleTreeView";
+  enabled: boolean;
+}
+
 interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -50,15 +62,19 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private repelStrength: number;
   private attractStrength: number;
   private ambientRepelStrength: number;
+  private cohesionStrength: number;
+  private treeView: boolean;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number }) => void,
+    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; treeView: boolean }) => void,
   ) {
     this.showEvidence = context.workspaceState.get<boolean>(SHOW_EVIDENCE_KEY, false);
     this.repelStrength = clamp01(context.workspaceState.get<number>(REPEL_STRENGTH_KEY, 0.45));
     this.attractStrength = clamp01(context.workspaceState.get<number>(ATTRACT_STRENGTH_KEY, 0.32));
     this.ambientRepelStrength = clamp01(context.workspaceState.get<number>(AMBIENT_REPEL_STRENGTH_KEY, 0.18));
+    this.cohesionStrength = clamp01(context.workspaceState.get<number>(COHESION_STRENGTH_KEY, 0.34));
+    this.treeView = context.workspaceState.get<boolean>(TREE_VIEW_KEY, false);
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -87,6 +103,16 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === "setAmbientRepelStrength") {
         this.ambientRepelStrength = clamp01(msg.value);
         void this.context.workspaceState.update(AMBIENT_REPEL_STRENGTH_KEY, this.ambientRepelStrength);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "setCohesionStrength") {
+        this.cohesionStrength = clamp01(msg.value);
+        void this.context.workspaceState.update(COHESION_STRENGTH_KEY, this.cohesionStrength);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "toggleTreeView") {
+        this.treeView = !!msg.enabled;
+        void this.context.workspaceState.update(TREE_VIEW_KEY, this.treeView);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "ready") {
@@ -118,12 +144,14 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.showEvidence;
   }
 
-  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number } {
+  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; treeView: boolean } {
     return {
       showEvidence: this.showEvidence,
       repelStrength: this.repelStrength,
       attractStrength: this.attractStrength,
       ambientRepelStrength: this.ambientRepelStrength,
+      cohesionStrength: this.cohesionStrength,
+      treeView: this.treeView,
     };
   }
 
@@ -134,6 +162,8 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       repelStrength: this.repelStrength,
       attractStrength: this.attractStrength,
       ambientRepelStrength: this.ambientRepelStrength,
+      cohesionStrength: this.cohesionStrength,
+      treeView: this.treeView,
     });
   }
 
@@ -251,6 +281,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 
   <div class="section-title">Display</div>
   <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
+  <label class="toggle"><input id="toggle-tree-view" type="checkbox" /> Tree View (flowchart)</label>
   <div class="preset-row">
     <button class="preset" data-preset="tidy">Tidy</button>
     <button class="preset" data-preset="balanced">Balanced</button>
@@ -268,21 +299,28 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     <div class="slider-row"><span>Ambient Repel</span><span class="slider-value" id="ambient-repel-value">0.18</span></div>
     <input id="ambient-repel-slider" type="range" min="0" max="1" step="0.05" value="0.18" />
   </div>
+  <div class="slider-block">
+    <div class="slider-row"><span>Field Cohesion</span><span class="slider-value" id="cohesion-value">0.34</span></div>
+    <input id="cohesion-slider" type="range" min="0" max="1" step="0.05" value="0.34" />
+  </div>
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const evidenceToggle = document.getElementById('toggle-evidence');
+  const treeViewToggle = document.getElementById('toggle-tree-view');
   const repelSlider = document.getElementById('repel-slider');
   const repelValue = document.getElementById('repel-value');
   const attractSlider = document.getElementById('attract-slider');
   const attractValue = document.getElementById('attract-value');
   const ambientRepelSlider = document.getElementById('ambient-repel-slider');
   const ambientRepelValue = document.getElementById('ambient-repel-value');
+  const cohesionSlider = document.getElementById('cohesion-slider');
+  const cohesionValue = document.getElementById('cohesion-value');
   let pendingTimer = null;
   const presets = {
-    tidy: { repel: 0.72, attract: 0.22, ambient: 0.10 },
-    balanced: { repel: 0.45, attract: 0.32, ambient: 0.18 },
-    loose: { repel: 0.30, attract: 0.42, ambient: 0.30 },
+    tidy: { repel: 0.72, attract: 0.22, ambient: 0.10, cohesion: 0.58 },
+    balanced: { repel: 0.45, attract: 0.32, ambient: 0.18, cohesion: 0.34 },
+    loose: { repel: 0.30, attract: 0.42, ambient: 0.30, cohesion: 0.18 },
   };
 
   document.querySelectorAll('button.action').forEach((btn) => {
@@ -297,6 +335,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       repelSlider.value = String(preset.repel);
       attractSlider.value = String(preset.attract);
       ambientRepelSlider.value = String(preset.ambient);
+      cohesionSlider.value = String(preset.cohesion);
       commitForcePreview();
     });
   });
@@ -304,17 +343,22 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   evidenceToggle.addEventListener('change', () => {
     vscode.postMessage({ type: 'toggleEvidence', enabled: evidenceToggle.checked });
   });
+  treeViewToggle.addEventListener('change', () => {
+    vscode.postMessage({ type: 'toggleTreeView', enabled: treeViewToggle.checked });
+  });
 
   function updateSliderLabels() {
     repelValue.textContent = Number(repelSlider.value).toFixed(2);
     attractValue.textContent = Number(attractSlider.value).toFixed(2);
     ambientRepelValue.textContent = Number(ambientRepelSlider.value).toFixed(2);
+    cohesionValue.textContent = Number(cohesionSlider.value).toFixed(2);
   }
 
   function postForceState() {
     vscode.postMessage({ type: 'setRepelStrength', value: Number(repelSlider.value) });
     vscode.postMessage({ type: 'setAttractStrength', value: Number(attractSlider.value) });
     vscode.postMessage({ type: 'setAmbientRepelStrength', value: Number(ambientRepelSlider.value) });
+    vscode.postMessage({ type: 'setCohesionStrength', value: Number(cohesionSlider.value) });
   }
 
   function scheduleForcePreview() {
@@ -335,7 +379,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     postForceState();
   }
 
-  [repelSlider, attractSlider, ambientRepelSlider].forEach((slider) => {
+  [repelSlider, attractSlider, ambientRepelSlider, cohesionSlider].forEach((slider) => {
     slider.addEventListener('input', scheduleForcePreview);
     slider.addEventListener('change', commitForcePreview);
   });
@@ -347,9 +391,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         msg.checked + ' / ' + msg.total + ' files selected';
     } else if (msg.type === 'uiState') {
       evidenceToggle.checked = !!msg.showEvidence;
+      treeViewToggle.checked = !!msg.treeView;
       repelSlider.value = String(typeof msg.repelStrength === 'number' ? msg.repelStrength : 0.35);
       attractSlider.value = String(typeof msg.attractStrength === 'number' ? msg.attractStrength : 0.28);
       ambientRepelSlider.value = String(typeof msg.ambientRepelStrength === 'number' ? msg.ambientRepelStrength : 0.18);
+      cohesionSlider.value = String(typeof msg.cohesionStrength === 'number' ? msg.cohesionStrength : 0.34);
       updateSliderLabels();
     }
   });

@@ -15,14 +15,20 @@ const GROUP_PAD_Y = 22;
 const GROUP_SUMMARY_W = 220;
 const GROUP_SUMMARY_MIN_H = 52;
 const GROUP_TOGGLE_R = 8;
+const NODE_CIRCLE_D = 36;
+const TREE_INDENT_X = 104;
+const TREE_BASE_X = 176;
+const TREE_ROW_GAP = 26;
 
 export function renderFlowchart(graph, ctx) {
   const { root, defs } = ctx;
   const canvasState = ctx.canvas?.state;
+  const treeView = !!ctx.uiState?.treeView;
   const forceOptions = {
     overlapRepel: clamp01(ctx.uiState?.repelStrength ?? 0.35),
     linkAttract: clamp01(ctx.uiState?.attractStrength ?? 0.28),
     ambientRepel: clamp01(ctx.uiState?.ambientRepelStrength ?? 0.18),
+    cohesion: clamp01(ctx.uiState?.cohesionStrength ?? 0.34),
   };
   const savedSnapshot = ctx.layoutSnapshot || {};
   const savedNodes = savedSnapshot.nodes || {};
@@ -35,7 +41,26 @@ export function renderFlowchart(graph, ctx) {
   const nodes = graph.nodes.map((node) => ({ ...node }));
   const edges = graph.edges || [];
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const groups = normalizeGroups(graph.metadata?.groups || []);
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const nodeGroupChains = buildNodeGroupChains(groups);
+  const groupDepth = buildGroupDepthMap(groups);
+  const nodeState = new Map(nodes.map((node) => [node.id, {
+    circleCollapsed: !!savedNodes[node.id]?.circleCollapsed,
+    treeDx: typeof savedNodes[node.id]?.treeDx === "number" ? savedNodes[node.id].treeDx : 0,
+    treeDy: typeof savedNodes[node.id]?.treeDy === "number" ? savedNodes[node.id].treeDy : 0,
+  }]));
   const prepared = new Map(nodes.map((node) => [node.id, prepareNode(node)]));
+  const treeBaseNodePos = new Map();
+  const treeBaseGroupPos = new Map();
+
+  function isNodeCircleCollapsed(nodeId) {
+    return !!nodeState.get(nodeId)?.circleCollapsed;
+  }
+
+  function nodeOffset(nodeId) {
+    return nodeState.get(nodeId) || { treeDx: 0, treeDy: 0 };
+  }
 
   const incoming = new Map();
   const outgoing = new Map();
@@ -87,43 +112,58 @@ export function renderFlowchart(graph, ctx) {
       cursorY += (preparedNode ? preparedNode.h : NODE_MIN_H) + ROW_GAP;
     }
   }
-  for (const [nodeId, saved] of Object.entries(savedNodes)) {
-    const pos = positions.get(nodeId);
-    if (!pos || typeof saved?.x !== "number" || typeof saved?.y !== "number") continue;
-    pos.x = saved.x;
-    pos.y = saved.y;
+  const groupState = new Map(groups.map((group) => [group.id, {
+    collapsed: !!savedGroups[group.id]?.collapsed,
+    x: typeof savedGroups[group.id]?.x === "number" ? savedGroups[group.id].x : undefined,
+    y: typeof savedGroups[group.id]?.y === "number" ? savedGroups[group.id].y : undefined,
+    treeDx: typeof savedGroups[group.id]?.treeDx === "number" ? savedGroups[group.id].treeDx : 0,
+    treeDy: typeof savedGroups[group.id]?.treeDy === "number" ? savedGroups[group.id].treeDy : 0,
+  }]));
+  const groupDescendants = buildGroupDescendants(groups);
+  const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
+  if (treeView) {
+    applyFlowTreeLayout(
+      positions,
+      nodes,
+      prepared,
+      nodeGroupChains,
+      groupById,
+      groupDepth,
+      isNodeCircleCollapsed,
+      visibility,
+      groupState,
+      nodeOffset,
+      treeBaseNodePos,
+      treeBaseGroupPos,
+      forceOptions,
+    );
+  } else {
+    for (const [nodeId, saved] of Object.entries(savedNodes)) {
+      const pos = positions.get(nodeId);
+      if (!pos || typeof saved?.x !== "number" || typeof saved?.y !== "number") continue;
+      pos.x = saved.x;
+      pos.y = saved.y;
+    }
+    applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOptions);
   }
-
-  applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOptions);
 
   const nodeRectAll = new Map();
   for (const node of nodes) {
     const pos = positions.get(node.id);
     if (!pos) continue;
     const preparedNode = prepared.get(node.id) || prepareNode(node);
+    const collapsedNode = isNodeCircleCollapsed(node.id);
     nodeRectAll.set(node.id, {
       x: pos.x,
       y: pos.y,
-      w: NODE_W,
-      h: preparedNode.h,
+      w: collapsedNode ? NODE_CIRCLE_D : NODE_W,
+      h: collapsedNode ? NODE_CIRCLE_D : preparedNode.h,
       color: theme.nodeColor[node.kind] || theme.nodeColor.process,
     });
   }
   const collisionAnchors = new Map(Array.from(nodeRectAll.entries()).map(([nodeId, rect]) => [nodeId, { x: rect.x, y: rect.y }]));
-
-  const groups = normalizeGroups(graph.metadata?.groups || []);
-  const groupById = new Map(groups.map((group) => [group.id, group]));
-  const groupState = new Map(groups.map((group) => [group.id, {
-    collapsed: !!savedGroups[group.id]?.collapsed,
-    x: typeof savedGroups[group.id]?.x === "number" ? savedGroups[group.id].x : undefined,
-    y: typeof savedGroups[group.id]?.y === "number" ? savedGroups[group.id].y : undefined,
-  }]));
-  const nodeGroupChains = buildNodeGroupChains(groups);
-  const groupDescendants = buildGroupDescendants(groups);
-  const groupDepth = buildGroupDepthMap(groups);
-
-  const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
-  resolveFlowNodeSeparation(new Set(), visibility.visibleNodeIds);
+  if (!treeView) resolveFlowNodeSeparation(new Set(), visibility.visibleNodeIds);
+  const allNodesCircleCollapsed = nodes.every((node) => isNodeCircleCollapsed(node.id));
   let loopLaneRanks = buildLoopLaneRanks(nodes, positions, visibility.visibleNodeIds, groupDepth);
 
   const groupLayer = document.createElementNS(NS, "g"); root.appendChild(groupLayer);
@@ -148,6 +188,7 @@ export function renderFlowchart(graph, ctx) {
   const visibleNodeRects = new Map();
 
   for (const groupId of visibility.visibleExpandedGroupIds.sort((left, right) => (groupDepth.get(left) || 0) - (groupDepth.get(right) || 0))) {
+    if (allNodesCircleCollapsed) continue;
     const group = groupById.get(groupId);
     const bounds = expandedGroupBounds.get(groupId);
     if (!group || !bounds) continue;
@@ -203,7 +244,16 @@ export function renderFlowchart(graph, ctx) {
     const rect = nodeRectAll.get(node.id);
     if (!rect) continue;
     visibleNodeRects.set(node.id, rect);
-    const element = renderNode(node, rect, prepared.get(node.id) || prepareNode(node), ctx, nodeLayer, () => suppressPointerClicksUntil);
+    const element = renderNode(
+      node,
+      rect,
+      prepared.get(node.id) || prepareNode(node),
+      ctx,
+      nodeLayer,
+      () => suppressPointerClicksUntil,
+      isNodeCircleCollapsed(node.id),
+      () => toggleNodeCircle(node.id),
+    );
     nodeEls.set(node.id, element);
 
     let dragState = null;
@@ -215,6 +265,8 @@ export function renderFlowchart(graph, ctx) {
         startClientY: event.clientY,
         startX: rect.x,
         startY: rect.y,
+        startTreeDx: nodeOffset(node.id).treeDx || 0,
+        startTreeDy: nodeOffset(node.id).treeDy || 0,
         moved: false,
       };
       element.setPointerCapture?.(event.pointerId);
@@ -233,10 +285,17 @@ export function renderFlowchart(graph, ctx) {
         nodeLayer.appendChild(element);
       }
       if (!dragState.moved) return;
-      rect.x = dragState.startX + dx;
-      rect.y = dragState.startY + dy;
-      syncPositionFromRect(node.id);
-      updateNodePosition(node.id);
+      if (treeView) {
+        const state = nodeState.get(node.id);
+        if (!state) return;
+        state.treeDx = dragState.startTreeDx + dx;
+        state.treeDy = dragState.startTreeDy + dy;
+      } else {
+        rect.x = dragState.startX + dx;
+        rect.y = dragState.startY + dy;
+        syncPositionFromRect(node.id);
+        updateNodePosition(node.id);
+      }
       refreshAllGeometry(new Set([node.id]), visibility.visibleNodeIds);
       event.stopPropagation();
       event.preventDefault();
@@ -378,28 +437,34 @@ export function renderFlowchart(graph, ctx) {
   ctx._edgeMap = edgeMap;
   ctx._edgeRecords = edgeRecords;
   ctx._captureLayout = captureLayout;
-  ctx._hasGroupControls = groups.length > 0;
+  ctx._hasGroupControls = groups.length > 0 || nodes.length > 0;
   ctx._expandAllGroups = () => {
-    if (!groups.length) return;
+    if (!groups.length && !nodes.length) return;
     groups.forEach((group) => {
       const state = groupState.get(group.id);
-      if (state) state.collapsed = false;
+      if (!state) return;
+      state.collapsed = false;
     });
-    resolveFlowNodeSeparation(new Set(), new Set(nodes.map((node) => node.id)));
+    nodes.forEach((node) => {
+      const state = nodeState.get(node.id);
+      if (!state) return;
+      state.circleCollapsed = false;
+    });
+    if (!treeView) resolveFlowNodeSeparation(new Set(), new Set(nodes.map((node) => node.id)));
     persistLayout();
     ctx.requestRender?.();
   };
   ctx._collapseAllGroups = () => {
-    if (!groups.length) return;
+    if (!groups.length && !nodes.length) return;
     groups.forEach((group) => {
       const state = groupState.get(group.id);
       if (!state) return;
-      const rect = expandedGroupBounds.get(group.id) || collapsedGroupRects.get(group.id);
-      if (rect) {
-        state.x = rect.x;
-        state.y = rect.y;
-      }
-      state.collapsed = true;
+      state.collapsed = false;
+    });
+    nodes.forEach((node) => {
+      const state = nodeState.get(node.id);
+      if (!state) return;
+      state.circleCollapsed = true;
     });
     persistLayout();
     ctx.requestRender?.();
@@ -504,6 +569,23 @@ export function renderFlowchart(graph, ctx) {
     if (!dx && !dy) return;
     const group = groupById.get(groupId);
     if (!group) return;
+    if (treeView) {
+      if (groupState.get(groupId)?.collapsed) {
+        const state = groupState.get(groupId);
+        if (state) {
+          state.treeDx = (state.treeDx || 0) + dx;
+          state.treeDy = (state.treeDy || 0) + dy;
+        }
+        return;
+      }
+      for (const nodeId of group.nodeIds) {
+        const state = nodeState.get(nodeId);
+        if (!state) continue;
+        state.treeDx = (state.treeDx || 0) + dx;
+        state.treeDy = (state.treeDy || 0) + dy;
+      }
+      return;
+    }
     for (const nodeId of group.nodeIds) {
       const rect = nodeRectAll.get(nodeId);
       if (!rect) continue;
@@ -527,6 +609,61 @@ export function renderFlowchart(graph, ctx) {
     group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
   }
 
+  function toggleNodeCircle(nodeId) {
+    const state = nodeState.get(nodeId);
+    const rect = nodeRectAll.get(nodeId);
+    const node = nodesById.get(nodeId);
+    const preparedNode = prepared.get(nodeId);
+    if (!state || !rect || !node || !preparedNode) return;
+    state.circleCollapsed = !state.circleCollapsed;
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    const nextW = state.circleCollapsed ? NODE_CIRCLE_D : NODE_W;
+    const nextH = state.circleCollapsed ? NODE_CIRCLE_D : preparedNode.h;
+    rect.x = cx - nextW / 2;
+    rect.y = cy - nextH / 2;
+    rect.w = nextW;
+    rect.h = nextH;
+    syncPositionFromRect(nodeId);
+    if (treeView) {
+      const stateOffset = nodeState.get(nodeId);
+      const base = treeBaseNodePos.get(nodeId) || { x: rect.x, y: rect.y };
+      if (stateOffset) {
+        const nextBaseX = base.x;
+        const nextBaseY = base.y;
+        stateOffset.treeDx = cx - nextW / 2 - nextBaseX;
+        stateOffset.treeDy = cy - nextH / 2 - nextBaseY;
+      }
+      applyFlowTreeLayout(
+        positions,
+        nodes,
+        prepared,
+        nodeGroupChains,
+        groupById,
+        groupDepth,
+        isNodeCircleCollapsed,
+        visibility,
+        groupState,
+        nodeOffset,
+        treeBaseNodePos,
+        treeBaseGroupPos,
+        forceOptions,
+      );
+      for (const [id, nextRect] of nodeRectAll.entries()) {
+        const pos = positions.get(id);
+        if (!pos) continue;
+        nextRect.x = pos.x;
+        nextRect.y = pos.y;
+        nextRect.w = isNodeCircleCollapsed(id) ? NODE_CIRCLE_D : NODE_W;
+        nextRect.h = isNodeCircleCollapsed(id) ? NODE_CIRCLE_D : (prepared.get(id)?.h || NODE_MIN_H);
+      }
+    } else {
+      resolveFlowNodeSeparation(new Set([nodeId]), visibility.visibleNodeIds);
+    }
+    persistLayout();
+    ctx.requestRender?.();
+  }
+
   function syncPositionFromRect(nodeId) {
     const rect = nodeRectAll.get(nodeId);
     const pos = positions.get(nodeId);
@@ -536,6 +673,7 @@ export function renderFlowchart(graph, ctx) {
   }
 
   function resolveFlowNodeSeparation(fixedIds = new Set(), activeNodeIds = visibility.visibleNodeIds) {
+    if (treeView) return;
     const ids = Array.from(activeNodeIds || []).filter((nodeId) => nodeRectAll.has(nodeId));
     if (ids.length < 2) return;
     for (let pass = 0; pass < 4; pass++) {
@@ -603,7 +741,31 @@ export function renderFlowchart(graph, ctx) {
   }
 
   function refreshAllGeometry(fixedIds = new Set(), activeNodeIds = visibility.visibleNodeIds) {
-    resolveFlowNodeSeparation(fixedIds, activeNodeIds);
+    if (treeView) {
+      applyFlowTreeLayout(
+        positions,
+        nodes,
+        prepared,
+        nodeGroupChains,
+        groupById,
+        groupDepth,
+        isNodeCircleCollapsed,
+        visibility,
+        groupState,
+        nodeOffset,
+        treeBaseNodePos,
+        treeBaseGroupPos,
+        forceOptions,
+      );
+      for (const [nodeId, rect] of nodeRectAll.entries()) {
+        const pos = positions.get(nodeId);
+        if (!pos) continue;
+        rect.x = pos.x;
+        rect.y = pos.y;
+      }
+    } else {
+      resolveFlowNodeSeparation(fixedIds, activeNodeIds);
+    }
     collapsedGroupRects = computeCollapsedGroupRects(visibility.visibleCollapsedGroupIds, groupById, groupState, nodeRectAll);
     expandedGroupBounds = computeExpandedGroupBounds(
       visibility.visibleExpandedGroupIds,
@@ -653,9 +815,16 @@ export function renderFlowchart(graph, ctx) {
 
   function toggleGroup(groupId) {
     const state = groupState.get(groupId);
+    const group = groupById.get(groupId);
     if (!state) return;
     const expanding = !!state.collapsed;
-    if (!state.collapsed) {
+    if (treeView && !state.collapsed) {
+      const samples = group.nodeIds.map((nodeId) => nodeOffset(nodeId));
+      if (samples.length) {
+        state.treeDx = samples.reduce((sum, entry) => sum + (entry.treeDx || 0), 0) / samples.length;
+        state.treeDy = samples.reduce((sum, entry) => sum + (entry.treeDy || 0), 0) / samples.length;
+      }
+    } else if (!state.collapsed) {
       const rect = expandedGroupBounds.get(groupId);
       if (rect) {
         state.x = rect.x + (rect.w - GROUP_SUMMARY_W) / 2;
@@ -663,8 +832,16 @@ export function renderFlowchart(graph, ctx) {
       }
     }
     state.collapsed = !state.collapsed;
-    if (expanding) {
-      const group = groupById.get(groupId);
+    if (treeView && expanding) {
+      for (const nodeId of group.nodeIds) {
+        const nodeEntry = nodeState.get(nodeId);
+        if (!nodeEntry) continue;
+        nodeEntry.treeDx = (nodeEntry.treeDx || 0) + (state.treeDx || 0);
+        nodeEntry.treeDy = (nodeEntry.treeDy || 0) + (state.treeDy || 0);
+      }
+      state.treeDx = 0;
+      state.treeDy = 0;
+    } else if (!treeView && expanding) {
       const nextVisibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
       resolveFlowNodeSeparation(new Set(group?.nodeIds || []), nextVisibility.visibleNodeIds);
     }
@@ -705,7 +882,13 @@ export function renderFlowchart(graph, ctx) {
   function captureLayout() {
     const snapshot = { nodes: {}, groups: {} };
     for (const [nodeId, rect] of nodeRectAll.entries()) {
-      snapshot.nodes[nodeId] = { x: rect.x, y: rect.y };
+      snapshot.nodes[nodeId] = {
+        x: rect.x,
+        y: rect.y,
+        circleCollapsed: isNodeCircleCollapsed(nodeId),
+        treeDx: nodeOffset(nodeId).treeDx || 0,
+        treeDy: nodeOffset(nodeId).treeDy || 0,
+      };
     }
     for (const group of groups) {
       const state = groupState.get(group.id);
@@ -714,6 +897,8 @@ export function renderFlowchart(graph, ctx) {
         collapsed: !!state.collapsed,
         ...(typeof state.x === "number" ? { x: state.x } : {}),
         ...(typeof state.y === "number" ? { y: state.y } : {}),
+        treeDx: state.treeDx || 0,
+        treeDy: state.treeDy || 0,
       };
     }
     return snapshot;
@@ -724,7 +909,7 @@ export function renderFlowchart(graph, ctx) {
   }
 }
 
-function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil) {
+function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil, collapsedNode, onToggleCircle) {
   const color = theme.nodeColor[node.kind] || theme.nodeColor.process;
   const group = document.createElementNS(NS, "g");
   group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
@@ -732,7 +917,14 @@ function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil) 
   group.style.cursor = "pointer";
 
   let shape;
-  if (node.kind === "decision") {
+  if (collapsedNode) {
+    shape = document.createElementNS(NS, "circle");
+    shape.setAttribute("cx", String(rect.w / 2));
+    shape.setAttribute("cy", String(rect.h / 2));
+    shape.setAttribute("r", String(Math.min(rect.w, rect.h) / 2 - 1.5));
+    shape.setAttribute("fill", color + "14");
+    shape.setAttribute("stroke", color + "68");
+  } else if (node.kind === "decision") {
     shape = document.createElementNS(NS, "polygon");
     shape.setAttribute("points", `${rect.w / 2},0 ${rect.w},${rect.h / 2} ${rect.w / 2},${rect.h} 0,${rect.h / 2}`);
     shape.setAttribute("fill", color + "12");
@@ -781,28 +973,44 @@ function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil) 
   shape.setAttribute("stroke-width", "1.2");
   group.appendChild(shape);
 
-  const totalLineCount = preparedNode.lines.length + (preparedNode.typeLine ? 1 : 0);
-  const totalHeight = totalLineCount * LINE_H;
-  preparedNode.lines.forEach((line, index) => {
-    const text = document.createElementNS(NS, "text");
-    text.setAttribute("x", String(rect.w / 2));
-    text.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + index * LINE_H + 9));
-    text.setAttribute("text-anchor", "middle");
-    text.setAttribute("fill", color + "dd");
-    text.setAttribute("font-size", "10");
-    text.textContent = line;
-    group.appendChild(text);
-  });
-  if (preparedNode.typeLine) {
-    const typeText = document.createElementNS(NS, "text");
-    typeText.setAttribute("x", String(rect.w / 2));
-    typeText.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + preparedNode.lines.length * LINE_H + 9));
-    typeText.setAttribute("text-anchor", "middle");
-    typeText.setAttribute("fill", color + "88");
-    typeText.setAttribute("font-size", "8");
-    typeText.setAttribute("font-style", "italic");
-    typeText.textContent = preparedNode.typeLine;
-    group.appendChild(typeText);
+  if (collapsedNode) {
+    const monogram = document.createElementNS(NS, "text");
+    monogram.setAttribute("x", String(rect.w / 2));
+    monogram.setAttribute("y", String(rect.h / 2 + 4));
+    monogram.setAttribute("text-anchor", "middle");
+    monogram.setAttribute("fill", color + "e8");
+    monogram.setAttribute("font-size", "12");
+    monogram.setAttribute("font-weight", "700");
+    monogram.textContent = flowNodeMonogram(node, preparedNode);
+    group.appendChild(monogram);
+    const toggle = makeFlowNodeCircleToggle(group, color, true, onToggleCircle);
+    positionFlowNodeCircleToggle(toggle, rect, true);
+  } else {
+    const totalLineCount = preparedNode.lines.length + (preparedNode.typeLine ? 1 : 0);
+    const totalHeight = totalLineCount * LINE_H;
+    preparedNode.lines.forEach((line, index) => {
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("x", String(rect.w / 2));
+      text.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + index * LINE_H + 9));
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("fill", color + "dd");
+      text.setAttribute("font-size", "10");
+      text.textContent = line;
+      group.appendChild(text);
+    });
+    if (preparedNode.typeLine) {
+      const typeText = document.createElementNS(NS, "text");
+      typeText.setAttribute("x", String(rect.w / 2));
+      typeText.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + preparedNode.lines.length * LINE_H + 9));
+      typeText.setAttribute("text-anchor", "middle");
+      typeText.setAttribute("fill", color + "88");
+      typeText.setAttribute("font-size", "8");
+      typeText.setAttribute("font-style", "italic");
+      typeText.textContent = preparedNode.typeLine;
+      group.appendChild(typeText);
+    }
+    const toggle = makeFlowNodeCircleToggle(group, color, false, onToggleCircle);
+    positionFlowNodeCircleToggle(toggle, rect, false);
   }
 
   group.addEventListener("mouseenter", (event) => ctx.showTooltip(event, node));
@@ -812,6 +1020,12 @@ function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil) 
     if (performance.now() < getSuppressUntil()) {
       event.preventDefault();
       event.stopPropagation();
+      return;
+    }
+    if (collapsedNode) {
+      event.preventDefault();
+      event.stopPropagation();
+      onToggleCircle();
       return;
     }
     ctx.onNodeClick(node);
@@ -1234,11 +1448,111 @@ function groupKey(groupId) {
   return `group:${groupId}`;
 }
 
+function applyFlowTreeLayout(
+  positions,
+  nodes,
+  prepared,
+  nodeGroupChains,
+  groupById,
+  groupDepth,
+  isNodeCircleCollapsed,
+  visibility,
+  groupState,
+  nodeOffset,
+  treeBaseNodePos,
+  treeBaseGroupPos,
+  forceOptions,
+) {
+  treeBaseNodePos.clear();
+  treeBaseGroupPos.clear();
+  const overlapRepel = clamp01(forceOptions?.overlapRepel ?? 0.35);
+  const ambientRepel = clamp01(forceOptions?.ambientRepel ?? 0.18);
+  const verticalGap = TREE_ROW_GAP + overlapRepel * 30 + ambientRepel * 10;
+  const maxDx = 42 + overlapRepel * 74 + ambientRepel * 18;
+  const maxDy = 24 + overlapRepel * 58 + ambientRepel * 14;
+  const units = [];
+  nodes.forEach((node, index) => {
+    if (!visibility.visibleNodeIds.has(node.id)) return;
+    const preparedNode = prepared.get(node.id);
+    if (!preparedNode) return;
+    units.push({
+      kind: "node",
+      id: node.id,
+      index,
+      line: Number(node.source?.line || Number.MAX_SAFE_INTEGER),
+      depth: treeIndentDepth(node.id, nodeGroupChains, groupById, groupDepth),
+      h: isNodeCircleCollapsed?.(node.id) ? NODE_CIRCLE_D : preparedNode.h,
+    });
+  });
+  visibility.visibleCollapsedGroupIds.forEach((groupId, index) => {
+    const group = groupById.get(groupId);
+    if (!group) return;
+    const lines = summarizeGroup(group);
+    units.push({
+      kind: "group",
+      id: groupId,
+      index: nodes.length + index,
+      line: Number(group.line || Number.MAX_SAFE_INTEGER),
+      depth: treeGroupIndentDepth(groupId, groupById, groupDepth),
+      h: Math.max(GROUP_SUMMARY_MIN_H, 18 + lines.length * LINE_H + 10),
+    });
+  });
+  units.sort((left, right) => {
+    if (left.line !== right.line) return left.line - right.line;
+    if (left.depth !== right.depth) return left.depth - right.depth;
+    return left.index - right.index;
+  });
+
+  let cursorY = 30;
+  units.forEach((unit) => {
+    const baseX = TREE_BASE_X + unit.depth * TREE_INDENT_X;
+    const baseY = cursorY;
+    if (unit.kind === "node") {
+      const pos = positions.get(unit.id);
+      const offset = nodeOffset(unit.id);
+      if (pos) {
+        treeBaseNodePos.set(unit.id, { x: baseX, y: baseY });
+        pos.x = baseX + clamp(offset.treeDx || 0, -maxDx, maxDx);
+        pos.y = baseY + clamp(offset.treeDy || 0, -maxDy, maxDy);
+        pos.h = unit.h;
+      }
+    } else {
+      const state = groupState.get(unit.id);
+      if (state) {
+        treeBaseGroupPos.set(unit.id, { x: baseX, y: baseY });
+        state.x = baseX + clamp(state.treeDx || 0, -maxDx, maxDx);
+        state.y = baseY + clamp(state.treeDy || 0, -maxDy, maxDy);
+      }
+    }
+    cursorY += unit.h + verticalGap;
+  });
+}
+
+function treeIndentDepth(nodeId, nodeGroupChains, groupById, groupDepth) {
+  const chain = nodeGroupChains.get(nodeId) || [];
+  let maxDepth = 0;
+  chain.forEach((groupId) => {
+    const group = groupById.get(groupId);
+    if (!group) return;
+    const baseDepth = group.kind === "function_body" ? 0 : 1;
+    maxDepth = Math.max(maxDepth, (groupDepth.get(groupId) || 0) + baseDepth);
+  });
+  return maxDepth;
+}
+
+function treeGroupIndentDepth(groupId, groupById, groupDepth) {
+  const group = groupById.get(groupId);
+  if (!group) return 0;
+  const baseDepth = group.kind === "function_body" ? 0 : 1;
+  return (groupDepth.get(groupId) || 0) + baseDepth;
+}
+
 function applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOptions) {
   const overlapRepel = clamp01(forceOptions?.overlapRepel ?? 0.35);
   const linkAttract = clamp01(forceOptions?.linkAttract ?? 0.28);
   const ambientRepel = clamp01(forceOptions?.ambientRepel ?? 0.18);
-  if (overlapRepel <= 0.001 && linkAttract <= 0.001 && ambientRepel <= 0.001) return;
+  const cohesion = clamp01(forceOptions?.cohesion ?? 0.34);
+  if (overlapRepel <= 0.001 && linkAttract <= 0.001 && ambientRepel <= 0.001 && cohesion <= 0.001) return;
   const ids = Array.from(positions.keys());
   const anchors = new Map(ids.map((nodeId) => [nodeId, {
     x: positions.get(nodeId).x,
@@ -1267,10 +1581,11 @@ function applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOpti
     });
   });
 
-  const passes = Math.round(4 + Math.max(overlapRepel, linkAttract, ambientRepel) * 8);
+  const passes = Math.round(4 + Math.max(overlapRepel, linkAttract, ambientRepel, cohesion) * 8);
   const gapX = 28 + overlapRepel * 66 + ambientRepel * 22;
   const gapY = 20 + overlapRepel * 26;
   const ambientRadiusX = NODE_W + 54 + ambientRepel * 110;
+  const targetGapY = ROW_GAP * (1.15 - cohesion * 0.55);
   for (let pass = 0; pass < passes; pass++) {
     for (let i = 0; i < ids.length; i++) {
       const leftId = ids[i];
@@ -1314,7 +1629,8 @@ function applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOpti
     ids.forEach((nodeId) => {
       const pos = positions.get(nodeId);
       const anchor = anchors.get(nodeId);
-      pos.x = anchor.x + (pos.x - anchor.x) * (0.7 + linkAttract * 0.08);
+      pos.x = anchor.x + (pos.x - anchor.x) * (0.72 - cohesion * 0.16 + linkAttract * 0.05);
+      pos.y += (anchor.y - pos.y) * (0.012 + cohesion * 0.045);
     });
 
     for (let index = 1; index < order.length; index++) {
@@ -1325,8 +1641,58 @@ function applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOpti
       const prevH = prepared.get(prevId)?.h || NODE_MIN_H;
       const minY = prev.y + prevH + ROW_GAP * 0.55;
       if (curr.y < minY) curr.y = minY;
+      const looseGap = curr.y - (prev.y + prevH);
+      if (cohesion > 0.001 && looseGap > targetGapY) {
+        curr.y -= (looseGap - targetGapY) * (0.18 + cohesion * 0.24);
+      }
     }
   }
+}
+
+function flowNodeMonogram(node, preparedNode) {
+  const firstLine = preparedNode.lines[0] || node.label || node.kind || "?";
+  return String(firstLine).trim().slice(0, 2).toUpperCase() || "?";
+}
+
+function makeFlowNodeCircleToggle(wrapper, color, collapsed, onToggle) {
+  const hit = document.createElementNS(NS, "circle");
+  hit.setAttribute("r", "10");
+  hit.setAttribute("fill", "#13192b");
+  hit.setAttribute("stroke", color + "88");
+  hit.setAttribute("stroke-width", "1.2");
+  hit.style.cursor = "pointer";
+  const glyph = document.createElementNS(NS, "text");
+  glyph.setAttribute("text-anchor", "middle");
+  glyph.setAttribute("font-size", "10");
+  glyph.setAttribute("font-weight", "700");
+  glyph.setAttribute("fill", color + "e0");
+  glyph.style.cursor = "pointer";
+  glyph.textContent = collapsed ? "+" : "-";
+  wrapper.appendChild(hit);
+  wrapper.appendChild(glyph);
+  const fire = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onToggle();
+  };
+  const capturePointer = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  hit.addEventListener("pointerdown", capturePointer);
+  glyph.addEventListener("pointerdown", capturePointer);
+  hit.addEventListener("click", fire);
+  glyph.addEventListener("click", fire);
+  return { hit, glyph };
+}
+
+function positionFlowNodeCircleToggle(toggle, rect, collapsed) {
+  const cx = collapsed ? rect.w - 9 : 12;
+  const cy = collapsed ? 9 : 12;
+  toggle.hit.setAttribute("cx", String(cx));
+  toggle.hit.setAttribute("cy", String(cy));
+  toggle.glyph.setAttribute("x", String(cx));
+  toggle.glyph.setAttribute("y", String(cy + 3));
 }
 
 function clamp01(value) {

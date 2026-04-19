@@ -13,10 +13,12 @@ const COL_GAP = 130, COL_TOP = 30;
 const METHOD_INDENT = 18;
 const MODULE_SUMMARY_W = 210;
 const MODULE_SUMMARY_H = 56;
+const NODE_CIRCLE_D = 36;
 
 export function renderCallGraph(graph, ctx) {
   const { root, defs } = ctx;
   const nodes = graph.nodes.map((n) => ({ ...n }));
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const edges = graph.edges;
   const isTrace = graph.graphType === "trace";
   const canvasState = ctx.canvas?.state;
@@ -24,6 +26,7 @@ export function renderCallGraph(graph, ctx) {
     overlapRepel: clamp01(ctx.uiState?.repelStrength ?? 0.35),
     linkAttract: clamp01(ctx.uiState?.attractStrength ?? 0.28),
     ambientRepel: clamp01(ctx.uiState?.ambientRepelStrength ?? 0.18),
+    cohesion: clamp01(ctx.uiState?.cohesionStrength ?? 0.34),
   };
   const savedNodes = ctx.layoutSnapshot?.nodes || {};
   const savedGroups = ctx.layoutSnapshot?.groups || {};
@@ -59,9 +62,16 @@ export function renderCallGraph(graph, ctx) {
   const classGroupState = new Map(classGroups.map((group) => [group.id, {
     collapsed: !!savedGroups[group.id]?.collapsed,
   }]));
+  const nodeState = new Map(nodes.map((node) => [node.id, {
+    circleCollapsed: !!savedNodes[node.id]?.circleCollapsed,
+  }]));
 
   function isModuleCollapsed(mod) {
     return !!moduleState.get(mod)?.collapsed;
+  }
+
+  function isNodeCircleCollapsed(nodeId) {
+    return !!nodeState.get(nodeId)?.circleCollapsed;
   }
 
   function isNodeVisible(nodeId) {
@@ -140,8 +150,10 @@ export function renderCallGraph(graph, ctx) {
     pos.x = saved.x;
     pos.y = saved.y;
   }
+  nodes.forEach((node) => applyNodeShapeMetrics(node.id));
   if (Object.keys(savedNodes).length === 0) {
     applyOrganicLayout(moduleOrder, moduleNodes, nodePos, edges);
+    nodes.forEach((node) => applyNodeShapeMetrics(node.id));
   }
   applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMembers, edges, forceOptions);
   const collisionAnchors = new Map(Array.from(nodePos.entries()).map(([nodeId, pos]) => [nodeId, { x: pos.x, y: pos.y }]));
@@ -352,6 +364,7 @@ export function renderCallGraph(graph, ctx) {
     const isMethod = n.kind === "method";
     const isRoot = (graph.rootNodeIds || []).includes(n.id);
     const col = moduleColor(n.module || "");
+    const collapsedNode = isNodeCircleCollapsed(n.id);
     nodeRect.set(n.id, { ...p, color: col });
 
     const g = document.createElementNS(NS, "g");
@@ -359,44 +372,71 @@ export function renderCallGraph(graph, ctx) {
     g.dataset.id = n.id;
     g.style.cursor = "pointer";
 
-    const r = document.createElementNS(NS, "rect");
-    r.setAttribute("width", p.w); r.setAttribute("height", p.h);
-    r.setAttribute("rx", 5); r.setAttribute("ry", 5);
-    r.setAttribute("fill", isClass ? col + "12" : "#111420");
-    r.setAttribute("stroke", isRoot ? col : col + "30");
-    r.setAttribute("stroke-width", isRoot ? "2" : "1");
-    g.appendChild(r);
+    let r;
+    if (collapsedNode) {
+      r = document.createElementNS(NS, "circle");
+      r.setAttribute("cx", String(p.w / 2));
+      r.setAttribute("cy", String(p.h / 2));
+      r.setAttribute("r", String(Math.min(p.w, p.h) / 2 - 1.5));
+      r.setAttribute("fill", isClass ? col + "1a" : col + "12");
+      r.setAttribute("stroke", isRoot ? col : col + "55");
+      r.setAttribute("stroke-width", isRoot ? "2" : "1.2");
+      g.appendChild(r);
 
-    const kindBadge = document.createElementNS(NS, "text");
-    kindBadge.setAttribute("x", "9");
-    kindBadge.setAttribute("y", "14");
-    kindBadge.setAttribute("fill", badgeColor(n, col));
-    kindBadge.setAttribute("font-size", "9");
-    kindBadge.setAttribute("font-weight", "700");
-    kindBadge.textContent = kindLetter(n);
-    g.appendChild(kindBadge);
+      const monogram = document.createElementNS(NS, "text");
+      monogram.setAttribute("x", String(p.w / 2));
+      monogram.setAttribute("y", String(p.h / 2 + 4));
+      monogram.setAttribute("text-anchor", "middle");
+      monogram.setAttribute("fill", badgeColor(n, col));
+      monogram.setAttribute("font-size", "12");
+      monogram.setAttribute("font-weight", "700");
+      monogram.textContent = kindLetter(n);
+      g.appendChild(monogram);
 
-    const lb = document.createElementNS(NS, "text");
-    lb.setAttribute("x", isMethod ? "25" : "22");
-    lb.setAttribute("y", "14");
-    lb.setAttribute("fill", isClass ? col + "dd" : isMethod ? "#9aa5ce" : "#8890aa");
-    lb.setAttribute("font-size", "10");
-    lb.setAttribute("font-weight", isClass ? "600" : "400");
-    lb.textContent = (n.label || n.id);
-    g.appendChild(lb);
+      const expandHint = makeNodeCircleToggle(g, col, true, () => toggleNodeCircle(n.id));
+      positionNodeCircleToggle(expandHint, p, true);
+    } else {
+      r = document.createElementNS(NS, "rect");
+      r.setAttribute("width", p.w); r.setAttribute("height", p.h);
+      r.setAttribute("rx", 5); r.setAttribute("ry", 5);
+      r.setAttribute("fill", isClass ? col + "12" : "#111420");
+      r.setAttribute("stroke", isRoot ? col : col + "30");
+      r.setAttribute("stroke-width", isRoot ? "2" : "1");
+      g.appendChild(r);
 
-    // Line number
-    const lineNum = n.source && n.source.line ? n.source.line : null;
-    const rightText = n.metadata && n.metadata.isAsync ? "async" : (lineNum ? ":" + lineNum : "");
-    if (rightText) {
-      const rt = document.createElementNS(NS, "text");
-      rt.setAttribute("x", String(p.w - 7));
-      rt.setAttribute("y", "13");
-      rt.setAttribute("text-anchor", "end");
-      rt.setAttribute("fill", "#222640");
-      rt.setAttribute("font-size", "8");
-      rt.textContent = rightText;
-      g.appendChild(rt);
+      const kindBadge = document.createElementNS(NS, "text");
+      kindBadge.setAttribute("x", "9");
+      kindBadge.setAttribute("y", "14");
+      kindBadge.setAttribute("fill", badgeColor(n, col));
+      kindBadge.setAttribute("font-size", "9");
+      kindBadge.setAttribute("font-weight", "700");
+      kindBadge.textContent = kindLetter(n);
+      g.appendChild(kindBadge);
+
+      const lb = document.createElementNS(NS, "text");
+      lb.setAttribute("x", isMethod ? "25" : "22");
+      lb.setAttribute("y", "14");
+      lb.setAttribute("fill", isClass ? col + "dd" : isMethod ? "#9aa5ce" : "#8890aa");
+      lb.setAttribute("font-size", "10");
+      lb.setAttribute("font-weight", isClass ? "600" : "400");
+      lb.textContent = (n.label || n.id);
+      g.appendChild(lb);
+
+      const lineNum = n.source && n.source.line ? n.source.line : null;
+      const rightText = n.metadata && n.metadata.isAsync ? "async" : (lineNum ? ":" + lineNum : "");
+      if (rightText) {
+        const rt = document.createElementNS(NS, "text");
+        rt.setAttribute("x", String(p.w - 7));
+        rt.setAttribute("y", "13");
+        rt.setAttribute("text-anchor", "end");
+        rt.setAttribute("fill", "#222640");
+        rt.setAttribute("font-size", "8");
+        rt.textContent = rightText;
+        g.appendChild(rt);
+      }
+
+      const collapseToggle = makeNodeCircleToggle(g, col, false, () => toggleNodeCircle(n.id));
+      positionNodeCircleToggle(collapseToggle, p, false);
     }
 
     // Tooltip with connection counts
@@ -415,6 +455,11 @@ export function renderCallGraph(graph, ctx) {
         e.stopPropagation();
         return;
       }
+      if (isNodeCircleCollapsed(n.id)) {
+        e.stopPropagation();
+        toggleNodeCircle(n.id);
+        return;
+      }
       e.stopPropagation();
       selectNode(n.id);
       ctx.onNodeClick(n);
@@ -425,6 +470,11 @@ export function renderCallGraph(graph, ctx) {
       if (performance.now() < suppressPointerClicksUntil) {
         e.preventDefault();
         e.stopPropagation();
+        return;
+      }
+      if (isNodeCircleCollapsed(n.id)) {
+        e.stopPropagation();
+        toggleNodeCircle(n.id);
         return;
       }
       e.stopPropagation();
@@ -626,6 +676,36 @@ export function renderCallGraph(graph, ctx) {
     return nodes.map((node) => node.id).filter((nodeId) => nodePos.has(nodeId) && isNodeVisible(nodeId));
   }
 
+  function expandedNodeSize(node) {
+    const indent = node.kind === "method" && node.className ? METHOD_INDENT : 0;
+    return { w: NODE_W - indent, h: NODE_H };
+  }
+
+  function applyNodeShapeMetrics(nodeId, preserveCenter = false) {
+    const pos = nodePos.get(nodeId);
+    const node = nodesById.get(nodeId);
+    if (!pos || !node) return;
+    const size = isNodeCircleCollapsed(nodeId) ? { w: NODE_CIRCLE_D, h: NODE_CIRCLE_D } : expandedNodeSize(node);
+    if (preserveCenter) {
+      const cx = pos.x + pos.w / 2;
+      const cy = pos.y + pos.h / 2;
+      pos.x = cx - size.w / 2;
+      pos.y = cy - size.h / 2;
+    }
+    pos.w = size.w;
+    pos.h = size.h;
+  }
+
+  function toggleNodeCircle(nodeId) {
+    const state = nodeState.get(nodeId);
+    if (!state) return;
+    state.circleCollapsed = !state.circleCollapsed;
+    applyNodeShapeMetrics(nodeId, true);
+    resolveCallGraphNodeSeparation(new Set([nodeId]));
+    persistLayout();
+    ctx.requestRender?.();
+  }
+
   function refreshAllLayoutGeometry() {
     visibleNodeIds().forEach((nodeId) => updateNodePosition(nodeId));
     classGroups.forEach((group) => updateClassFrame(group.id));
@@ -763,7 +843,11 @@ export function renderCallGraph(graph, ctx) {
   function captureLayout() {
     const snapshot = { nodes: {}, groups: {} };
     for (const [nodeId, pos] of nodePos.entries()) {
-      snapshot.nodes[nodeId] = { x: pos.x, y: pos.y };
+      snapshot.nodes[nodeId] = {
+        x: pos.x,
+        y: pos.y,
+        circleCollapsed: isNodeCircleCollapsed(nodeId),
+      };
     }
     for (const mod of moduleOrder) {
       snapshot.groups[moduleGroupId(mod)] = { collapsed: isModuleCollapsed(mod) };
@@ -1433,7 +1517,8 @@ function applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMemb
   const overlapRepel = clamp01(forceOptions?.overlapRepel ?? 0.35);
   const linkAttract = clamp01(forceOptions?.linkAttract ?? 0.28);
   const ambientRepel = clamp01(forceOptions?.ambientRepel ?? 0.18);
-  if (overlapRepel <= 0.001 && linkAttract <= 0.001 && ambientRepel <= 0.001) return;
+  const cohesion = clamp01(forceOptions?.cohesion ?? 0.34);
+  if (overlapRepel <= 0.001 && linkAttract <= 0.001 && ambientRepel <= 0.001 && cohesion <= 0.001) return;
   const anchors = new Map();
   nodePos.forEach((pos, nodeId) => {
     anchors.set(nodeId, { x: pos.x, y: pos.y });
@@ -1445,12 +1530,13 @@ function applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMemb
     neighbors.get(edge.from).add(edge.to);
     neighbors.get(edge.to).add(edge.from);
   });
-  const passes = Math.round(4 + Math.max(overlapRepel, linkAttract, ambientRepel) * 8);
+  const passes = Math.round(4 + Math.max(overlapRepel, linkAttract, ambientRepel, cohesion) * 8);
   const minGapY = NODE_H + NODE_PAD + 4 + overlapRepel * 10 + ambientRepel * 8;
   const maxModuleShift = 26 + overlapRepel * 32 + ambientRepel * 26;
   const intraShift = 12 + overlapRepel * 18 + ambientRepel * 8;
   const attractRadiusY = NODE_H + 56 + linkAttract * 60;
   const ambientRadiusY = NODE_H + 30 + ambientRepel * 26;
+  const targetGapY = NODE_H + NODE_PAD + 34 - cohesion * 18;
 
   for (let pass = 0; pass < passes; pass++) {
     for (const mod of moduleOrder) {
@@ -1461,16 +1547,23 @@ function applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMemb
         const curr = nodePos.get(itemIds[i]);
         const overlap = prev.y + minGapY - curr.y;
         if (overlap > 0) curr.y += overlap;
+        const looseGap = curr.y - (prev.y + NODE_H);
+        if (cohesion > 0.001 && looseGap > targetGapY) {
+          curr.y -= (looseGap - targetGapY) * (0.18 + cohesion * 0.22);
+        }
       }
       const moduleAnchorX = average(itemIds.map((nodeId) => anchors.get(nodeId)?.x || 0));
       itemIds.forEach((nodeId) => {
         const pos = nodePos.get(nodeId);
         const anchor = anchors.get(nodeId);
         pos.x = clamp(
-          moduleAnchorX + (pos.x - moduleAnchorX) * 0.82 + (anchor.x - moduleAnchorX) * 0.18,
+          moduleAnchorX + (pos.x - moduleAnchorX) * (0.82 - cohesion * 0.14) + (anchor.x - moduleAnchorX) * (0.18 + cohesion * 0.18),
           moduleAnchorX - maxModuleShift,
           moduleAnchorX + maxModuleShift,
         );
+        if (cohesion > 0.001) {
+          pos.y += (anchor.y - pos.y) * (0.02 + cohesion * 0.05);
+        }
       });
       for (let i = 0; i < itemIds.length; i++) {
         const leftId = itemIds[i];
@@ -1513,6 +1606,40 @@ function applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, moduleMemb
 function average(values) {
   if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function makeNodeCircleToggle(wrapper, color, collapsed, onToggle) {
+  const hit = document.createElementNS(NS, "circle");
+  hit.setAttribute("r", "8");
+  hit.setAttribute("fill", "#0f1321");
+  hit.setAttribute("stroke", color + "55");
+  hit.setAttribute("stroke-width", "1");
+  hit.style.cursor = "pointer";
+  const glyph = document.createElementNS(NS, "text");
+  glyph.setAttribute("text-anchor", "middle");
+  glyph.setAttribute("font-size", "9");
+  glyph.setAttribute("font-weight", "700");
+  glyph.setAttribute("fill", color + "e0");
+  glyph.textContent = collapsed ? "+" : "-";
+  wrapper.appendChild(hit);
+  wrapper.appendChild(glyph);
+  const fire = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onToggle();
+  };
+  hit.addEventListener("click", fire);
+  glyph.addEventListener("click", fire);
+  return { hit, glyph };
+}
+
+function positionNodeCircleToggle(toggle, pos, collapsed) {
+  const cx = collapsed ? pos.w - 9 : 12;
+  const cy = collapsed ? 9 : 12;
+  toggle.hit.setAttribute("cx", String(cx));
+  toggle.hit.setAttribute("cy", String(cy));
+  toggle.glyph.setAttribute("x", String(cx));
+  toggle.glyph.setAttribute("y", String(cy + 3));
 }
 
 function cssId(s) {

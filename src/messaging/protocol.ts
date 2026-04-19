@@ -71,6 +71,8 @@ export interface UiStateView {
   repelStrength: number;
   attractStrength: number;
   ambientRepelStrength: number;
+  cohesionStrength: number;
+  treeView: boolean;
 }
 
 export interface SetUiStateMessage {

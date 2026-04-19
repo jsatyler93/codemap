@@ -12,6 +12,8 @@ export class GraphWebviewProvider {
     repelStrength: 0.45,
     attractStrength: 0.32,
     ambientRepelStrength: 0.18,
+    cohesionStrength: 0.34,
+    treeView: false,
   };
 
   constructor(
