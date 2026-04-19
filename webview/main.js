@@ -304,8 +304,10 @@ function scheduleUiStateRender() {
 function updateLegend(graph) {
   const lgItems = document.getElementById("lg-items");
   const lgTitle = document.getElementById("lg-title");
+  const legendEl = document.getElementById("legend");
   if (!lgItems) return;
   lgItems.innerHTML = "";
+  let itemCount = 0;
   if (graph.graphType === "flowchart") {
     lgTitle.textContent = "Node Types";
     const types = [
@@ -325,6 +327,7 @@ function updateLegend(graph) {
       d.className = "lg-item";
       d.innerHTML = `<span class="lg-shape" style="background:${t.color}20;border:1px solid ${t.color}"></span>${t.label}`;
       lgItems.appendChild(d);
+      itemCount += 1;
     }
   } else {
     lgTitle.textContent = "Modules";
@@ -335,7 +338,11 @@ function updateLegend(graph) {
       d.className = "lg-item";
       d.innerHTML = `<span class="lg-shape" style="background:${color}20;border:1px solid ${color}"></span>${escapeHtml(mod)}`;
       lgItems.appendChild(d);
+      itemCount += 1;
     }
+  }
+  if (legendEl) {
+    legendEl.classList.toggle("scrollable", itemCount > 6);
   }
 }
 

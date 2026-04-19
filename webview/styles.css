@@ -146,6 +146,22 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
 }
 #info-panel { left: 14px; max-width: 320px; }
 #legend     { left: 14px; max-width: 280px; }
+#legend #lg-items {
+  overflow: visible;
+}
+#legend.scrollable #lg-items {
+  max-height: 152px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+#legend.scrollable #lg-items::-webkit-scrollbar {
+  width: 6px;
+}
+#legend.scrollable #lg-items::-webkit-scrollbar-thumb {
+  background: #2f3650;
+  border-radius: 999px;
+}
 #info-panel .ip-title, #legend .lg-title {
   font-size: 8px; text-transform: uppercase; letter-spacing: 1.5px;
   color: #353a50; margin-bottom: 6px;
