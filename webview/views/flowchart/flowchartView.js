@@ -41,12 +41,13 @@ export function renderFlowchart(graph, ctx) {
   const nodes = graph.nodes.map((node) => ({ ...node }));
   const edges = graph.edges || [];
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const hasPersistedNodeCircleState = nodes.some((node) => typeof savedNodes[node.id]?.circleCollapsed === "boolean");
   const groups = normalizeGroups(graph.metadata?.groups || []);
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const nodeGroupChains = buildNodeGroupChains(groups);
   const groupDepth = buildGroupDepthMap(groups);
   const nodeState = new Map(nodes.map((node) => [node.id, {
-    circleCollapsed: !!savedNodes[node.id]?.circleCollapsed,
+    circleCollapsed: hasPersistedNodeCircleState ? !!savedNodes[node.id]?.circleCollapsed : true,
     treeDx: typeof savedNodes[node.id]?.treeDx === "number" ? savedNodes[node.id].treeDx : 0,
     treeDy: typeof savedNodes[node.id]?.treeDy === "number" ? savedNodes[node.id].treeDy : 0,
   }]));

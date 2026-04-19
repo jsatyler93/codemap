@@ -20,6 +20,7 @@ export function renderCallGraph(graph, ctx) {
   const nodes = graph.nodes.map((n) => ({ ...n }));
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const edges = graph.edges;
+  const hasPersistedNodeCircleState = nodes.some((node) => typeof savedNodes[node.id]?.circleCollapsed === "boolean");
   const isTrace = graph.graphType === "trace";
   const canvasState = ctx.canvas?.state;
   const forceOptions = {
@@ -63,7 +64,7 @@ export function renderCallGraph(graph, ctx) {
     collapsed: !!savedGroups[group.id]?.collapsed,
   }]));
   const nodeState = new Map(nodes.map((node) => [node.id, {
-    circleCollapsed: !!savedNodes[node.id]?.circleCollapsed,
+    circleCollapsed: hasPersistedNodeCircleState ? !!savedNodes[node.id]?.circleCollapsed : true,
   }]));
 
   function isModuleCollapsed(mod) {
@@ -988,9 +989,9 @@ export function renderCallGraph(graph, ctx) {
   ctx._nodeToModule = nodeToModule;
   ctx._execLayer = execLayer;
   ctx._captureLayout = captureLayout;
-  ctx._hasGroupControls = moduleOrder.length > 0 || classGroups.length > 0;
+  ctx._hasGroupControls = moduleOrder.length > 0 || classGroups.length > 0 || nodes.length > 0;
   ctx._expandAllGroups = () => {
-    if (!moduleOrder.length && !classGroups.length) return;
+    if (!moduleOrder.length && !classGroups.length && !nodes.length) return;
     moduleOrder.forEach((mod) => {
       const state = moduleState.get(mod);
       if (state) state.collapsed = false;
@@ -998,21 +999,32 @@ export function renderCallGraph(graph, ctx) {
     classGroups.forEach((group) => {
       const state = classGroupState.get(group.id);
       if (state) state.collapsed = false;
+    });
+    nodes.forEach((node) => {
+      const state = nodeState.get(node.id);
+      if (state) state.circleCollapsed = false;
+      applyNodeShapeMetrics(node.id, true);
     });
     resolveCallGraphNodeSeparation();
     persistLayout();
     ctx.requestRender?.();
   };
   ctx._collapseAllGroups = () => {
-    if (!moduleOrder.length && !classGroups.length) return;
+    if (!moduleOrder.length && !classGroups.length && !nodes.length) return;
     moduleOrder.forEach((mod) => {
       const state = moduleState.get(mod);
-      if (state) state.collapsed = true;
+      if (state) state.collapsed = false;
     });
     classGroups.forEach((group) => {
       const state = classGroupState.get(group.id);
-      if (state) state.collapsed = true;
+      if (state) state.collapsed = false;
     });
+    nodes.forEach((node) => {
+      const state = nodeState.get(node.id);
+      if (state) state.circleCollapsed = true;
+      applyNodeShapeMetrics(node.id, true);
+    });
+    resolveCallGraphNodeSeparation();
     persistLayout();
     ctx.requestRender?.();
   };

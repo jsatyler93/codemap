@@ -35,6 +35,11 @@ const EXCLUDED_DIRS = new Set([
 
 const STORAGE_KEY_UNCHECKED = "codemap.uncheckedFiles";
 
+function toPathKey(fsPath: string): string {
+  const normalized = path.normalize(fsPath);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 /**
  * TreeDataProvider that mirrors the workspace file tree, restricted to folders
  * containing Python files and the .py files themselves. Each item exposes a
@@ -64,7 +69,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
 
   constructor(private readonly context: vscode.ExtensionContext) {
     const stored = context.workspaceState.get<string[]>(STORAGE_KEY_UNCHECKED, []);
-    this.uncheckedPaths = new Set(stored);
+    this.uncheckedPaths = new Set(stored.map((p) => toPathKey(p)));
   }
 
   /** Build the initial tree and start watching for .py file changes. */
@@ -87,7 +92,22 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
     this.treeView = treeView;
     this.disposables.push(
       treeView.onDidChangeCheckboxState((e) => {
-        for (const [node, state] of e.items) {
+        // VS Code can report both a directly toggled file and ancestor folders
+        // whose visual checked state changed as a consequence. Apply only the
+        // deepest changed nodes to avoid accidental subtree-wide selection.
+        const changedNodes = e.items.map(([node]) => node);
+        const effectiveItems = e.items.filter(([node]) => {
+          for (const other of changedNodes) {
+            if (other === node) continue;
+            let parent = other.parent;
+            while (parent) {
+              if (parent === node) return false;
+              parent = parent.parent;
+            }
+          }
+          return true;
+        });
+        for (const [node, state] of effectiveItems) {
           this.applyCheckboxChange(node, state === vscode.TreeItemCheckboxState.Checked);
         }
         this.persistAndEmit();
@@ -134,7 +154,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
     this.uncheckedPaths.clear();
     this.collectAllPaths(this.root, this.uncheckedPaths);
     // The synthetic root is included by collectAllPaths but its key is "" — drop it.
-    this.uncheckedPaths.delete("");
+    this.uncheckedPaths.delete(toPathKey(""));
     this.persistAndEmit();
     this._onDidChangeTreeData.fire();
     this.updateBadge();
@@ -293,7 +313,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
 
   private isChecked(node: FileNode): boolean {
     if (!node.isDirectory) {
-      return !this.uncheckedPaths.has(node.fsPath);
+      return !this.uncheckedPaths.has(toPathKey(node.fsPath));
     }
     // A folder is checked iff at least one descendant .py file is checked.
     // (We display Checked for fully-checked folders too. Mixed state is shown
@@ -308,18 +328,20 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
   private applyCheckboxChange(node: FileNode, checked: boolean): void {
     if (node.isDirectory) {
       this.collectAllFilePaths(node, (filePath) => {
-        if (checked) this.uncheckedPaths.delete(filePath);
-        else this.uncheckedPaths.add(filePath);
+        const key = toPathKey(filePath);
+        if (checked) this.uncheckedPaths.delete(key);
+        else this.uncheckedPaths.add(key);
       });
     } else {
-      if (checked) this.uncheckedPaths.delete(node.fsPath);
-      else this.uncheckedPaths.add(node.fsPath);
+      const key = toPathKey(node.fsPath);
+      if (checked) this.uncheckedPaths.delete(key);
+      else this.uncheckedPaths.add(key);
     }
   }
 
   private collectCheckedFiles(node: FileNode, out: string[]): void {
     if (!node.isDirectory) {
-      if (!this.uncheckedPaths.has(node.fsPath)) out.push(node.fsPath);
+      if (!this.uncheckedPaths.has(toPathKey(node.fsPath))) out.push(node.fsPath);
       return;
     }
     for (const child of node.children.values()) {
@@ -338,7 +360,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
   }
 
   private collectAllPaths(node: FileNode, out: Set<string>): void {
-    out.add(node.fsPath);
+    out.add(toPathKey(node.fsPath));
     for (const child of node.children.values()) {
       this.collectAllPaths(child, out);
     }

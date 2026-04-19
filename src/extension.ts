@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
 import { buildFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
@@ -6,6 +7,8 @@ import { DebugSyncService } from "./live/debugSync";
 import { NavigationController } from "./navigation/navigationController";
 import { ActionsViewProvider } from "./providers/actionsViewProvider";
 import { FileTreeProvider } from "./providers/fileTreeProvider";
+import { buildWorkspaceGraph } from "./python/analysis/pythonCallGraphBuilder";
+import { GraphDocument } from "./python/model/graphTypes";
 
 export function activate(context: vscode.ExtensionContext): void {
   const indexer = new PythonWorkspaceIndexer(context.extensionPath);
@@ -188,6 +191,12 @@ export function activate(context: vscode.ExtensionContext): void {
       lastCommand = () => navController.showWorkspaceCallGraph();
       await navController.showWorkspaceCallGraph().catch(showError);
     }),
+    vscode.commands.registerCommand("codemap.showFileGraph", async (resource?: vscode.Uri) => {
+      const file = await resolveTargetPythonFile(resource);
+      if (!file) return;
+      lastCommand = () => runShowFileGraph(file);
+      await runShowFileGraph(file);
+    }),
     vscode.commands.registerCommand("codemap.refresh", async () => {
       await indexer.getAnalysis(true);
       if (lastCommand) {
@@ -249,6 +258,125 @@ export function activate(context: vscode.ExtensionContext): void {
       showError(e);
     }
   }
+
+  async function resolveTargetPythonFile(resource?: vscode.Uri): Promise<string | undefined> {
+    const candidate = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
+    if (!candidate || candidate.scheme !== "file") {
+      vscode.window.showWarningMessage("CodeMap: open a Python file first.");
+      return undefined;
+    }
+    const doc = await vscode.workspace.openTextDocument(candidate);
+    if (doc.languageId !== "python") {
+      vscode.window.showWarningMessage("CodeMap: selected file is not a Python file.");
+      return undefined;
+    }
+    return candidate.fsPath;
+  }
+
+  async function runShowFileGraph(file: string): Promise<void> {
+    try {
+      const analysis = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
+        () => indexer.getAnalysis(),
+      );
+      logAnalysis(analysis, "file-graph");
+
+      const workspaceGraph = buildWorkspaceGraph(analysis);
+      const target = normalizePath(file);
+      const fileNodeSet = new Set<string>();
+      workspaceGraph.nodes.forEach((node) => {
+        const nodeFile = node.source?.file;
+        if (nodeFile && normalizePath(nodeFile) === target) {
+          fileNodeSet.add(node.id);
+        }
+      });
+
+      const includedNodeSet = new Set<string>(fileNodeSet);
+      workspaceGraph.edges.forEach((edge) => {
+        if (fileNodeSet.has(edge.from) || fileNodeSet.has(edge.to)) {
+          includedNodeSet.add(edge.from);
+          includedNodeSet.add(edge.to);
+        }
+      });
+
+      const nodes = workspaceGraph.nodes.filter((node) => includedNodeSet.has(node.id));
+      const edges = workspaceGraph.edges.filter(
+        (edge) =>
+          includedNodeSet.has(edge.from)
+          && includedNodeSet.has(edge.to)
+          && (fileNodeSet.has(edge.from) || fileNodeSet.has(edge.to)),
+      );
+
+      const edgeSet = new Set(edges.map((edge) => `${edge.from}->${edge.to}`));
+      const timeline = extractScopedTimeline(workspaceGraph, edgeSet);
+      const moduleColors = extractScopedModuleColors(workspaceGraph, nodes);
+      const rootNodeIds = Array.from(fileNodeSet).filter(
+        (id) => !edges.some((edge) => edge.to === id && fileNodeSet.has(edge.from)),
+      );
+      if (!rootNodeIds.length && fileNodeSet.size > 0) {
+        rootNodeIds.push(Array.from(fileNodeSet)[0]);
+      }
+
+      const dependencyCount = Math.max(0, nodes.length - fileNodeSet.size);
+
+      const graph: GraphDocument = {
+        ...workspaceGraph,
+        title: `File call graph: ${path.basename(file)}`,
+        subtitle: `${file} · ${fileNodeSet.size} file symbols + ${dependencyCount} external deps · ${edges.length} call edges`,
+        nodes,
+        edges,
+        rootNodeIds,
+        metadata: {
+          ...(workspaceGraph.metadata || {}),
+          execTimeline: timeline,
+          moduleColors,
+          fileScope: file,
+          includeExternalDependencies: true,
+        },
+      };
+
+      logGraph(graph);
+      provider.show(graph);
+    } catch (e) {
+      showError(e);
+    }
+  }
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").toLowerCase();
+}
+
+function extractScopedTimeline(graph: GraphDocument, edgeSet: Set<string>): Array<{ edge: [string, string]; label: string; desc: string }> {
+  const timeline = graph.metadata?.execTimeline;
+  if (!Array.isArray(timeline)) return [];
+  const scoped: Array<{ edge: [string, string]; label: string; desc: string }> = [];
+  for (const step of timeline) {
+    const edge = Array.isArray((step as { edge?: unknown[] }).edge) ? (step as { edge: unknown[] }).edge : undefined;
+    if (!edge || edge.length !== 2) continue;
+    const from = String(edge[0]);
+    const to = String(edge[1]);
+    if (!edgeSet.has(`${from}->${to}`)) continue;
+    scoped.push({
+      edge: [from, to],
+      label: String((step as { label?: unknown }).label ?? ""),
+      desc: String((step as { desc?: unknown }).desc ?? ""),
+    });
+  }
+  return scoped;
+}
+
+function extractScopedModuleColors(graph: GraphDocument, nodes: GraphDocument["nodes"]): Record<string, string> {
+  const colors = graph.metadata?.moduleColors;
+  if (!colors || typeof colors !== "object") return {};
+  const modules = new Set(nodes.map((node) => node.module).filter((v): v is string => !!v));
+  const out: Record<string, string> = {};
+  for (const [moduleName, color] of Object.entries(colors as Record<string, unknown>)) {
+    if (modules.has(moduleName) && typeof color === "string") {
+      out[moduleName] = color;
+    }
+  }
+  return out;
 }
 
 function findGraphNodeByLocation(
