@@ -26,6 +26,8 @@ const canvasControls = document.getElementById("canvas-controls");
 const collapseGroupsBtn = document.getElementById("btn-collapse-groups");
 const expandGroupsBtn = document.getElementById("btn-expand-groups");
 const overlayBadge = document.getElementById("overlay-badge");
+const overlayLegacyLabel = overlayLegacyToggle ? overlayLegacyToggle.closest("label") : null;
+const overlayModernLabel = overlayModernToggle ? overlayModernToggle.closest("label") : null;
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
@@ -163,6 +165,7 @@ function renderGraph(graph, options = {}) {
   if (!Array.isArray(graph.nodes)) graph.nodes = [];
   if (!Array.isArray(graph.edges)) graph.edges = [];
   currentGraph = graph;
+  updateOverlayControls(graph);
   const preservedView = options.preserveView
     ? { scale: canvas.state.scale, panX: canvas.state.panX, panY: canvas.state.panY }
     : null;
@@ -217,7 +220,7 @@ function renderGraph(graph, options = {}) {
       safeRenderSuperimposed(graph, result, ctx);
     } else {
       result = renderCallGraph(graph, ctx);
-      safeRenderSuperimposed(graph, result, ctx);
+      updateOverlayBadge(graph, result);
     }
     current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
 
@@ -250,10 +253,7 @@ function renderGraph(graph, options = {}) {
 }
 
 function safeRenderSuperimposed(graph, result, ctx) {
-  const supported = graph.graphType === "flowchart"
-    || graph.graphType === "callgraph"
-    || graph.graphType === "workspace";
-  if (!supported) {
+  if (graph.graphType !== "flowchart") {
     updateOverlayBadge(graph, result);
     return;
   }
@@ -268,12 +268,7 @@ function safeRenderSuperimposed(graph, result, ctx) {
 
 function updateOverlayBadge(graph, result) {
   if (!overlayBadge) return;
-  const supported = graph && (
-    graph.graphType === "flowchart"
-    || graph.graphType === "callgraph"
-    || graph.graphType === "workspace"
-  );
-  if (!supported) {
+  if (!graph || graph.graphType !== "flowchart") {
     overlayBadge.classList.remove("visible");
     overlayBadge.textContent = "";
     return;
@@ -283,9 +278,18 @@ function updateOverlayBadge(graph, result) {
   if (overlayPrefs.showModernOverlay) modeParts.push("Reaching-Defs + Interprocedural");
   const modeLabel = modeParts.length ? modeParts.join(" + ") : "off";
   const nodeCount = result?.nodeRect ? result.nodeRect.size : (Array.isArray(graph.nodes) ? graph.nodes.length : 0);
-  const titlePrefix = graph.graphType === "flowchart" ? "Flowchart Overlay" : "Call Graph Overlay";
-  overlayBadge.textContent = `${titlePrefix}: ${modeLabel} (${nodeCount} nodes)`;
+  overlayBadge.textContent = `Flowchart Overlay: ${modeLabel} (${nodeCount} nodes)`;
   overlayBadge.classList.add("visible");
+}
+
+function updateOverlayControls(graph) {
+  const isFlowchart = !!graph && graph.graphType === "flowchart";
+  if (overlayLegacyLabel) {
+    overlayLegacyLabel.style.display = isFlowchart ? "inline-flex" : "none";
+  }
+  if (overlayModernLabel) {
+    overlayModernLabel.style.display = isFlowchart ? "inline-flex" : "none";
+  }
 }
 
 function scheduleUiStateRender() {
