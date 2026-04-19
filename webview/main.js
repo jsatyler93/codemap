@@ -5,6 +5,8 @@ import { makeSvgCanvas } from "./shared/panZoom.js";
 import { cubicPt } from "./shared/geometry.js";
 import { renderFlowchart } from "./views/flowchart/flowchartView.js";
 import { renderCallGraph } from "./views/callgraph/callGraphView.js";
+import { renderDataflowView, removeDataflowOverlay } from "./views/dataflow/dataflowView.js";
+import { clearSuperimposedDataflow, renderSuperimposedDataflow } from "./views/dataflow/superimposedOverlay.js";
 
 const vscode = window.__codemapVscode || acquireVsCodeApi();
 
@@ -17,16 +19,20 @@ const stepBtn    = document.getElementById("btn-step");
 const resetBtn   = document.getElementById("btn-reset");
 const clearBtn   = document.getElementById("btn-clear");
 const refreshBtn = document.getElementById("btn-refresh");
+const overlayLegacyToggle = document.getElementById("toggle-overlay-legacy");
+const overlayModernToggle = document.getElementById("toggle-overlay-modern");
 const searchBox  = document.getElementById("search-box");
 const canvasControls = document.getElementById("canvas-controls");
 const collapseGroupsBtn = document.getElementById("btn-collapse-groups");
 const expandGroupsBtn = document.getElementById("btn-expand-groups");
+const overlayBadge = document.getElementById("overlay-badge");
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let time = 0;
 let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, treeView: false };
+let overlayPrefs = { showLegacyOverlay: true, showModernOverlay: true };
 let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
 const LAYOUT_STORAGE_PREFIX = "codemap.layout.v1:";
@@ -176,6 +182,8 @@ function renderGraph(graph, options = {}) {
   Object.keys(renderCtx).forEach((k) => delete renderCtx[k]);
 
   try {
+    removeDataflowOverlay();
+    clearSuperimposedDataflow(canvas.root);
     canvas.clear();
     if (canvas.clearScaleListeners) canvas.clearScaleListeners();
     const layoutKey = buildLayoutStorageKey(graph);
@@ -194,10 +202,22 @@ function renderGraph(graph, options = {}) {
     };
 
     let result;
+    if (graph.graphType === "dataflow") {
+      result = renderDataflowView(graph);
+      current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
+      updateOverlayBadge(graph, current);
+      updateStats(graph);
+      updateLegend(graph);
+      updateCanvasControls(graph);
+      return;
+    }
+
     if (graph.graphType === "flowchart") {
       result = renderFlowchart(graph, ctx);
+      safeRenderSuperimposed(graph, result, ctx);
     } else {
       result = renderCallGraph(graph, ctx);
+      updateOverlayBadge(graph, result);
     }
     current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
 
@@ -227,6 +247,36 @@ function renderGraph(graph, options = {}) {
     const msg = err && err.stack ? err.stack : String(err);
     vscode.postMessage({ type: "debug", message: "[render-error] " + msg });
   }
+}
+
+function safeRenderSuperimposed(graph, result, ctx) {
+  if (graph.graphType !== "flowchart") {
+    updateOverlayBadge(graph, result);
+    return;
+  }
+  try {
+    renderSuperimposedDataflow(graph, ctx.root, result || {}, overlayPrefs);
+  } catch (err) {
+    const msg = err && err.stack ? err.stack : String(err);
+    vscode.postMessage({ type: "debug", message: "[overlay-error] " + msg });
+  }
+  updateOverlayBadge(graph, result);
+}
+
+function updateOverlayBadge(graph, result) {
+  if (!overlayBadge) return;
+  if (!graph || graph.graphType !== "flowchart") {
+    overlayBadge.classList.remove("visible");
+    overlayBadge.textContent = "";
+    return;
+  }
+  const modeParts = [];
+  if (overlayPrefs.showLegacyOverlay) modeParts.push("Last-Writer Heuristic");
+  if (overlayPrefs.showModernOverlay) modeParts.push("Reaching-Defs + Interprocedural");
+  const modeLabel = modeParts.length ? modeParts.join(" + ") : "off";
+  const nodeCount = result?.nodeRect ? result.nodeRect.size : (Array.isArray(graph.nodes) ? graph.nodes.length : 0);
+  overlayBadge.textContent = `Flowchart Overlay: ${modeLabel} (${nodeCount} nodes)`;
+  overlayBadge.classList.add("visible");
 }
 
 function scheduleUiStateRender() {
@@ -318,6 +368,20 @@ clearBtn.addEventListener("click", () => {
 refreshBtn.addEventListener("click", () => {
   clearStoredLayouts();
   vscode.postMessage({ type: "requestRefresh" });
+});
+
+overlayLegacyToggle?.addEventListener("change", () => {
+  overlayPrefs.showLegacyOverlay = overlayLegacyToggle.checked;
+  if (currentGraph) {
+    renderGraph(currentGraph, { preserveView: true });
+  }
+});
+
+overlayModernToggle?.addEventListener("change", () => {
+  overlayPrefs.showModernOverlay = overlayModernToggle.checked;
+  if (currentGraph) {
+    renderGraph(currentGraph, { preserveView: true });
+  }
 });
 
 collapseGroupsBtn?.addEventListener("click", () => {

@@ -49,6 +49,11 @@
         "category": "CodeMap"
       },
       {
+        "command": "codemap.showDataflow",
+        "title": "CodeMap: Show Data Flow",
+        "category": "CodeMap"
+      },
+      {
         "command": "codemap.showFileGraph",
         "title": "CodeMap: Call Graph for File",
         "category": "CodeMap"
@@ -73,8 +78,13 @@
         },
         {
           "when": "resourceLangId == python",
-          "command": "codemap.showFileGraph",
+          "command": "codemap.showDataflow",
           "group": "codemap@2"
+        },
+        {
+          "when": "resourceLangId == python",
+          "command": "codemap.showFileGraph",
+          "group": "codemap@3"
         }
       ],
       "editor/title/context": [

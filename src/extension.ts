@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
-import { buildFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
+import { buildDataflowFor, buildFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
 import { DebugSyncService } from "./live/debugSync";
 import { NavigationController } from "./navigation/navigationController";
 import { ActionsViewProvider } from "./providers/actionsViewProvider";
@@ -187,6 +187,12 @@ export function activate(context: vscode.ExtensionContext): void {
       lastCommand = runShowFlowchart;
       await runShowFlowchart();
     }),
+    vscode.commands.registerCommand("codemap.showDataflow", async (resource?: vscode.Uri) => {
+      const file = await resolveTargetPythonFile(resource);
+      if (!file) return;
+      lastCommand = () => runShowDataflow(file);
+      await runShowDataflow(file);
+    }),
     vscode.commands.registerCommand("codemap.showWorkspaceGraph", async () => {
       lastCommand = () => navController.showWorkspaceCallGraph();
       await navController.showWorkspaceCallGraph().catch(showError);
@@ -251,6 +257,26 @@ export function activate(context: vscode.ExtensionContext): void {
       const graph = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: building flowchart..." },
         () => buildFlowchartFor(context.extensionPath, file, line, analysis),
+      );
+      logGraph(graph);
+      provider.show(graph);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function runShowDataflow(file: string): Promise<void> {
+    try {
+      const analysis = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
+        () => indexer.getAnalysis(),
+      );
+      const line = (vscode.window.activeTextEditor?.document.uri.fsPath === file)
+        ? vscode.window.activeTextEditor.selection.active.line + 1
+        : 1;
+      const graph = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: building data-flow view..." },
+        () => buildDataflowFor(context.extensionPath, file, line, analysis),
       );
       logGraph(graph);
       provider.show(graph);

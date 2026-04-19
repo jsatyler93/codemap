@@ -71,7 +71,7 @@ export class PythonWorkspaceIndexer implements vscode.Disposable {
       .getConfiguration("codemap")
       .get<number>("workspace.maxFiles", 400);
     const scopedFiles = this.includedFiles;
-    const files = scopedFiles
+    const files = (scopedFiles && scopedFiles.length > 0)
       ? scopedFiles.slice(0, cap).map((filePath) => vscode.Uri.file(filePath))
       : await vscode.workspace.findFiles(
         "**/*.py",

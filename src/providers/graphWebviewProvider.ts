@@ -150,6 +150,8 @@ export class GraphWebviewProvider {
     <button class="btn" id="btn-reset">reset</button>
     <button class="btn" id="btn-clear">clear</button>
     <button class="btn" id="btn-refresh">refresh</button>
+    <label class="tick"><input id="toggle-overlay-legacy" type="checkbox" checked /> last-writer</label>
+    <label class="tick"><input id="toggle-overlay-modern" type="checkbox" checked /> reaching-defs + interproc</label>
     <input id="search-box" type="text" placeholder="Search..." />
   </div>
   <div id="canvas"></div>
@@ -157,6 +159,7 @@ export class GraphWebviewProvider {
     <button class="canvas-btn" id="btn-collapse-groups">collapse all</button>
     <button class="canvas-btn" id="btn-expand-groups">expand all</button>
   </div>
+  <div id="overlay-badge" aria-live="polite"></div>
   <div id="tooltip"></div>
   <div id="legend">
     <div class="lg-title" id="lg-title">Modules</div>

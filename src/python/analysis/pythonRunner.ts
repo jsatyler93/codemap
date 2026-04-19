@@ -195,3 +195,16 @@ export async function buildFlowchartFor(
     analysis,
   });
 }
+
+export async function buildDataflowFor(
+  extensionPath: string,
+  file: string,
+  line: number,
+  analysis?: PyAnalysisResult,
+): Promise<GraphDocument> {
+  return runPythonHelper<GraphDocument>(extensionPath, "dataflow.py", {
+    file,
+    line,
+    analysis,
+  });
+}

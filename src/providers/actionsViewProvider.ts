@@ -217,6 +217,36 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   .slider-block {
     margin-top: 10px;
   }
+  details.dropdown {
+    margin-top: 12px;
+  }
+  details.dropdown summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 0;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--vscode-descriptionForeground);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  details.dropdown summary::-webkit-details-marker {
+    display: none;
+  }
+  details.dropdown summary::before {
+    content: ">";
+    color: var(--vscode-descriptionForeground);
+    transform: rotate(0deg);
+    transition: transform 120ms ease;
+  }
+  details.dropdown[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .dropdown-content {
+    padding: 6px 0 0;
+  }
   .preset-row {
     display: flex;
     gap: 6px;
@@ -258,17 +288,24 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     display: block;
     width: 100%;
     text-align: left;
-    margin: 3px 0;
-    padding: 6px 8px;
+    margin: 6px 0;
+    padding: 8px 10px;
     background: var(--vscode-button-secondaryBackground);
     color: var(--vscode-button-secondaryForeground);
-    border: 1px solid transparent;
-    border-radius: 3px;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 7px;
     cursor: pointer;
-    font-size: var(--vscode-font-size);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+    transition: border-color 120ms ease, transform 90ms ease, background 120ms ease;
   }
   button.action:hover {
+    border-color: var(--vscode-focusBorder);
     background: var(--vscode-button-secondaryHoverBackground);
+  }
+  button.action:active {
+    transform: translateY(1px);
   }
 </style>
 </head>
@@ -279,30 +316,34 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   <button class="action" data-cmd="codemap.showWorkspaceGraph">Workspace Call Graph</button>
   <button class="action" data-cmd="codemap.refresh">Refresh Analysis</button>
 
-  <div class="section-title">Display</div>
-  <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
-  <label class="toggle"><input id="toggle-tree-view" type="checkbox" /> Tree View (flowchart)</label>
-  <div class="preset-row">
-    <button class="preset" data-preset="tidy">Tidy</button>
-    <button class="preset" data-preset="balanced">Balanced</button>
-    <button class="preset" data-preset="loose">Loose</button>
-  </div>
-  <div class="slider-block">
-    <div class="slider-row"><span>Overlap Repel</span><span class="slider-value" id="repel-value">0.45</span></div>
-    <input id="repel-slider" type="range" min="0" max="1" step="0.05" value="0.45" />
-  </div>
-  <div class="slider-block">
-    <div class="slider-row"><span>Link Attract</span><span class="slider-value" id="attract-value">0.32</span></div>
-    <input id="attract-slider" type="range" min="0" max="1" step="0.05" value="0.32" />
-  </div>
-  <div class="slider-block">
-    <div class="slider-row"><span>Ambient Repel</span><span class="slider-value" id="ambient-repel-value">0.18</span></div>
-    <input id="ambient-repel-slider" type="range" min="0" max="1" step="0.05" value="0.18" />
-  </div>
-  <div class="slider-block">
-    <div class="slider-row"><span>Field Cohesion</span><span class="slider-value" id="cohesion-value">0.34</span></div>
-    <input id="cohesion-slider" type="range" min="0" max="1" step="0.05" value="0.34" />
-  </div>
+  <details class="dropdown">
+    <summary>Display Settings</summary>
+    <div class="dropdown-content">
+      <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
+      <label class="toggle"><input id="toggle-tree-view" type="checkbox" /> Tree View (flowchart)</label>
+      <div class="preset-row">
+        <button class="preset" data-preset="tidy">Tidy</button>
+        <button class="preset" data-preset="balanced">Balanced</button>
+        <button class="preset" data-preset="loose">Loose</button>
+      </div>
+      <div class="slider-block">
+        <div class="slider-row"><span>Overlap Repel</span><span class="slider-value" id="repel-value">0.45</span></div>
+        <input id="repel-slider" type="range" min="0" max="1" step="0.05" value="0.45" />
+      </div>
+      <div class="slider-block">
+        <div class="slider-row"><span>Link Attract</span><span class="slider-value" id="attract-value">0.32</span></div>
+        <input id="attract-slider" type="range" min="0" max="1" step="0.05" value="0.32" />
+      </div>
+      <div class="slider-block">
+        <div class="slider-row"><span>Ambient Repel</span><span class="slider-value" id="ambient-repel-value">0.18</span></div>
+        <input id="ambient-repel-slider" type="range" min="0" max="1" step="0.05" value="0.18" />
+      </div>
+      <div class="slider-block">
+        <div class="slider-row"><span>Field Cohesion</span><span class="slider-value" id="cohesion-value">0.34</span></div>
+        <input id="cohesion-slider" type="range" min="0" max="1" step="0.05" value="0.34" />
+      </div>
+    </div>
+  </details>
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
