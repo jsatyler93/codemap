@@ -27,8 +27,8 @@ export function renderSuperimposedDataflow(graph, root, renderResult, options = 
   for (const nodeId of visible) {
     const node = nodeById.get(nodeId);
     if (!node) continue;
-    const reads = asStringArray(node?.metadata?.reads);
-    const writes = asStringArray(node?.metadata?.writes);
+    const reads = nodeReads(node);
+    const writes = nodeWrites(node);
     if (reads.length || writes.length) rwNodeIds.push(nodeId);
   }
   if (rwNodeIds.length < 2) return;
@@ -104,8 +104,8 @@ function deriveLegacyLastWriterEdges(nodeIds, nodeById) {
   for (const nodeId of nodeIds) {
     const node = nodeById.get(nodeId);
     if (!node) continue;
-    const reads = asStringArray(node?.metadata?.reads);
-    const writes = asStringArray(node?.metadata?.writes);
+    const reads = nodeReads(node);
+    const writes = nodeWrites(node);
     for (const variable of reads) {
       const src = lastWriter.get(variable);
       if (src && src !== nodeId) out.push({ from: src, to: nodeId, variable, mode: "legacy" });
@@ -157,7 +157,7 @@ function deriveReachingDefinitionEdges(nodeIds, nodeById, cfgEdges) {
   const killVars = new Map();
   for (const id of nodeIds) {
     const node = nodeById.get(id);
-    const writes = asStringArray(node?.metadata?.writes);
+    const writes = nodeWrites(node);
     killVars.set(id, new Set(writes));
     gen.set(id, new Set(writes.map((v) => defToken(id, v))));
   }
@@ -198,7 +198,7 @@ function deriveReachingDefinitionEdges(nodeIds, nodeById, cfgEdges) {
   const derived = [];
   for (const id of nodeIds) {
     const node = nodeById.get(id);
-    const reads = asStringArray(node?.metadata?.reads);
+    const reads = nodeReads(node);
     if (!reads.length) continue;
     const inDefs = inMap.get(id) || new Set();
     for (const variable of reads) {
@@ -215,6 +215,72 @@ function deriveReachingDefinitionEdges(nodeIds, nodeById, cfgEdges) {
 function asStringArray(value) {
   if (!Array.isArray(value)) return [];
   return value.map((v) => String(v)).filter((v) => v.length > 0);
+}
+
+function nodeReads(node) {
+  const metaReads = asStringArray(node?.metadata?.reads);
+  if (metaReads.length) return metaReads;
+  return inferReadsWrites(node).reads;
+}
+
+function nodeWrites(node) {
+  const metaWrites = asStringArray(node?.metadata?.writes);
+  if (metaWrites.length) return metaWrites;
+  return inferReadsWrites(node).writes;
+}
+
+function inferReadsWrites(node) {
+  const text = [
+    String(node?.label || ""),
+    String(node?.detail || ""),
+  ].join("\n");
+  const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const reads = new Set();
+  const writes = new Set();
+
+  for (const line of lines) {
+    const low = line.toLowerCase();
+    if (low.startsWith("for each ")) {
+      const m = line.match(/^for\s+each\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+in\s+(.+)$/i);
+      if (m) {
+        writes.add(m[1]);
+        collectNames(m[2]).forEach((n) => reads.add(n));
+      }
+      continue;
+    }
+    if (low.startsWith("return ")) {
+      collectNames(line.slice(7)).forEach((n) => reads.add(n));
+      continue;
+    }
+    if (line.includes("=") && !line.includes("==") && !line.includes("!=") && !line.includes(">=") && !line.includes("<=")) {
+      const idx = line.indexOf("=");
+      const left = line.slice(0, idx);
+      const right = line.slice(idx + 1);
+      collectNames(left).forEach((n) => writes.add(n));
+      collectNames(right).forEach((n) => reads.add(n));
+      continue;
+    }
+    collectNames(line).forEach((n) => reads.add(n));
+  }
+
+  for (const w of writes) reads.delete(w);
+  return { reads: Array.from(reads), writes: Array.from(writes) };
+}
+
+function collectNames(text) {
+  const keywords = new Set([
+    "if", "else", "elif", "for", "while", "in", "return", "raise", "try", "except", "finally",
+    "and", "or", "not", "is", "with", "as", "done", "repeat", "implicit", "loop", "after",
+    "break", "continue", "yes", "no", "each",
+  ]);
+  const out = [];
+  const re = /[a-zA-Z_][a-zA-Z0-9_]*/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const name = m[0];
+    if (!keywords.has(name)) out.push(name);
+  }
+  return out;
 }
 
 function defToken(nodeId, variable) {
