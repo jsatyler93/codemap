@@ -10,6 +10,9 @@ import { cubicPt } from "../../shared/geometry.js";
 const NODE_W = 220, NODE_H = 28, NODE_PAD = 4;
 const MOD_PAD_TOP = 32, MOD_PAD_BOTTOM = 12, MOD_PAD_X = 16;
 const COL_GAP = 130, COL_TOP = 30;
+const METHOD_INDENT = 18;
+const MODULE_SUMMARY_W = 210;
+const MODULE_SUMMARY_H = 56;
 
 export function renderCallGraph(graph, ctx) {
   const { root, defs } = ctx;
@@ -17,6 +20,8 @@ export function renderCallGraph(graph, ctx) {
   const edges = graph.edges;
   const isTrace = graph.graphType === "trace";
   const canvasState = ctx.canvas?.state;
+  const savedNodes = ctx.layoutSnapshot?.nodes || {};
+  const savedGroups = ctx.layoutSnapshot?.groups || {};
   let suppressPointerClicksUntil = 0;
 
   // ── SVG filters (glow) ──
@@ -33,6 +38,45 @@ export function renderCallGraph(graph, ctx) {
       moduleOrder.push(mod);
     }
     moduleNodes.get(mod).push(n);
+  }
+  for (const [mod, items] of moduleNodes.entries()) {
+    moduleNodes.set(mod, orderModuleNodes(items));
+  }
+  const moduleState = new Map(moduleOrder.map((mod) => [mod, {
+    collapsed: !!savedGroups[moduleGroupId(mod)]?.collapsed,
+  }]));
+  const classGroups = buildClassGroups(moduleOrder, moduleNodes);
+  const classGroupMap = new Map(classGroups.map((group) => [group.id, group]));
+  const classGroupByNode = new Map();
+  classGroups.forEach((group) => {
+    group.memberIds.forEach((nodeId) => classGroupByNode.set(nodeId, group.id));
+  });
+  const classGroupState = new Map(classGroups.map((group) => [group.id, {
+    collapsed: !!savedGroups[group.id]?.collapsed,
+  }]));
+
+  function isModuleCollapsed(mod) {
+    return !!moduleState.get(mod)?.collapsed;
+  }
+
+  function isNodeVisible(nodeId) {
+    const mod = nodeToModule[nodeId];
+    if (mod && isModuleCollapsed(mod)) return false;
+    const groupId = classGroupByNode.get(nodeId);
+    if (!groupId) return true;
+    const group = classGroupMap.get(groupId);
+    if (!group) return true;
+    return !classGroupState.get(groupId)?.collapsed || nodeId === group.ownerId;
+  }
+
+  function resolveVisibleEndpoint(nodeId) {
+    const mod = nodeToModule[nodeId];
+    if (mod && isModuleCollapsed(mod)) return moduleEndpointKey(mod);
+    const groupId = classGroupByNode.get(nodeId);
+    if (!groupId) return nodeId;
+    const group = classGroupMap.get(groupId);
+    if (!group) return nodeId;
+    return classGroupState.get(groupId)?.collapsed ? group.ownerId : nodeId;
   }
 
   // ── Column packing ──
@@ -64,6 +108,7 @@ export function renderCallGraph(graph, ctx) {
   const modulePos = new Map();
   const moduleMembers = new Map();
   const nodePos = new Map();
+  const nodeToModule = {};
   let cx = 60;
   for (const col of cols) {
     let cy = COL_TOP;
@@ -71,10 +116,12 @@ export function renderCallGraph(graph, ctx) {
       modulePos.set(mod, { x: cx, y: cy, w: NODE_W + MOD_PAD_X * 2, h, color: moduleColor(mod) });
       moduleMembers.set(mod, items.map((it) => it.id));
       items.forEach((it, i) => {
+        nodeToModule[it.id] = mod;
+        const indent = it.kind === "method" && it.className ? METHOD_INDENT : 0;
         nodePos.set(it.id, {
-          x: cx + MOD_PAD_X,
+          x: cx + MOD_PAD_X + indent,
           y: cy + MOD_PAD_TOP + i * (NODE_H + NODE_PAD),
-          w: NODE_W,
+          w: NODE_W - indent,
           h: NODE_H,
         });
       });
@@ -82,7 +129,28 @@ export function renderCallGraph(graph, ctx) {
     }
     cx += NODE_W + MOD_PAD_X * 2 + COL_GAP;
   }
-
+  for (const [nodeId, saved] of Object.entries(savedNodes)) {
+    const pos = nodePos.get(nodeId);
+    if (!pos || typeof saved?.x !== "number" || typeof saved?.y !== "number") continue;
+    pos.x = saved.x;
+    pos.y = saved.y;
+  }
+  if (Object.keys(savedNodes).length === 0) {
+    applyOrganicLayout(moduleOrder, moduleNodes, nodePos, edges);
+  }
+  function computeModuleBounds(mod) {
+    if (isModuleCollapsed(mod)) return computeCollapsedModuleBounds(moduleMembers.get(mod) || [], nodePos);
+    return computeModuleBoundsForItems((moduleMembers.get(mod) || []).filter((nodeId) => isNodeVisible(nodeId)), nodePos);
+  }
+  for (const mod of moduleOrder) {
+    const bounds = computeModuleBounds(mod);
+    const box = modulePos.get(mod);
+    if (!bounds || !box) continue;
+    box.x = bounds.x;
+    box.y = bounds.y;
+    box.w = bounds.w;
+    box.h = bounds.h;
+  }
   // ── Connection counts ──
   const connCount = {};
   for (const n of nodes) connCount[n.id] = { out: 0, in_: 0 };
@@ -91,13 +159,99 @@ export function renderCallGraph(graph, ctx) {
     if (connCount[e.to]) connCount[e.to].in_++;
   }
 
-  // ── Node-to-module lookup ──
-  const nodeToModule = {};
-  for (const n of nodes) nodeToModule[n.id] = n.module || "<unknown>";
-
   // ── SVG Layers ──
   const modLayer   = document.createElementNS(NS, "g"); root.appendChild(modLayer);
+  const classLayer = document.createElementNS(NS, "g"); root.appendChild(classLayer);
   const edgeLayer  = document.createElementNS(NS, "g"); root.appendChild(edgeLayer);
+    const classEls = {};
+    for (const group of classGroups) {
+      if (isModuleCollapsed(group.module)) continue;
+      const bounds = computeClassFrameBounds(group);
+      if (!bounds) continue;
+      const collapsed = !!classGroupState.get(group.id)?.collapsed;
+      const color = moduleColor(group.module || "");
+      const g = document.createElementNS(NS, "g");
+      g.dataset.classGroup = group.id;
+      g.style.cursor = "grab";
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", String(bounds.x));
+      r.setAttribute("y", String(bounds.y));
+      r.setAttribute("width", String(bounds.w));
+      r.setAttribute("height", String(bounds.h));
+      r.setAttribute("rx", "10");
+      r.setAttribute("ry", "10");
+      r.setAttribute("fill", color + "05");
+      r.setAttribute("stroke", color + "24");
+      r.setAttribute("stroke-width", "1");
+      r.setAttribute("stroke-dasharray", collapsed ? "3 3" : "5 4");
+      r.setAttribute("pointer-events", "all");
+      g.appendChild(r);
+
+      const toggle = makeClassGroupToggle(g, color, collapsed, () => toggleClassGroup(group.id));
+      positionClassGroupToggle(toggle, bounds);
+
+      let dragState = null;
+      const beginClassDrag = (e) => {
+        if (e.button !== 0) return;
+        const members = group.memberIds.map((nodeId) => {
+          const pos = nodePos.get(nodeId);
+          return pos ? { nodeId, x: pos.x, y: pos.y } : null;
+        }).filter(Boolean);
+        if (members.length === 0) return;
+        dragState = {
+          pointerId: e.pointerId,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          members,
+          moved: false,
+        };
+        g.setPointerCapture?.(e.pointerId);
+        ctx.hideTooltip();
+        e.stopPropagation();
+        e.preventDefault();
+      };
+      const moveClassDrag = (e) => {
+        if (!dragState || dragState.pointerId !== e.pointerId) return;
+        const scale = canvasState?.scale || 1;
+        const dx = (e.clientX - dragState.startClientX) / scale;
+        const dy = (e.clientY - dragState.startClientY) / scale;
+        if (!dragState.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+          dragState.moved = true;
+        }
+        if (!dragState.moved) return;
+        dragState.members.forEach((member) => {
+          const pos = nodePos.get(member.nodeId);
+          if (!pos) return;
+          pos.x = member.x + dx;
+          pos.y = member.y + dy;
+          updateNodePosition(member.nodeId);
+        });
+        updateClassFrame(group.id);
+        updateModuleFrame(group.module);
+        edgeRecords.forEach((edge) => {
+          if (group.memberIds.includes(edge.src) || group.memberIds.includes(edge.tgt)) {
+            updateEdgeGeometry(edge);
+          }
+        });
+        e.stopPropagation();
+        e.preventDefault();
+      };
+      const endClassDrag = (e) => {
+        if (!dragState || dragState.pointerId !== e.pointerId) return;
+        if (dragState.moved) {
+          suppressPointerClicksUntil = performance.now() + 250;
+          persistLayout();
+        }
+        g.releasePointerCapture?.(e.pointerId);
+        dragState = null;
+      };
+      r.addEventListener("pointerdown", beginClassDrag);
+      g.addEventListener("pointermove", moveClassDrag);
+      g.addEventListener("pointerup", endClassDrag);
+      g.addEventListener("pointercancel", endClassDrag);
+      classLayer.appendChild(g);
+      classEls[group.id] = { g, rect: r, color, toggle };
+    }
   const dotLayer   = document.createElementNS(NS, "g"); root.appendChild(dotLayer);
   const execLayer  = document.createElementNS(NS, "g"); root.appendChild(execLayer);
   const nodeLayer  = document.createElementNS(NS, "g"); root.appendChild(nodeLayer);
@@ -105,34 +259,101 @@ export function renderCallGraph(graph, ctx) {
   // ── Module boxes ──
   const modEls = {};
   for (const [mod, p] of modulePos.entries()) {
+    const color = moduleColor(mod);
     const g = document.createElementNS(NS, "g");
     g.dataset.module = mod;
+    g.style.cursor = "grab";
     const r = document.createElementNS(NS, "rect");
-    r.setAttribute("x", p.x - 6); r.setAttribute("y", p.y - 6);
-    r.setAttribute("width", p.w + 12); r.setAttribute("height", p.h + 12);
     r.setAttribute("rx", 12); r.setAttribute("ry", 12);
-    r.setAttribute("fill", p.color + "08");
-    r.setAttribute("stroke", p.color + "18");
     r.setAttribute("stroke-width", "1");
     g.appendChild(r);
     const t = document.createElementNS(NS, "text");
-    t.setAttribute("x", p.x + 10); t.setAttribute("y", p.y + 14);
-    t.setAttribute("fill", p.color + "70");
     t.setAttribute("font-size", "10"); t.setAttribute("font-weight", "600");
     t.setAttribute("letter-spacing", "0.5");
     t.textContent = mod;
     g.appendChild(t);
+    const meta = document.createElementNS(NS, "text");
+    meta.setAttribute("fill", color + "8a");
+    meta.setAttribute("font-size", "8.5");
+    meta.setAttribute("letter-spacing", "0.25");
+    g.appendChild(meta);
+
+    const toggle = makeModuleGroupToggle(g, color, isModuleCollapsed(mod), () => toggleModuleGroup(mod));
+    let dragState = null;
+    const beginModuleDrag = (e) => {
+      if (e.button !== 0) return;
+      const members = (moduleMembers.get(mod) || []).map((nodeId) => {
+        const pos = nodePos.get(nodeId);
+        return pos ? { nodeId, x: pos.x, y: pos.y } : null;
+      }).filter(Boolean);
+      if (members.length === 0) return;
+      dragState = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        members,
+        moved: false,
+      };
+      g.setPointerCapture?.(e.pointerId);
+      ctx.hideTooltip();
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    const moveModuleDrag = (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      const scale = canvasState?.scale || 1;
+      const dx = (e.clientX - dragState.startClientX) / scale;
+      const dy = (e.clientY - dragState.startClientY) / scale;
+      if (!dragState.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+        dragState.moved = true;
+      }
+      if (!dragState.moved) return;
+      dragState.members.forEach((member) => {
+        const pos = nodePos.get(member.nodeId);
+        if (!pos) return;
+        pos.x = member.x + dx;
+        pos.y = member.y + dy;
+        updateNodePosition(member.nodeId);
+      });
+      updateClassFramesForModule(mod);
+      updateModuleFrame(mod);
+      edgeRecords.forEach((edge) => {
+        if (edge.fromMod === mod || edge.toMod === mod) {
+          updateEdgeGeometry(edge);
+        }
+      });
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    const endModuleDrag = (e) => {
+      if (!dragState || dragState.pointerId !== e.pointerId) return;
+      if (dragState.moved) {
+        suppressPointerClicksUntil = performance.now() + 250;
+        persistLayout();
+      }
+      g.releasePointerCapture?.(e.pointerId);
+      dragState = null;
+    };
+    r.addEventListener("pointerdown", beginModuleDrag);
+    t.addEventListener("pointerdown", beginModuleDrag);
+    meta.addEventListener("pointerdown", beginModuleDrag);
+    g.addEventListener("pointermove", moveModuleDrag);
+    g.addEventListener("pointerup", endModuleDrag);
+    g.addEventListener("pointercancel", endModuleDrag);
     modLayer.appendChild(g);
-    modEls[mod] = { g, rect: r, text: t };
+    modEls[mod] = { g, rect: r, text: t, meta, toggle };
+    updateModuleVisual(mod);
   }
 
   // ── Nodes ──
   const nodeRect = new Map();
   const nodeEls = {};
   for (const n of nodes) {
+    if (!isNodeVisible(n.id)) continue;
     const p = nodePos.get(n.id);
     if (!p) continue;
     const isClass = n.kind === "class";
+    const isMethod = n.kind === "method";
     const isRoot = (graph.rootNodeIds || []).includes(n.id);
     const col = moduleColor(n.module || "");
     nodeRect.set(n.id, { ...p, color: col });
@@ -150,13 +371,22 @@ export function renderCallGraph(graph, ctx) {
     r.setAttribute("stroke-width", isRoot ? "2" : "1");
     g.appendChild(r);
 
-    // Label with class diamond prefix
+    const kindBadge = document.createElementNS(NS, "text");
+    kindBadge.setAttribute("x", "9");
+    kindBadge.setAttribute("y", "14");
+    kindBadge.setAttribute("fill", badgeColor(n, col));
+    kindBadge.setAttribute("font-size", "9");
+    kindBadge.setAttribute("font-weight", "700");
+    kindBadge.textContent = kindLetter(n);
+    g.appendChild(kindBadge);
+
     const lb = document.createElementNS(NS, "text");
-    lb.setAttribute("x", "11"); lb.setAttribute("y", "14");
-    lb.setAttribute("fill", isClass ? col + "dd" : "#8890aa");
+    lb.setAttribute("x", isMethod ? "25" : "22");
+    lb.setAttribute("y", "14");
+    lb.setAttribute("fill", isClass ? col + "dd" : isMethod ? "#9aa5ce" : "#8890aa");
     lb.setAttribute("font-size", "10");
     lb.setAttribute("font-weight", isClass ? "600" : "400");
-    lb.textContent = (isClass ? "◆ " : "") + (n.label || n.id);
+    lb.textContent = (n.label || n.id);
     g.appendChild(lb);
 
     // Line number
@@ -247,6 +477,7 @@ export function renderCallGraph(graph, ctx) {
       if (!dragState || dragState.pointerId !== e.pointerId) return;
       if (dragState.moved) {
         suppressPointerClicksUntil = performance.now() + 250;
+        persistLayout();
       }
       g.classList.remove("node-dragging");
       g.releasePointerCapture?.(e.pointerId);
@@ -266,12 +497,21 @@ export function renderCallGraph(graph, ctx) {
   // ── Edges ──
   const edgeRecords = [];
   const edgeMap = {};
+  const dedupedEdgeIndex = new Map();
   for (const e of edges) {
-    const sp = nodePos.get(e.from);
-    const tp = nodePos.get(e.to);
+    const srcId = resolveVisibleEndpoint(e.from);
+    const tgtId = resolveVisibleEndpoint(e.to);
+    if (!srcId || !tgtId || srcId === tgtId) continue;
+    const dedupeKey = `${srcId}->${tgtId}::${e.label || ""}::${e.resolution || ""}`;
+    if (dedupedEdgeIndex.has(dedupeKey)) {
+      edgeMap[e.from + "->" + e.to] = dedupedEdgeIndex.get(dedupeKey);
+      continue;
+    }
+    const sp = endpointRect(srcId);
+    const tp = endpointRect(tgtId);
     if (!sp || !tp) continue;
-    const fromMod = nodeToModule[e.from];
-    const toMod = nodeToModule[e.to];
+    const fromMod = endpointModule(srcId);
+    const toMod = endpointModule(tgtId);
     const sameMod = fromMod && fromMod === toMod;
     const col = moduleColor(fromMod || "");
     const resAlpha = e.resolution === "unresolved" ? "18"
@@ -330,8 +570,9 @@ export function renderCallGraph(graph, ctx) {
 
     const idx = edgeRecords.length;
     edgeMap[e.from + "->" + e.to] = idx;
+    dedupedEdgeIndex.set(dedupeKey, idx);
     edgeRecords.push({
-      el: path, src: e.from, tgt: e.to, color: col, sameMod,
+      el: path, src: srcId, tgt: tgtId, color: col, sameMod,
       fromMod, toMod, labelEl,
       sx, sy, c1x, c1y, c2x, c2y, tx, ty,
       dot: ambDots[0]?.el, // compat with main.js animation
@@ -339,6 +580,8 @@ export function renderCallGraph(graph, ctx) {
       ambDots,
     });
   }
+  assignEdgeSpread(edgeRecords);
+  edgeRecords.forEach((edge) => updateEdgeGeometry(edge));
 
   function updateNodePosition(nodeId) {
     const pos = nodePos.get(nodeId);
@@ -351,71 +594,64 @@ export function renderCallGraph(graph, ctx) {
   }
 
   function updateModuleFrame(mod) {
-    const memberIds = moduleMembers.get(mod) || [];
-    if (memberIds.length === 0) return;
-    let minX = Number.POSITIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
-    for (const nodeId of memberIds) {
-      const pos = nodePos.get(nodeId);
-      if (!pos) continue;
-      minX = Math.min(minX, pos.x);
-      minY = Math.min(minY, pos.y);
-      maxX = Math.max(maxX, pos.x + pos.w);
-      maxY = Math.max(maxY, pos.y + pos.h);
-    }
-    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+    const bounds = computeModuleBounds(mod);
+    if (!bounds) return;
     const box = modulePos.get(mod);
     const el = modEls[mod];
     if (!box || !el) return;
-    box.x = minX - MOD_PAD_X;
-    box.y = minY - MOD_PAD_TOP;
-    box.w = (maxX - minX) + MOD_PAD_X * 2;
-    box.h = (maxY - minY) + MOD_PAD_TOP + MOD_PAD_BOTTOM;
-    el.rect.setAttribute("x", String(box.x - 6));
-    el.rect.setAttribute("y", String(box.y - 6));
-    el.rect.setAttribute("width", String(box.w + 12));
-    el.rect.setAttribute("height", String(box.h + 12));
-    el.text.setAttribute("x", String(box.x + 10));
-    el.text.setAttribute("y", String(box.y + 14));
+    box.x = bounds.x;
+    box.y = bounds.y;
+    box.w = bounds.w;
+    box.h = bounds.h;
+    updateModuleVisual(mod);
+  }
+
+  function updateClassFrame(groupId) {
+    const group = classGroupMap.get(groupId);
+    const el = classEls[groupId];
+    if (!group || !el) return;
+    const bounds = computeClassFrameBounds(group);
+    if (!bounds) return;
+    el.rect.setAttribute("x", String(bounds.x));
+    el.rect.setAttribute("y", String(bounds.y));
+    el.rect.setAttribute("width", String(bounds.w));
+    el.rect.setAttribute("height", String(bounds.h));
+    el.rect.setAttribute("stroke-dasharray", classGroupState.get(groupId)?.collapsed ? "3 3" : "5 4");
+    positionClassGroupToggle(el.toggle, bounds);
+  }
+
+  function updateClassFramesForModule(mod) {
+    classGroups.forEach((group) => {
+      if (group.module === mod) updateClassFrame(group.id);
+    });
   }
 
   function updateEdgeGeometry(edge) {
-    const sp = nodePos.get(edge.src);
-    const tp = nodePos.get(edge.tgt);
+    const sp = endpointRect(edge.src);
+    const tp = endpointRect(edge.tgt);
     if (!sp || !tp) return;
-    let sx;
-    let sy;
-    let tx;
-    let ty;
-    let c1x;
-    let c1y;
-    let c2x;
-    let c2y;
-    if (edge.sameMod) {
-      const mp = modulePos.get(edge.fromMod);
-      const leftX = (mp ? mp.x : Math.min(sp.x, tp.x)) - 20;
-      sx = sp.x;
-      sy = sp.y + sp.h / 2;
-      tx = tp.x;
-      ty = tp.y + tp.h / 2;
-      c1x = leftX;
-      c1y = sy;
-      c2x = leftX;
-      c2y = ty;
-    } else {
-      const fromOnLeft = sp.x <= tp.x;
-      sx = fromOnLeft ? sp.x + sp.w : sp.x;
-      sy = sp.y + sp.h / 2;
-      tx = fromOnLeft ? tp.x : tp.x + tp.w;
-      ty = tp.y + tp.h / 2;
-      const dx = tx - sx;
-      c1x = sx + dx * 0.42;
-      c1y = sy;
-      c2x = tx - dx * 0.42;
-      c2y = ty;
-    }
+    const sourceLane = (edge.sourceLaneOffset || 0) + (edge.bundleLaneOffset || 0);
+    const targetLane = (edge.targetLaneOffset || 0) - (edge.bundleLaneOffset || 0);
+    const sourceAnchor = pickAnchor(sp, tp, sourceLane * 0.28);
+    const targetAnchor = pickAnchor(tp, sp, targetLane * 0.28);
+    const sx = sourceAnchor.x;
+    const sy = sourceAnchor.y;
+    const tx = targetAnchor.x;
+    const ty = targetAnchor.y;
+    const dx = tx - sx;
+    const dy = ty - sy;
+    const distance = Math.max(1, Math.hypot(dx, dy));
+    const nx = -dy / distance;
+    const ny = dx / distance;
+    const bend = Math.max(42, Math.min(edge.sameMod ? 176 : 152, distance * (edge.sameMod ? 0.55 : 0.4)));
+    const laneOffset = sourceLane;
+    const sway = edge.sameMod
+      ? laneOffset * 0.55 + (Math.abs(dy) < 40 ? 18 * (sx <= tx ? -1 : 1) : 0)
+      : laneOffset;
+    const c1x = sx + sourceAnchor.dx * bend + nx * sway;
+    const c1y = sy + sourceAnchor.dy * bend + ny * sway;
+    const c2x = tx + targetAnchor.dx * bend + nx * sway;
+    const c2y = ty + targetAnchor.dy * bend + ny * sway;
     edge.sx = sx;
     edge.sy = sy;
     edge.tx = tx;
@@ -427,19 +663,41 @@ export function renderCallGraph(graph, ctx) {
     edge.el.setAttribute("d", `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`);
     if (edge.labelEl) {
       const mid = cubicPt(sx, sy, c1x, c1y, c2x, c2y, tx, ty, 0.5);
-      edge.labelEl.setAttribute("x", String(mid.x));
-      edge.labelEl.setAttribute("y", String(mid.y - 4));
+      edge.labelEl.setAttribute("x", String(mid.x + nx * 8));
+      edge.labelEl.setAttribute("y", String(mid.y + ny * 8 - 4));
     }
+    edge.el.setAttribute("marker-end", `url(#a-${cssId(endpointModule(edge.src) || "default")})`);
   }
 
   function refreshLayoutForNode(nodeId) {
     const mod = nodeToModule[nodeId];
+    const classGroupId = classGroupByNode.get(nodeId);
+    if (classGroupId) updateClassFrame(classGroupId);
     updateModuleFrame(mod);
     edgeRecords.forEach((edge) => {
       if (edge.src === nodeId || edge.tgt === nodeId || (edge.sameMod && edge.fromMod === mod)) {
         updateEdgeGeometry(edge);
       }
     });
+  }
+
+  function persistLayout() {
+    if (!ctx.onLayoutChanged) return;
+    ctx.onLayoutChanged(captureLayout());
+  }
+
+  function captureLayout() {
+    const snapshot = { nodes: {}, groups: {} };
+    for (const [nodeId, pos] of nodePos.entries()) {
+      snapshot.nodes[nodeId] = { x: pos.x, y: pos.y };
+    }
+    for (const mod of moduleOrder) {
+      snapshot.groups[moduleGroupId(mod)] = { collapsed: isModuleCollapsed(mod) };
+    }
+    for (const group of classGroups) {
+      snapshot.groups[group.id] = { collapsed: !!classGroupState.get(group.id)?.collapsed };
+    }
+    return snapshot;
   }
 
   // ── Node selection (click to highlight) ──
@@ -457,7 +715,10 @@ export function renderCallGraph(graph, ctx) {
       }
     });
     const connMods = new Set();
-    conn.forEach((nid) => connMods.add(nodeToModule[nid]));
+    conn.forEach((nid) => {
+      const mod = endpointModule(nid);
+      if (mod) connMods.add(mod);
+    });
 
     // Dim/highlight nodes
     Object.entries(nodeEls).forEach(([nid, ne]) => {
@@ -497,6 +758,12 @@ export function renderCallGraph(graph, ctx) {
       const hit = connMods.has(mk);
       me.rect.setAttribute("opacity", hit ? "1" : "0.04");
       me.text.setAttribute("opacity", hit ? "1" : "0.04");
+      me.meta.setAttribute("opacity", hit ? "1" : "0.04");
+    });
+    Object.entries(classEls).forEach(([groupId, ce]) => {
+      const group = classGroupMap.get(groupId);
+      const hit = !!group && group.memberIds.some((memberId) => conn.has(memberId));
+      ce.rect.setAttribute("opacity", hit ? "1" : "0.05");
     });
   }
 
@@ -514,12 +781,16 @@ export function renderCallGraph(graph, ctx) {
     edgeRecords.forEach((e) => {
       e.el.setAttribute("stroke", e.color + "22");
       e.el.setAttribute("stroke-width", "1");
-      if (!e.sameMod) e.el.setAttribute("marker-end", `url(#a-${cssId(nodeToModule[e.src] || "default")})`);
+      if (!e.sameMod) e.el.setAttribute("marker-end", `url(#a-${cssId(endpointModule(e.src) || "default")})`);
       e.ambDots.forEach((d) => d.el.setAttribute("opacity", "0.3"));
     });
     Object.values(modEls).forEach((me) => {
       me.rect.setAttribute("opacity", "1");
       me.text.setAttribute("opacity", "1");
+      me.meta.setAttribute("opacity", "1");
+    });
+    Object.values(classEls).forEach((ce) => {
+      ce.rect.setAttribute("opacity", "1");
     });
   }
 
@@ -555,8 +826,37 @@ export function renderCallGraph(graph, ctx) {
   ctx._edgeRecords = edgeRecords;
   ctx._nodeEls = nodeEls;
   ctx._modEls = modEls;
+  ctx._classEls = classEls;
   ctx._nodeToModule = nodeToModule;
   ctx._execLayer = execLayer;
+  ctx._captureLayout = captureLayout;
+  ctx._hasGroupControls = moduleOrder.length > 0 || classGroups.length > 0;
+  ctx._expandAllGroups = () => {
+    if (!moduleOrder.length && !classGroups.length) return;
+    moduleOrder.forEach((mod) => {
+      const state = moduleState.get(mod);
+      if (state) state.collapsed = false;
+    });
+    classGroups.forEach((group) => {
+      const state = classGroupState.get(group.id);
+      if (state) state.collapsed = false;
+    });
+    persistLayout();
+    ctx.requestRender?.();
+  };
+  ctx._collapseAllGroups = () => {
+    if (!moduleOrder.length && !classGroups.length) return;
+    moduleOrder.forEach((mod) => {
+      const state = moduleState.get(mod);
+      if (state) state.collapsed = true;
+    });
+    classGroups.forEach((group) => {
+      const state = classGroupState.get(group.id);
+      if (state) state.collapsed = true;
+    });
+    persistLayout();
+    ctx.requestRender?.();
+  };
 
   ctx._highlightStep = function (stepIdx) {
     if (stepIdx < 0 || stepIdx >= execTimeline.length) return;
@@ -581,6 +881,7 @@ export function renderCallGraph(graph, ctx) {
     Object.values(modEls).forEach((me) => {
       me.rect.setAttribute("opacity", "0.06");
       me.text.setAttribute("opacity", "0.06");
+      me.meta.setAttribute("opacity", "0.06");
     });
 
     // Highlight source + target
@@ -602,27 +903,31 @@ export function renderCallGraph(graph, ctx) {
         const hit = mods.has(mk);
         me.rect.setAttribute("opacity", hit ? "0.8" : "0.06");
         me.text.setAttribute("opacity", hit ? "1" : "0.06");
+        me.meta.setAttribute("opacity", hit ? "0.9" : "0.06");
       });
     }
   };
 
-  ctx._spawnExecDot = function (edgeIdx, color) {
+  ctx._spawnExecDot = function (edgeIdx, color, options = {}) {
     const e = edgeRecords[edgeIdx];
     if (!e) return null;
+    const radius = typeof options.radius === "number" ? options.radius : 5;
+    const speed = typeof options.speed === "number" ? options.speed : 0.006;
+    const trailScale = typeof options.trailScale === "number" ? options.trailScale : 1;
     const dot = document.createElementNS(NS, "circle");
-    dot.setAttribute("r", "5"); dot.setAttribute("fill", color);
+    dot.setAttribute("r", String(radius)); dot.setAttribute("fill", color);
     dot.setAttribute("opacity", "0.9"); dot.setAttribute("filter", "url(#glow-big)");
     execLayer.appendChild(dot);
     const trails = [];
     for (let i = 0; i < 5; i++) {
       const tr = document.createElementNS(NS, "circle");
-      tr.setAttribute("r", String(4 - i * 0.7));
+      tr.setAttribute("r", String(Math.max(1, (4 - i * 0.7) * trailScale)));
       tr.setAttribute("fill", color);
       tr.setAttribute("opacity", String(0.35 - i * 0.06));
       execLayer.appendChild(tr);
       trails.push({ el: tr });
     }
-    return { el: dot, trails, t: 0, speed: 0.006, edge: e, alive: true };
+    return { el: dot, trails, t: 0, speed, edge: e, alive: true };
   };
 
   ctx._clearExecDots = function () {
@@ -648,9 +953,392 @@ export function renderCallGraph(graph, ctx) {
     initialView: { scale: 0.82, panX: 30, panY: 10 },
     resetSelection,
   };
+
+  function computeClassFrameBounds(group) {
+    return classGroupState.get(group.id)?.collapsed
+      ? computeCollapsedClassBounds(group.ownerId, nodePos)
+      : computeClassBounds(group, nodePos);
+  }
+
+  function endpointRect(endpointId) {
+    if (isModuleEndpoint(endpointId)) return modulePos.get(endpointId.slice(7)) || null;
+    return nodePos.get(endpointId) || null;
+  }
+
+  function endpointModule(endpointId) {
+    if (isModuleEndpoint(endpointId)) return endpointId.slice(7);
+    return nodeToModule[endpointId];
+  }
+
+  function updateModuleVisual(mod) {
+    const box = modulePos.get(mod);
+    const el = modEls[mod];
+    if (!box || !el) return;
+    const collapsed = isModuleCollapsed(mod);
+    const color = moduleColor(mod);
+    const memberIds = moduleMembers.get(mod) || [];
+    if (collapsed) {
+      el.rect.setAttribute("x", String(box.x));
+      el.rect.setAttribute("y", String(box.y));
+      el.rect.setAttribute("width", String(box.w));
+      el.rect.setAttribute("height", String(box.h));
+      el.rect.setAttribute("fill", color + "10");
+      el.rect.setAttribute("stroke", color + "48");
+      el.rect.setAttribute("stroke-dasharray", "4 3");
+      el.text.setAttribute("x", String(box.x + 30));
+      el.text.setAttribute("y", String(box.y + 22));
+      el.text.setAttribute("text-anchor", "start");
+      el.text.setAttribute("fill", color + "d8");
+      el.meta.setAttribute("x", String(box.x + 30));
+      el.meta.setAttribute("y", String(box.y + 38));
+      el.meta.setAttribute("text-anchor", "start");
+      el.meta.textContent = `${memberIds.length} symbols`;
+    } else {
+      el.rect.setAttribute("x", String(box.x - 6));
+      el.rect.setAttribute("y", String(box.y - 6));
+      el.rect.setAttribute("width", String(box.w + 12));
+      el.rect.setAttribute("height", String(box.h + 12));
+      el.rect.setAttribute("fill", color + "08");
+      el.rect.setAttribute("stroke", color + "18");
+      el.rect.setAttribute("stroke-dasharray", "");
+      el.text.setAttribute("x", String(box.x + 28));
+      el.text.setAttribute("y", String(box.y + 14));
+      el.text.setAttribute("text-anchor", "start");
+      el.text.setAttribute("fill", color + "70");
+      el.meta.textContent = "";
+    }
+    setToggleGlyph(el.toggle, collapsed);
+    positionModuleGroupToggle(el.toggle, collapsed ? box : { x: box.x - 6, y: box.y - 6, w: box.w + 12, h: box.h + 12 });
+  }
+
+  function toggleModuleGroup(mod) {
+    const state = moduleState.get(mod);
+    if (!state) return;
+    state.collapsed = !state.collapsed;
+    persistLayout();
+    ctx.requestRender?.();
+  }
+
+  function toggleClassGroup(groupId) {
+    const state = classGroupState.get(groupId);
+    if (!state) return;
+    state.collapsed = !state.collapsed;
+    persistLayout();
+    ctx.requestRender?.();
+  }
 }
 
 // ── Helpers ──
+
+function computeModuleBoundsForItems(memberIds, nodePos) {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const nodeId of memberIds) {
+    const pos = nodePos.get(nodeId);
+    if (!pos) continue;
+    minX = Math.min(minX, pos.x);
+    minY = Math.min(minY, pos.y);
+    maxX = Math.max(maxX, pos.x + pos.w);
+    maxY = Math.max(maxY, pos.y + pos.h);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+  return {
+    x: minX - MOD_PAD_X,
+    y: minY - MOD_PAD_TOP,
+    w: (maxX - minX) + MOD_PAD_X * 2,
+    h: (maxY - minY) + MOD_PAD_TOP + MOD_PAD_BOTTOM,
+  };
+}
+
+function computeClassBounds(group, nodePos) {
+  const bounds = computeModuleBoundsForItems(group.memberIds, nodePos);
+  if (!bounds) return null;
+  return {
+    x: bounds.x + 12,
+    y: bounds.y + 24,
+    w: Math.max(80, bounds.w - 24),
+    h: Math.max(40, bounds.h - 28),
+  };
+}
+
+function computeCollapsedClassBounds(ownerId, nodePos) {
+  const pos = nodePos.get(ownerId);
+  if (!pos) return null;
+  return {
+    x: pos.x - 10,
+    y: pos.y - 8,
+    w: pos.w + 20,
+    h: pos.h + 16,
+  };
+}
+
+function computeCollapsedModuleBounds(memberIds, nodePos) {
+  const bounds = computeModuleBoundsForItems(memberIds, nodePos);
+  if (!bounds) return null;
+  return {
+    x: bounds.x + Math.max(0, (bounds.w - MODULE_SUMMARY_W) / 2),
+    y: bounds.y + 8,
+    w: Math.max(MODULE_SUMMARY_W, Math.min(bounds.w, MODULE_SUMMARY_W + 80)),
+    h: MODULE_SUMMARY_H,
+  };
+}
+
+function buildClassGroups(moduleOrder, moduleNodes) {
+  const groups = [];
+  for (const mod of moduleOrder) {
+    const items = moduleNodes.get(mod) || [];
+    items.forEach((item) => {
+      if (item.kind !== "class") return;
+      const memberIds = [item.id];
+      items.forEach((candidate) => {
+        if (candidate.kind === "method" && candidate.className === item.label) {
+          memberIds.push(candidate.id);
+        }
+      });
+      if (memberIds.length <= 1) return;
+      groups.push({ id: `${item.id}::group`, module: mod, memberIds, ownerId: item.id, label: item.label || item.id });
+    });
+  }
+  return groups;
+}
+
+function applyOrganicLayout(moduleOrder, moduleNodes, nodePos, edges) {
+  const neighbors = new Map();
+  edges.forEach((edge) => {
+    if (!neighbors.has(edge.from)) neighbors.set(edge.from, []);
+    if (!neighbors.has(edge.to)) neighbors.set(edge.to, []);
+    neighbors.get(edge.from).push(edge.to);
+    neighbors.get(edge.to).push(edge.from);
+  });
+
+  const classOwners = new Map();
+  moduleOrder.forEach((mod) => {
+    const items = moduleNodes.get(mod) || [];
+    const classIdsByName = new Map(items.filter((item) => item.kind === "class").map((item) => [item.label, item.id]));
+    items.forEach((item) => {
+      if (item.kind === "method" && item.className && classIdsByName.has(item.className)) {
+        classOwners.set(item.id, classIdsByName.get(item.className));
+      }
+    });
+  });
+
+  for (let pass = 0; pass < 10; pass++) {
+    moduleOrder.forEach((mod) => {
+      const items = moduleNodes.get(mod) || [];
+      const proposals = new Map();
+      items.forEach((item) => {
+        const pos = nodePos.get(item.id);
+        if (!pos) return;
+        let targetY = pos.y;
+        const linked = neighbors.get(item.id) || [];
+        if (linked.length) {
+          const avgCenter = linked.reduce((sum, linkedId) => {
+            const linkedPos = nodePos.get(linkedId);
+            return sum + (linkedPos ? linkedPos.y + linkedPos.h / 2 : pos.y + pos.h / 2);
+          }, 0) / linked.length;
+          targetY = avgCenter - pos.h / 2;
+        }
+        const ownerId = classOwners.get(item.id);
+        if (ownerId) {
+          const ownerPos = nodePos.get(ownerId);
+          if (ownerPos) targetY = (targetY * 0.55) + ((ownerPos.y + NODE_H + NODE_PAD + 2) * 0.45);
+        }
+        proposals.set(item.id, pos.y + clamp((targetY - pos.y) * 0.22, -18, 18));
+      });
+
+      let cursor = Number.NEGATIVE_INFINITY;
+      items.forEach((item) => {
+        const pos = nodePos.get(item.id);
+        if (!pos) return;
+        const desired = proposals.get(item.id) ?? pos.y;
+        if (!Number.isFinite(cursor)) cursor = desired;
+        pos.y = Math.max(desired, cursor);
+        cursor = pos.y + NODE_H + NODE_PAD + (item.kind === "class" ? 4 : 0);
+      });
+    });
+  }
+}
+
+function orderModuleNodes(items) {
+  const sorted = [...items].sort((left, right) => {
+    const leftLine = left.source?.line || 0;
+    const rightLine = right.source?.line || 0;
+    return leftLine - rightLine || String(left.label || left.id).localeCompare(String(right.label || right.id));
+  });
+  const classes = sorted.filter((item) => item.kind === "class");
+  const methodsByClass = new Map();
+  const standalone = [];
+  for (const item of sorted) {
+    if (item.kind === "method" && item.className) {
+      if (!methodsByClass.has(item.className)) methodsByClass.set(item.className, []);
+      methodsByClass.get(item.className).push(item);
+    } else if (item.kind !== "class") {
+      standalone.push(item);
+    }
+  }
+  const ordered = [];
+  const seenIds = new Set();
+  classes.forEach((classNode) => {
+    ordered.push(classNode);
+    seenIds.add(classNode.id);
+    const classMethods = methodsByClass.get(classNode.label) || [];
+    classMethods.forEach((methodNode) => {
+      ordered.push(methodNode);
+      seenIds.add(methodNode.id);
+    });
+  });
+  standalone.forEach((item) => {
+    if (!seenIds.has(item.id)) {
+      ordered.push(item);
+      seenIds.add(item.id);
+    }
+  });
+  sorted.forEach((item) => {
+    if (!seenIds.has(item.id)) ordered.push(item);
+  });
+  return ordered;
+}
+
+function assignEdgeSpread(edgeRecords) {
+  const bySource = new Map();
+  const byTarget = new Map();
+  const byBundle = new Map();
+  edgeRecords.forEach((edge) => {
+    if (!bySource.has(edge.src)) bySource.set(edge.src, []);
+    bySource.get(edge.src).push(edge);
+    if (!byTarget.has(edge.tgt)) byTarget.set(edge.tgt, []);
+    byTarget.get(edge.tgt).push(edge);
+    const bundleKey = `${edge.fromMod}->${edge.toMod}`;
+    if (!byBundle.has(bundleKey)) byBundle.set(bundleKey, []);
+    byBundle.get(bundleKey).push(edge);
+  });
+  bySource.forEach((bucket) => {
+    bucket.forEach((edge, index) => {
+      edge.sourceLaneOffset = (index - (bucket.length - 1) / 2) * 16;
+    });
+  });
+  byTarget.forEach((bucket) => {
+    bucket.forEach((edge, index) => {
+      edge.targetLaneOffset = (index - (bucket.length - 1) / 2) * 16;
+    });
+  });
+  byBundle.forEach((bucket) => {
+    bucket.forEach((edge, index) => {
+      edge.bundleLaneOffset = (index - (bucket.length - 1) / 2) * (edge.sameMod ? 10 : 14);
+    });
+  });
+}
+
+function moduleGroupId(mod) {
+  return `module:${mod}::group`;
+}
+
+function moduleEndpointKey(mod) {
+  return `module:${mod}`;
+}
+
+function isModuleEndpoint(endpointId) {
+  return typeof endpointId === "string" && endpointId.startsWith("module:") && !endpointId.endsWith("::group");
+}
+
+function makeClassGroupToggle(wrapper, color, collapsed, onToggle) {
+  const hit = document.createElementNS(NS, "circle");
+  hit.setAttribute("r", "7");
+  hit.setAttribute("fill", color + "16");
+  hit.setAttribute("stroke", color + "70");
+  hit.setAttribute("stroke-width", "1");
+  hit.style.cursor = "pointer";
+  wrapper.appendChild(hit);
+
+  const glyph = document.createElementNS(NS, "text");
+  glyph.setAttribute("text-anchor", "middle");
+  glyph.setAttribute("dominant-baseline", "central");
+  glyph.setAttribute("fill", color + "ee");
+  glyph.setAttribute("font-size", "10");
+  glyph.setAttribute("font-weight", "700");
+  glyph.textContent = collapsed ? "+" : "-";
+  glyph.style.cursor = "pointer";
+  wrapper.appendChild(glyph);
+
+  const trigger = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onToggle();
+  };
+  [hit, glyph].forEach((node) => {
+    node.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    node.addEventListener("click", trigger);
+  });
+  return { hit, glyph };
+}
+
+function makeModuleGroupToggle(wrapper, color, collapsed, onToggle) {
+  const toggle = makeClassGroupToggle(wrapper, color, collapsed, onToggle);
+  toggle.hit.setAttribute("r", "8");
+  return toggle;
+}
+
+function positionClassGroupToggle(toggle, bounds) {
+  const cx = bounds.x + 11;
+  const cy = bounds.y + 11;
+  toggle.hit.setAttribute("cx", String(cx));
+  toggle.hit.setAttribute("cy", String(cy));
+  toggle.glyph.setAttribute("x", String(cx));
+  toggle.glyph.setAttribute("y", String(cy + 0.5));
+}
+
+function positionModuleGroupToggle(toggle, bounds) {
+  const cx = bounds.x + 12;
+  const cy = bounds.y + 12;
+  toggle.hit.setAttribute("cx", String(cx));
+  toggle.hit.setAttribute("cy", String(cy));
+  toggle.glyph.setAttribute("x", String(cx));
+  toggle.glyph.setAttribute("y", String(cy + 0.5));
+}
+
+function setToggleGlyph(toggle, collapsed) {
+  if (toggle?.glyph) toggle.glyph.textContent = collapsed ? "+" : "-";
+}
+
+function kindLetter(node) {
+  if (node.kind === "class") return "C";
+  if (node.kind === "method") return "M";
+  return "F";
+}
+
+function badgeColor(node, color) {
+  if (node.kind === "class") return color + "ee";
+  if (node.kind === "method") return "#9ece6a";
+  return "#7dcfff";
+}
+
+function pickAnchor(source, target, laneOffset = 0) {
+  const sourceCenterX = source.x + source.w / 2;
+  const sourceCenterY = source.y + source.h / 2;
+  const targetCenterX = target.x + target.w / 2;
+  const targetCenterY = target.y + target.h / 2;
+  const dx = targetCenterX - sourceCenterX;
+  const dy = targetCenterY - sourceCenterY;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    if (dx >= 0) {
+      return { x: source.x + source.w, y: sourceCenterY + laneOffset, dx: 1, dy: 0 };
+    }
+    return { x: source.x, y: sourceCenterY + laneOffset, dx: -1, dy: 0 };
+  }
+  if (dy >= 0) {
+    return { x: sourceCenterX + laneOffset, y: source.y + source.h, dx: 0, dy: 1 };
+  }
+  return { x: sourceCenterX + laneOffset, y: source.y, dx: 0, dy: -1 };
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
 function cssId(s) {
   return String(s).replace(/[^a-zA-Z0-9_-]/g, "_");

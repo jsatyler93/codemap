@@ -66,10 +66,20 @@ export interface SetRuntimeFrameMessage {
   highlightNodeIds?: string[];
 }
 
+export interface UiStateView {
+  showEvidence: boolean;
+}
+
+export interface SetUiStateMessage {
+  type: "setUiState";
+  state: UiStateView;
+}
+
 export type FromExtensionMessage =
   | SetGraphMessage
   | SetThemeMessage
-  | SetRuntimeFrameMessage;
+  | SetRuntimeFrameMessage
+  | SetUiStateMessage;
 export type FromWebviewMessage =
   | RevealNodeMessage
   | RequestRefreshMessage

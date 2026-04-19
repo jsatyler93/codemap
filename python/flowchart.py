@@ -8,7 +8,7 @@ flowchart GraphDocument JSON describing its control flow.
 Granularity rule (per plan):
   - Linear runs of simple statements collapse into one 'process' or 'compute'.
   - if/elif/else  -> decision diamonds with control_flow edges.
-  - for/while     -> decision (loop header) + body + back-edge.
+    - for/while     -> loop header + body + explicit exit path.
   - try/except/finally -> decision into except branches.
   - raise         -> error node.
   - return        -> return node.
@@ -22,6 +22,7 @@ import ast
 import json
 import sys
 import os
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 FuncNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
@@ -29,6 +30,13 @@ LoopNode = Union[ast.For, ast.AsyncFor, ast.While]
 NodeDict = Dict[str, Any]
 EdgeDict = Dict[str, Any]
 GraphDoc = Dict[str, Any]
+
+
+@dataclass
+class BuildResult:
+    fallthrough: Optional[str]
+    breaks: List[str] = field(default_factory=list)
+    continues: List[str] = field(default_factory=list)
 
 
 def find_target_function(tree: ast.AST, line: int) -> Optional[FuncNode]:
@@ -60,6 +68,8 @@ class FlowBuilder:
         self.file_path: str = file_path
         self.nodes: List[NodeDict] = []
         self.edges: List[EdgeDict] = []
+        self.groups: List[Dict[str, Any]] = []
+        self.group_stack: List[str] = []
         self._counter: int = 0
         self.var_types: Dict[str, str] = {}
         self.return_type: Optional[str] = None
@@ -129,6 +139,28 @@ class FlowBuilder:
             "label": label,
         })
 
+    def _begin_group(self, kind: str, label: str, line: int) -> Dict[str, Any]:
+        group_id = self._id("group")
+        group = {
+            "id": group_id,
+            "kind": kind,
+            "label": label,
+            "line": line,
+            "parentGroupId": self.group_stack[-1] if self.group_stack else None,
+        }
+        self.group_stack.append(group_id)
+        return group
+
+    def _end_group(self, group: Dict[str, Any], start_index: int, exclude_ids: Optional[List[str]] = None) -> None:
+        if self.group_stack and self.group_stack[-1] == group["id"]:
+            self.group_stack.pop()
+        exclude = set(exclude_ids or [])
+        node_ids = [node["id"] for node in self.nodes[start_index:] if node["id"] not in exclude]
+        if not node_ids:
+            return
+        group["nodeIds"] = node_ids
+        self.groups.append(group)
+
     def build(self, func: FuncNode) -> Tuple[GraphDoc, str]:
         name = func.name
         params = _extract_params(func, self.symbol)
@@ -155,8 +187,10 @@ class FlowBuilder:
                 "displayLines": [name, signature] if signature else [name],
             },
         )
+        body_group = self._begin_group("function_body", f"{name} body", func.lineno)
+        body_start = len(self.nodes)
         terminal = self._build_block(func.body, entry)
-        if terminal is not None:
+        if terminal.fallthrough is not None:
             ret = self._add_node(
                 "return",
                 "implicit return",
@@ -166,7 +200,8 @@ class FlowBuilder:
                     "typeLabel": f"returns {self.return_type}" if self.return_type else "",
                 },
             )
-            self._add_edge(terminal, ret)
+            self._add_edge(terminal.fallthrough, ret)
+        self._end_group(body_group, body_start)
         return ({
             "graphType": "flowchart",
             "title": f"{name}()",
@@ -178,15 +213,18 @@ class FlowBuilder:
                 "function": name,
                 "params": params,
                 "returnType": self.return_type,
+                "groups": self.groups,
             },
         }, name)
 
     # Build a block of statements. Returns the id of the last node, or None
     # if control does not fall through (return/raise/break/continue).
-    def _build_block(self, stmts: List[ast.stmt], prev: Optional[str]) -> Optional[str]:
+    def _build_block(self, stmts: List[ast.stmt], prev: Optional[str]) -> BuildResult:
         # Group consecutive simple statements into one 'process'.
         run: List[ast.stmt] = []
         last = prev
+        breaks: List[str] = []
+        continues: List[str] = []
 
         def flush_run() -> Optional[str]:
             nonlocal run, last
@@ -210,21 +248,40 @@ class FlowBuilder:
         for stmt in stmts:
             if isinstance(stmt, (ast.If,)):
                 flush_run()
-                last = self._build_if(stmt, last)
+                branch = self._build_if(stmt, last)
+                last = branch.fallthrough
+                breaks.extend(branch.breaks)
+                continues.extend(branch.continues)
+                if last is None:
+                    return BuildResult(None, breaks=breaks, continues=continues)
             elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
                 flush_run()
-                last = self._build_loop(stmt, last)
+                loop_result = self._build_loop(stmt, last)
+                last = loop_result.fallthrough
+                breaks.extend(loop_result.breaks)
+                continues.extend(loop_result.continues)
+                if last is None:
+                    return BuildResult(None, breaks=breaks, continues=continues)
             elif isinstance(stmt, ast.Try):
                 flush_run()
-                last = self._build_try(stmt, last)
+                try_result = self._build_try(stmt, last)
+                last = try_result.fallthrough
+                breaks.extend(try_result.breaks)
+                continues.extend(try_result.continues)
+                if last is None:
+                    return BuildResult(None, breaks=breaks, continues=continues)
             elif isinstance(stmt, ast.With) or isinstance(stmt, ast.AsyncWith):
                 flush_run()
                 label = "with " + ", ".join(_with_text(i) for i in stmt.items)
                 nid = self._add_node("process", label, stmt.lineno)
                 if last is not None:
                     self._add_edge(last, nid)
-                last = nid
-                last = self._build_block(stmt.body, last)
+                body_result = self._build_block(stmt.body, nid)
+                last = body_result.fallthrough
+                breaks.extend(body_result.breaks)
+                continues.extend(body_result.continues)
+                if last is None:
+                    return BuildResult(None, breaks=breaks, continues=continues)
             elif isinstance(stmt, ast.Return):
                 flush_run()
                 lbl = "return " + (_short(stmt.value) if stmt.value else "")
@@ -248,61 +305,75 @@ class FlowBuilder:
                 )
                 if last is not None:
                     self._add_edge(last, nid)
-                return None
+                return BuildResult(None, breaks=breaks, continues=continues)
             elif isinstance(stmt, ast.Raise):
                 flush_run()
                 lbl = "raise " + (_short(stmt.exc) if stmt.exc else "")
                 nid = self._add_node("error", lbl.strip(), stmt.lineno)
                 if last is not None:
                     self._add_edge(last, nid)
-                return None
-            elif isinstance(stmt, (ast.Break, ast.Continue)):
+                return BuildResult(None, breaks=breaks, continues=continues)
+            elif isinstance(stmt, ast.Break):
                 flush_run()
-                lbl = "break" if isinstance(stmt, ast.Break) else "continue"
-                nid = self._add_node("process", lbl, stmt.lineno)
+                nid = self._add_node("break", "break", stmt.lineno, metadata={"displayLines": ["break"]})
                 if last is not None:
                     self._add_edge(last, nid)
-                return None
+                breaks.append(nid)
+                return BuildResult(None, breaks=breaks, continues=continues)
+            elif isinstance(stmt, ast.Continue):
+                flush_run()
+                nid = self._add_node("continue", "continue", stmt.lineno, metadata={"displayLines": ["continue"]})
+                if last is not None:
+                    self._add_edge(last, nid)
+                continues.append(nid)
+                return BuildResult(None, breaks=breaks, continues=continues)
             else:
                 run.append(stmt)
         flush_run()
-        return last
+        return BuildResult(last, breaks=breaks, continues=continues)
 
-    def _build_if(self, stmt: ast.If, prev: Optional[str]) -> Optional[str]:
+    def _build_if(self, stmt: ast.If, prev: Optional[str]) -> BuildResult:
+        group = self._begin_group("branch", "if " + _short(stmt.test), stmt.lineno)
+        start_index = len(self.nodes)
         cond = "if " + _short(stmt.test) + "?"
         dec = self._add_node("decision", cond, stmt.lineno)
         if prev is not None:
             self._add_edge(prev, dec)
-        then_end = self._build_block(stmt.body, dec)
-        else_end: Optional[str] = dec
-        else_label = "no"
+        then_result = self._build_block(stmt.body, dec)
+        self._relabel_first_edge(dec, "yes")
+        else_result = BuildResult(dec)
         if stmt.orelse:
             # If single elif, recurse to keep chain readable.
             if len(stmt.orelse) == 1 and isinstance(stmt.orelse[0], ast.If):
-                else_end = self._build_if(stmt.orelse[0], dec)
+                else_result = self._build_if(stmt.orelse[0], dec)
             else:
-                else_end = self._build_block(stmt.orelse, dec)
+                else_result = self._build_block(stmt.orelse, dec)
+            self._relabel_first_edge(dec, "no")
         # Connect both branches into a join node if both fall through.
-        if then_end is None and else_end is None:
-            return None
+        breaks = then_result.breaks + else_result.breaks
+        continues = then_result.continues + else_result.continues
+        if then_result.fallthrough is None and else_result.fallthrough is None:
+            self._end_group(group, start_index)
+            return BuildResult(None, breaks=breaks, continues=continues)
         join = self._add_node("process", "•", stmt.lineno)
-        if then_end is not None:
-            # Re-label the first edge from dec to then-branch.
-            self._relabel_first_edge(dec, "yes")
-            self._add_edge(then_end, join)
-        if else_end is not None:
-            if else_end is dec:
-                self._add_edge(dec, join, else_label)
+        if then_result.fallthrough is not None:
+            self._add_edge(then_result.fallthrough, join)
+        if else_result.fallthrough is not None:
+            if else_result.fallthrough is dec:
+                self._add_edge(dec, join, "no")
             else:
-                self._add_edge(else_end, join)
-        return join
+                self._add_edge(else_result.fallthrough, join)
+        self._end_group(group, start_index)
+        return BuildResult(join, breaks=breaks, continues=continues)
 
-    def _build_loop(self, stmt: LoopNode, prev: Optional[str]) -> Optional[str]:
+    def _build_loop(self, stmt: LoopNode, prev: Optional[str]) -> BuildResult:
+        group = self._begin_group("loop", _loop_group_label(stmt), stmt.lineno)
+        start_index = len(self.nodes)
         if isinstance(stmt, ast.While):
-            label = "while " + _short(stmt.test) + "?"
+            label = "while " + _short(stmt.test)
             type_label = ""
         else:  # for / async for
-            label = "for " + _short(stmt.target) + " in " + _short(stmt.iter) + "?"
+            label = "for each " + _short(stmt.target) + " in " + _short(stmt.iter)
             target_names = _target_names(stmt.target)
             loop_type = _infer_iter_item_type(
                 stmt.iter,
@@ -318,39 +389,77 @@ class FlowBuilder:
             typed_targets = [f"{target_name}: {self.var_types[target_name]}" for target_name in target_names if target_name in self.var_types]
             type_label = ", ".join(typed_targets)
         header = self._add_node(
-            "decision",
+            "loop",
             label,
             stmt.lineno,
-            metadata={"typeLabel": type_label} if type_label else None,
+            metadata={
+                "typeLabel": type_label,
+                "displayLines": _split_loop_label(label),
+            } if type_label else {"displayLines": _split_loop_label(label)},
         )
         if prev is not None:
             self._add_edge(prev, header)
-        body_end = self._build_block(stmt.body, header)
-        if body_end is not None:
-            self._add_edge(body_end, header, "loop")
-        return header
+        after_loop = self._add_node("process", "after loop", getattr(stmt, "end_lineno", stmt.lineno))
+        body_result = self._build_block(stmt.body, header)
+        if body_result.fallthrough is not None:
+            self._add_edge(body_result.fallthrough, header, "repeat")
+        for continue_node in body_result.continues:
+            self._add_edge(continue_node, header, "continue")
+        for break_node in body_result.breaks:
+            self._add_edge(break_node, after_loop, "break")
+        if stmt.orelse:
+            loop_else = self._add_node(
+                "loop_else",
+                "loop else",
+                stmt.orelse[0].lineno,
+                metadata={"displayLines": ["loop", "else"]},
+            )
+            self._add_edge(header, loop_else, "done")
+            else_result = self._build_block(stmt.orelse, loop_else)
+            if else_result.fallthrough is not None:
+                self._add_edge(else_result.fallthrough, after_loop)
+            has_fallthrough = else_result.fallthrough is not None or bool(body_result.breaks)
+            self._end_group(group, start_index, exclude_ids=[after_loop])
+            return BuildResult(after_loop if has_fallthrough else None)
+        self._add_edge(header, after_loop, "done")
+        self._end_group(group, start_index, exclude_ids=[after_loop])
+        return BuildResult(after_loop)
 
-    def _build_try(self, stmt: ast.Try, prev: Optional[str]) -> Optional[str]:
+    def _build_try(self, stmt: ast.Try, prev: Optional[str]) -> BuildResult:
         guard = self._add_node("decision", "try", stmt.lineno)
         if prev is not None:
             self._add_edge(prev, guard)
-        try_end = self._build_block(stmt.body, guard)
-        join = self._add_node("process", "•", stmt.lineno)
-        if try_end is not None:
-            self._add_edge(try_end, join, "ok")
+        try_result = self._build_block(stmt.body, guard)
+        handler_results: List[BuildResult] = []
         for handler in stmt.handlers:
             etype = _short(handler.type) if handler.type else "Exception"
             h = self._add_node("error", f"except {etype}", handler.lineno)
             self._add_edge(guard, h, "raise")
-            h_end = self._build_block(handler.body, h)
-            if h_end is not None:
-                self._add_edge(h_end, join)
+            handler_results.append(self._build_block(handler.body, h))
+        fallthroughs = []
+        if try_result.fallthrough is not None:
+            fallthroughs.append((try_result.fallthrough, "ok"))
+        for result in handler_results:
+            if result.fallthrough is not None:
+                fallthroughs.append((result.fallthrough, ""))
+        breaks = list(try_result.breaks)
+        continues = list(try_result.continues)
+        for result in handler_results:
+            breaks.extend(result.breaks)
+            continues.extend(result.continues)
+        if not fallthroughs:
+            return BuildResult(None, breaks=breaks, continues=continues)
+        join = self._add_node("process", "•", stmt.lineno)
+        for src, label in fallthroughs:
+            self._add_edge(src, join, label)
         if stmt.finalbody:
             fin = self._add_node("process", "finally", stmt.finalbody[0].lineno)
             self._add_edge(join, fin)
-            fin_end = self._build_block(stmt.finalbody, fin)
-            return fin_end
-        return join
+            fin_result = self._build_block(stmt.finalbody, fin)
+            breaks.extend(fin_result.breaks)
+            continues.extend(fin_result.continues)
+            return BuildResult(fin_result.fallthrough, breaks=breaks, continues=continues)
+        return BuildResult(join, breaks=breaks, continues=continues)
 
     def _relabel_first_edge(self, src: str, label: str) -> None:
         for e in self.edges:
@@ -476,6 +585,23 @@ def _format_signature(name: str, params: List[Dict[str, Any]], return_type: Opti
     if return_type:
         signature += f" -> {return_type}"
     return signature
+
+
+def _split_loop_label(label: str) -> List[str]:
+    if label.startswith("for each ") and " in " in label:
+        head, tail = label.split(" in ", 1)
+        return [head, "in " + tail]
+    if label.startswith("while "):
+        return ["while", label[len("while "):]]
+    return [label]
+
+
+def _loop_group_label(stmt: LoopNode) -> str:
+    if isinstance(stmt, ast.While):
+        return "while block"
+    if isinstance(stmt, ast.AsyncFor):
+        return "async for block"
+    return "for block"
 
 
 class _LocalTypeCollector(ast.NodeVisitor):

@@ -1,12 +1,13 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { GraphDocument } from "../python/model/graphTypes";
-import { FromWebviewMessage, RuntimeFrameView } from "../messaging/protocol";
+import { FromWebviewMessage, RuntimeFrameView, UiStateView } from "../messaging/protocol";
 
 export class GraphWebviewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private lastGraph: GraphDocument | undefined;
   private lastRuntime: { frame: RuntimeFrameView | null; highlightNodeIds?: string[] } | undefined;
+  private uiState: UiStateView = { showEvidence: false };
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -47,6 +48,7 @@ export class GraphWebviewProvider {
           if (this.lastGraph) {
             this.postGraph(this.lastGraph);
           }
+          this.postUiState();
           if (this.lastRuntime) {
             this.panel?.webview.postMessage({
               type: "setRuntimeFrame",
@@ -84,12 +86,21 @@ export class GraphWebviewProvider {
     });
   }
 
+  updateUiState(state: UiStateView): void {
+    this.uiState = state;
+    this.postUiState();
+  }
+
   isVisible(): boolean {
     return !!this.panel;
   }
 
   getCurrentGraph(): GraphDocument | undefined {
     return this.lastGraph;
+  }
+
+  private postUiState(): void {
+    this.panel?.webview.postMessage({ type: "setUiState", state: this.uiState });
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -127,7 +138,6 @@ export class GraphWebviewProvider {
     <span class="sep"></span>
     <span class="info" id="stats"></span>
     <span class="sep"></span>
-    <button class="btn active" id="btn-ambient">ambient</button>
     <button class="btn exec" id="btn-exec">&#9654; auto trace</button>
     <button class="btn step" id="btn-step">&#9193; step-by-step</button>
     <button class="btn" id="btn-reset">reset</button>
@@ -136,6 +146,10 @@ export class GraphWebviewProvider {
     <input id="search-box" type="text" placeholder="Search..." />
   </div>
   <div id="canvas"></div>
+  <div id="canvas-controls">
+    <button class="canvas-btn" id="btn-collapse-groups">collapse all</button>
+    <button class="canvas-btn" id="btn-expand-groups">expand all</button>
+  </div>
   <div id="tooltip"></div>
   <div id="legend">
     <div class="lg-title" id="lg-title">Modules</div>
@@ -147,7 +161,6 @@ export class GraphWebviewProvider {
     <div class="ep-desc" id="ep-desc"></div>
     <div class="ep-step" id="ep-step"></div>
     <div class="ep-hint" id="ep-hint"></div>
-    <div class="ep-progress"><div class="ep-bar" id="ep-bar" style="width:0%"></div></div>
   </div>
   <div id="runtime-panel" style="display:none;position:fixed;top:56px;right:14px;z-index:200;max-width:340px;padding:10px 12px;border:1px solid #2a3042;border-radius:8px;background:rgba(10,12,18,0.96);color:#c0caf5;font-family:Consolas, monospace;font-size:11px;line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,.35)">
     <div style="font-size:10px;color:#7aa2f7;margin-bottom:4px;font-weight:600">DEBUG &middot; LIVE</div>

@@ -1,15 +1,22 @@
 import * as vscode from "vscode";
 
+const SHOW_EVIDENCE_KEY = "codemap.showEvidence";
+
 interface ExecuteCommandMessage {
   type: "executeCommand";
   command: string;
+}
+
+interface ToggleEvidenceMessage {
+  type: "toggleEvidence";
+  enabled: boolean;
 }
 
 interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -21,8 +28,14 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 
   private view: vscode.WebviewView | undefined;
   private lastSummary: { checked: number; total: number } = { checked: 0, total: 0 };
+  private showEvidence: boolean;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly onToggleEvidence: (enabled: boolean) => void,
+  ) {
+    this.showEvidence = context.workspaceState.get<boolean>(SHOW_EVIDENCE_KEY, false);
+  }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -32,8 +45,13 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((msg: ActionsInbound) => {
       if (msg.type === "executeCommand") {
         void vscode.commands.executeCommand(msg.command);
+      } else if (msg.type === "toggleEvidence") {
+        this.showEvidence = !!msg.enabled;
+        void this.context.workspaceState.update(SHOW_EVIDENCE_KEY, this.showEvidence);
+        this.onToggleEvidence(this.showEvidence);
       } else if (msg.type === "ready") {
         this.postSelection(this.lastSummary);
+        this.postUiState();
       }
     });
 
@@ -53,6 +71,17 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       type: "selectionUpdate",
       checked: summary.checked,
       total: summary.total,
+    });
+  }
+
+  getShowEvidence(): boolean {
+    return this.showEvidence;
+  }
+
+  private postUiState(): void {
+    this.view?.webview.postMessage({
+      type: "uiState",
+      showEvidence: this.showEvidence,
     });
   }
 
@@ -92,6 +121,17 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     color: var(--vscode-descriptionForeground);
     margin: 12px 0 6px;
   }
+  label.toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground);
+  }
+  label.toggle input {
+    accent-color: var(--vscode-focusBorder);
+  }
   button.action {
     display: block;
     width: 100%;
@@ -117,8 +157,12 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   <button class="action" data-cmd="codemap.showWorkspaceGraph">Workspace Call Graph</button>
   <button class="action" data-cmd="codemap.refresh">Refresh Analysis</button>
 
+  <div class="section-title">Display</div>
+  <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
+
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
+  const evidenceToggle = document.getElementById('toggle-evidence');
 
   document.querySelectorAll('button.action').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -126,11 +170,17 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     });
   });
 
+  evidenceToggle.addEventListener('change', () => {
+    vscode.postMessage({ type: 'toggleEvidence', enabled: evidenceToggle.checked });
+  });
+
   window.addEventListener('message', (event) => {
     const msg = event.data;
     if (msg.type === 'selectionUpdate') {
       document.getElementById('selection-badge').textContent =
         msg.checked + ' / ' + msg.total + ' files selected';
+    } else if (msg.type === 'uiState') {
+      evidenceToggle.checked = !!msg.showEvidence;
     }
   });
 

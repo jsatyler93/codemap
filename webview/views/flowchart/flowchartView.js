@@ -1,5 +1,5 @@
-// Flowchart view. Lays out nodes vertically with light branching for
-// decision nodes. Driven by GraphDocument JSON (graphType === 'flowchart').
+// Flowchart view. Supports free-form node layout plus collapsible
+// compound groups such as loops, branches, and function bodies.
 
 import { NS, mkArrow } from "../../shared/panZoom.js";
 import { theme } from "../../shared/theme.js";
@@ -10,382 +10,1132 @@ const NODE_MIN_H = 36;
 const LINE_H = 12;
 const ROW_GAP = 30;
 const BRANCH_GAP = 240;
+const GROUP_PAD_X = 18;
+const GROUP_PAD_Y = 22;
+const GROUP_SUMMARY_W = 220;
+const GROUP_SUMMARY_MIN_H = 52;
+const GROUP_TOGGLE_R = 8;
 
 export function renderFlowchart(graph, ctx) {
   const { root, defs } = ctx;
   const canvasState = ctx.canvas?.state;
+  const savedSnapshot = ctx.layoutSnapshot || {};
+  const savedNodes = savedSnapshot.nodes || {};
+  const savedGroups = savedSnapshot.groups || {};
   let suppressPointerClicksUntil = 0;
-  Object.entries(theme.nodeColor).forEach(([k, c]) => mkArrow(defs, `a-${k}`, c));
+
+  Object.entries(theme.nodeColor).forEach(([key, color]) => mkArrow(defs, `a-${key}`, color));
   mkArrow(defs, "a-default", "#454a60");
 
-  const nodes = graph.nodes.map((n) => ({ ...n }));
-  const edges = graph.edges;
-  const prepared = new Map(nodes.map((n) => [n.id, prepareNode(n)]));
+  const nodes = graph.nodes.map((node) => ({ ...node }));
+  const edges = graph.edges || [];
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const prepared = new Map(nodes.map((node) => [node.id, prepareNode(node)]));
 
   const incoming = new Map();
   const outgoing = new Map();
-  for (const n of nodes) { incoming.set(n.id, []); outgoing.set(n.id, []); }
-  for (const e of edges) {
-    if (outgoing.has(e.from)) outgoing.get(e.from).push(e);
-    if (incoming.has(e.to))   incoming.get(e.to).push(e);
+  for (const node of nodes) {
+    incoming.set(node.id, []);
+    outgoing.set(node.id, []);
+  }
+  for (const edge of edges) {
+    if (outgoing.has(edge.from)) outgoing.get(edge.from).push(edge);
+    if (incoming.has(edge.to)) incoming.get(edge.to).push(edge);
   }
 
-  // Layout: simple top-down with branching. Identify the entry node, then
-  // walk the graph laying nodes out level by level.
   const positions = new Map();
   const visited = new Set();
   const entry = (graph.rootNodeIds && graph.rootNodeIds[0])
-    || (nodes.find((n) => n.kind === "entry") || nodes[0])?.id;
+    || (nodes.find((node) => node.kind === "entry") || nodes[0])?.id;
   if (!entry) {
     return { edgeRecords: [], nodeRect: new Map(), nodes, initialView: { scale: 1, panX: 0, panY: 0 } };
   }
 
   let cursorY = 30;
-  function place(nodeId, x) {
+  function place(nodeId, centerX) {
     if (visited.has(nodeId)) return;
     visited.add(nodeId);
-    const n = prepared.get(nodeId);
-    if (!n) return;
-    positions.set(nodeId, { x: x - NODE_W / 2, y: cursorY, h: n.h });
-    cursorY += n.h + ROW_GAP;
-    const outs = (outgoing.get(nodeId) || []);
+    const preparedNode = prepared.get(nodeId);
+    if (!preparedNode) return;
+    positions.set(nodeId, { x: centerX - NODE_W / 2, y: cursorY, h: preparedNode.h });
+    cursorY += preparedNode.h + ROW_GAP;
+    const outs = outgoing.get(nodeId) || [];
     if (outs.length === 0) return;
     if (outs.length === 1) {
-      place(outs[0].to, x);
+      place(outs[0].to, centerX);
       return;
     }
-    // Branching: place 'yes' branch left, 'no' branch right where labels exist.
-    const yes = outs.find((e) => /yes|true|ok/i.test(e.label || ""));
-    const no  = outs.find((e) => /no|false|invalid|raise/i.test(e.label || ""));
-    const ordered = [yes, no, ...outs.filter((e) => e !== yes && e !== no)].filter(Boolean);
+    const yes = outs.find((edge) => /yes|true|ok/i.test(edge.label || ""));
+    const no = outs.find((edge) => /no|false|invalid|raise/i.test(edge.label || ""));
+    const ordered = [yes, no, ...outs.filter((edge) => edge !== yes && edge !== no)].filter(Boolean);
     const span = (ordered.length - 1) * BRANCH_GAP;
-    ordered.forEach((e, i) => {
-      const childX = x - span / 2 + i * BRANCH_GAP;
-      place(e.to, childX);
+    ordered.forEach((edge, index) => {
+      place(edge.to, centerX - span / 2 + index * BRANCH_GAP);
     });
   }
-  place(entry, 480);
 
-  // Place orphans (nodes not reachable from entry) below.
-  for (const n of nodes) {
-    if (!positions.has(n.id)) {
-      const preparedNode = prepared.get(n.id);
-      positions.set(n.id, { x: 100, y: cursorY, h: preparedNode ? preparedNode.h : NODE_MIN_H });
+  place(entry, 480);
+  for (const node of nodes) {
+    if (!positions.has(node.id)) {
+      const preparedNode = prepared.get(node.id);
+      positions.set(node.id, { x: 100, y: cursorY, h: preparedNode ? preparedNode.h : NODE_MIN_H });
       cursorY += (preparedNode ? preparedNode.h : NODE_MIN_H) + ROW_GAP;
     }
   }
+  for (const [nodeId, saved] of Object.entries(savedNodes)) {
+    const pos = positions.get(nodeId);
+    if (!pos || typeof saved?.x !== "number" || typeof saved?.y !== "number") continue;
+    pos.x = saved.x;
+    pos.y = saved.y;
+  }
 
-  // Layers
+  const nodeRectAll = new Map();
+  for (const node of nodes) {
+    const pos = positions.get(node.id);
+    if (!pos) continue;
+    const preparedNode = prepared.get(node.id) || prepareNode(node);
+    nodeRectAll.set(node.id, {
+      x: pos.x,
+      y: pos.y,
+      w: NODE_W,
+      h: preparedNode.h,
+      color: theme.nodeColor[node.kind] || theme.nodeColor.process,
+    });
+  }
+
+  const groups = normalizeGroups(graph.metadata?.groups || []);
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const groupState = new Map(groups.map((group) => [group.id, {
+    collapsed: !!savedGroups[group.id]?.collapsed,
+    x: typeof savedGroups[group.id]?.x === "number" ? savedGroups[group.id].x : undefined,
+    y: typeof savedGroups[group.id]?.y === "number" ? savedGroups[group.id].y : undefined,
+  }]));
+  const nodeGroupChains = buildNodeGroupChains(groups);
+  const groupDescendants = buildGroupDescendants(groups);
+  const groupDepth = buildGroupDepthMap(groups);
+
+  const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
+  let loopLaneRanks = buildLoopLaneRanks(nodes, positions, visibility.visibleNodeIds, groupDepth);
+
+  const groupLayer = document.createElementNS(NS, "g"); root.appendChild(groupLayer);
   const edgeLayer = document.createElementNS(NS, "g"); root.appendChild(edgeLayer);
-  const dotLayer  = document.createElementNS(NS, "g"); root.appendChild(dotLayer);
+  const dotLayer = document.createElementNS(NS, "g"); root.appendChild(dotLayer);
+  const collapsedLayer = document.createElementNS(NS, "g"); root.appendChild(collapsedLayer);
   const nodeLayer = document.createElementNS(NS, "g"); root.appendChild(nodeLayer);
 
-  // --- nodes ---
-  const nodeRect = new Map();
+  let collapsedGroupRects = computeCollapsedGroupRects(visibility.visibleCollapsedGroupIds, groupById, groupState, nodeRectAll);
+  let expandedGroupBounds = computeExpandedGroupBounds(
+    visibility.visibleExpandedGroupIds,
+    visibility.visibleNodeIds,
+    visibility.visibleCollapsedGroupIds,
+    groupById,
+    nodeRectAll,
+    collapsedGroupRects,
+  );
+
+  const groupEls = new Map();
+  const collapsedGroupEls = new Map();
   const nodeEls = new Map();
-  for (const n of nodes) {
-    const p = positions.get(n.id);
-    if (!p) continue;
-    const col = theme.nodeColor[n.kind] || theme.nodeColor.process;
-    const w = NODE_W;
-    const preparedNode = prepared.get(n.id) || prepareNode(n);
-    const h = preparedNode.h;
-    nodeRect.set(n.id, { x: p.x, y: p.y, w, h, color: col });
+  const visibleNodeRects = new Map();
 
-    const g = document.createElementNS(NS, "g");
-    g.setAttribute("transform", `translate(${p.x},${p.y})`);
-    g.dataset.id = n.id;
-    g.style.cursor = "pointer";
+  for (const groupId of visibility.visibleExpandedGroupIds.sort((left, right) => (groupDepth.get(left) || 0) - (groupDepth.get(right) || 0))) {
+    const group = groupById.get(groupId);
+    const bounds = expandedGroupBounds.get(groupId);
+    if (!group || !bounds) continue;
+    const color = groupColor(group.kind);
+    const wrapper = document.createElementNS(NS, "g");
+    wrapper.dataset.groupId = group.id;
+    wrapper.style.cursor = "grab";
 
-    let shape;
-    if (n.kind === "decision") {
-      shape = document.createElementNS(NS, "polygon");
-      shape.setAttribute("points", `${w / 2},0 ${w},${h / 2} ${w / 2},${h} 0,${h / 2}`);
-      shape.setAttribute("fill",   col + "12");
-      shape.setAttribute("stroke", col + "55");
-    } else if (n.kind === "entry" || n.kind === "return") {
-      shape = document.createElementNS(NS, "rect");
-      shape.setAttribute("width",  w);
-      shape.setAttribute("height", h);
-      shape.setAttribute("rx", 16); shape.setAttribute("ry", 16);
-      shape.setAttribute("fill",   col + "1c");
-      shape.setAttribute("stroke", col + "55");
-    } else {
-      shape = document.createElementNS(NS, "rect");
-      shape.setAttribute("width",  w);
-      shape.setAttribute("height", h);
-      shape.setAttribute("rx", 5); shape.setAttribute("ry", 5);
-      shape.setAttribute("fill",   col + "10");
-      shape.setAttribute("stroke", col + "35");
-    }
-    shape.setAttribute("stroke-width", "1.2");
-    g.appendChild(shape);
+    const region = document.createElementNS(NS, "rect");
+    region.setAttribute("x", String(bounds.x));
+    region.setAttribute("y", String(bounds.y));
+    region.setAttribute("width", String(bounds.w));
+    region.setAttribute("height", String(bounds.h));
+    region.setAttribute("rx", "14");
+    region.setAttribute("ry", "14");
+    region.setAttribute("fill", color + "05");
+    region.setAttribute("stroke", color + "44");
+    region.setAttribute("stroke-width", "1.2");
+    region.setAttribute("stroke-dasharray", "7 5");
+    wrapper.appendChild(region);
 
-    const textLines = preparedNode.lines;
-    const totalLineCount = textLines.length + (preparedNode.typeLine ? 1 : 0);
-    const totalH = totalLineCount * LINE_H;
-    textLines.forEach((line, i) => {
-      const t = document.createElementNS(NS, "text");
-      t.setAttribute("x", String(w / 2));
-      t.setAttribute("y", String(h / 2 - totalH / 2 + i * LINE_H + 9));
-      t.setAttribute("text-anchor", "middle");
-      t.setAttribute("fill", col + "dd");
-      t.setAttribute("font-size", "10");
-      t.textContent = line;
-      g.appendChild(t);
-    });
+    const chipWidth = Math.max(94, group.label.length * 6.2 + 34);
+    const chip = document.createElementNS(NS, "rect");
+    chip.setAttribute("x", String(bounds.x + 10));
+    chip.setAttribute("y", String(bounds.y - 10));
+    chip.setAttribute("width", String(chipWidth));
+    chip.setAttribute("height", "18");
+    chip.setAttribute("rx", "9");
+    chip.setAttribute("ry", "9");
+    chip.setAttribute("fill", color + "15");
+    chip.setAttribute("stroke", color + "40");
+    wrapper.appendChild(chip);
 
-    if (preparedNode.typeLine) {
-      const typeText = document.createElementNS(NS, "text");
-      typeText.setAttribute("x", String(w / 2));
-      typeText.setAttribute("y", String(h / 2 - totalH / 2 + textLines.length * LINE_H + 9));
-      typeText.setAttribute("text-anchor", "middle");
-      typeText.setAttribute("fill", col + "88");
-      typeText.setAttribute("font-size", "8");
-      typeText.setAttribute("font-style", "italic");
-      typeText.textContent = preparedNode.typeLine;
-      g.appendChild(typeText);
-    }
+    const title = document.createElementNS(NS, "text");
+    title.setAttribute("x", String(bounds.x + 34));
+    title.setAttribute("y", String(bounds.y + 2));
+    title.setAttribute("fill", color + "dd");
+    title.setAttribute("font-size", "9.5");
+    title.setAttribute("font-weight", "600");
+    title.textContent = group.label;
+    wrapper.appendChild(title);
 
-    g.addEventListener("mouseenter", (e) => ctx.showTooltip(e, n));
-    g.addEventListener("mousemove", (e) => ctx.moveTooltip(e));
-    g.addEventListener("mouseleave", () => ctx.hideTooltip());
-    g.addEventListener("click", (e) => {
-      if (performance.now() < suppressPointerClicksUntil) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-      ctx.onNodeClick(n);
-    });
+    const toggle = makeGroupToggle(wrapper, color, false, () => toggleGroup(group.id));
+    positionGroupToggle(toggle, bounds, { headerChip: true });
+
+    attachGroupInteractions(wrapper, group);
+    groupLayer.appendChild(wrapper);
+    groupEls.set(group.id, { wrapper, region, chip, title, toggle });
+  }
+
+  for (const node of nodes) {
+    if (!visibility.visibleNodeIds.has(node.id)) continue;
+    const rect = nodeRectAll.get(node.id);
+    if (!rect) continue;
+    visibleNodeRects.set(node.id, rect);
+    const element = renderNode(node, rect, prepared.get(node.id) || prepareNode(node), ctx, nodeLayer, () => suppressPointerClicksUntil);
+    nodeEls.set(node.id, element);
 
     let dragState = null;
-    g.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0) return;
-      const rect = nodeRect.get(n.id);
-      if (!rect) return;
+    element.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
       dragState = {
-        pointerId: e.pointerId,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
         startX: rect.x,
         startY: rect.y,
         moved: false,
       };
-      g.setPointerCapture?.(e.pointerId);
-      g.classList.add("node-dragging");
+      element.setPointerCapture?.(event.pointerId);
+      element.classList.add("node-dragging");
       ctx.hideTooltip();
-      e.stopPropagation();
-      e.preventDefault();
+      event.stopPropagation();
+      event.preventDefault();
     });
-    g.addEventListener("pointermove", (e) => {
-      if (!dragState || dragState.pointerId !== e.pointerId) return;
+    element.addEventListener("pointermove", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
       const scale = canvasState?.scale || 1;
-      const dx = (e.clientX - dragState.startClientX) / scale;
-      const dy = (e.clientY - dragState.startClientY) / scale;
+      const dx = (event.clientX - dragState.startClientX) / scale;
+      const dy = (event.clientY - dragState.startClientY) / scale;
       if (!dragState.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
         dragState.moved = true;
-        nodeLayer.appendChild(g);
+        nodeLayer.appendChild(element);
       }
       if (!dragState.moved) return;
-      const rect = nodeRect.get(n.id);
-      if (!rect) return;
       rect.x = dragState.startX + dx;
       rect.y = dragState.startY + dy;
-      updateNodePosition(n.id);
-      refreshLayoutForNode(n.id);
-      e.stopPropagation();
-      e.preventDefault();
+      updateNodePosition(node.id);
+      refreshAllGeometry();
+      event.stopPropagation();
+      event.preventDefault();
     });
-    g.addEventListener("pointerup", (e) => {
-      if (!dragState || dragState.pointerId !== e.pointerId) return;
+    element.addEventListener("pointerup", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
       if (dragState.moved) {
         suppressPointerClicksUntil = performance.now() + 250;
+        persistLayout();
       }
-      g.classList.remove("node-dragging");
-      g.releasePointerCapture?.(e.pointerId);
+      element.classList.remove("node-dragging");
+      element.releasePointerCapture?.(event.pointerId);
       dragState = null;
-      e.stopPropagation();
+      event.stopPropagation();
     });
-    g.addEventListener("pointercancel", (e) => {
-      if (!dragState || dragState.pointerId !== e.pointerId) return;
-      g.classList.remove("node-dragging");
+    element.addEventListener("pointercancel", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      element.classList.remove("node-dragging");
       dragState = null;
     });
-
-    nodeLayer.appendChild(g);
-    nodeEls.set(n.id, g);
   }
 
-  // --- edges ---
+  for (const groupId of visibility.visibleCollapsedGroupIds) {
+    const group = groupById.get(groupId);
+    const rect = collapsedGroupRects.get(groupId);
+    if (!group || !rect) continue;
+    const color = groupColor(group.kind);
+    const wrapper = document.createElementNS(NS, "g");
+    wrapper.dataset.collapsedGroupId = group.id;
+    wrapper.style.cursor = "grab";
+
+    const box = document.createElementNS(NS, "rect");
+    box.setAttribute("x", String(rect.x));
+    box.setAttribute("y", String(rect.y));
+    box.setAttribute("width", String(rect.w));
+    box.setAttribute("height", String(rect.h));
+    box.setAttribute("rx", "12");
+    box.setAttribute("ry", "12");
+    box.setAttribute("fill", color + "14");
+    box.setAttribute("stroke", color + "70");
+    box.setAttribute("stroke-width", "1.4");
+    box.setAttribute("stroke-dasharray", "8 5");
+    wrapper.appendChild(box);
+
+    const lines = summarizeGroup(group);
+    lines.forEach((line, index) => {
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("x", String(rect.x + 29));
+      text.setAttribute("y", String(rect.y + 18 + index * LINE_H));
+      text.setAttribute("text-anchor", "start");
+      text.setAttribute("fill", index === 0 ? color + "ee" : color + "aa");
+      text.setAttribute("font-size", index === 0 ? "10" : "8.5");
+      text.setAttribute("font-weight", index === 0 ? "600" : "400");
+      text.textContent = line;
+      wrapper.appendChild(text);
+    });
+
+    const toggle = makeGroupToggle(wrapper, color, true, () => toggleGroup(group.id));
+    positionGroupToggle(toggle, rect, { headerChip: false });
+
+    attachGroupInteractions(wrapper, group);
+    collapsedLayer.appendChild(wrapper);
+    collapsedGroupEls.set(group.id, { wrapper, box, toggle });
+  }
+
   const edgeRecords = [];
   const edgeMap = {};
-  for (const e of edges) {
-    const fromR = nodeRect.get(e.from);
-    const toR   = nodeRect.get(e.to);
-    if (!fromR || !toR) continue;
-    const sp = { x: fromR.x + fromR.w / 2, y: fromR.y + fromR.h };
-    const tp = { x: toR.x   + toR.w   / 2, y: toR.y };
-    let c1x, c1y, c2x, c2y, d;
-    if (Math.abs(tp.x - sp.x) < 1) {
-      c1x = sp.x; c1y = (sp.y + tp.y) / 2;
-      c2x = tp.x; c2y = (sp.y + tp.y) / 2;
-    } else {
-      const my = (sp.y + tp.y) / 2;
-      c1x = sp.x; c1y = my;
-      c2x = tp.x; c2y = my;
-    }
-    d = `M${sp.x},${sp.y} C${c1x},${c1y} ${c2x},${c2y} ${tp.x},${tp.y}`;
-    const fromKind = (nodes.find((n) => n.id === e.from) || {}).kind || "process";
-    const col = theme.nodeColor[fromKind] || "#454a60";
+  const seenEdgeKeys = new Set();
+  for (const edge of edges) {
+    const srcEndpoint = resolveVisibleEndpoint(edge.from, nodeGroupChains, groupState);
+    const tgtEndpoint = resolveVisibleEndpoint(edge.to, nodeGroupChains, groupState);
+    if (!srcEndpoint || !tgtEndpoint || srcEndpoint === tgtEndpoint) continue;
+    const dedupeKey = `${srcEndpoint}->${tgtEndpoint}::${edge.label || ""}`;
+    if (seenEdgeKeys.has(dedupeKey)) continue;
+    seenEdgeKeys.add(dedupeKey);
+    const fromRect = endpointRect(srcEndpoint);
+    const toRect = endpointRect(tgtEndpoint);
+    if (!fromRect || !toRect) continue;
+    const fromKind = endpointKind(srcEndpoint, nodesById, groupById);
+    const toKind = endpointKind(tgtEndpoint, nodesById, groupById);
+    const route = computeEdgeRoute({ label: edge.label || "", src: srcEndpoint, tgt: tgtEndpoint }, fromRect, toRect, fromKind, toKind, loopLaneRanks);
+    const color = theme.nodeColor[fromKind] || "#454a60";
 
     const path = document.createElementNS(NS, "path");
-    path.setAttribute("d", d);
+    path.setAttribute("d", route.d);
     path.setAttribute("fill", "none");
-    path.setAttribute("stroke", col + "33");
+    path.setAttribute("stroke", color + "33");
     path.setAttribute("stroke-width", "1");
     path.setAttribute("marker-end", `url(#a-${fromKind})`);
     edgeLayer.appendChild(path);
 
     let labelEl = null;
-    if (e.label) {
-      const mid = cubicPt(sp.x, sp.y, c1x, c1y, c2x, c2y, tp.x, tp.y, 0.35);
-      const t = document.createElementNS(NS, "text");
-      t.setAttribute("x", String(mid.x + 6));
-      t.setAttribute("y", String(mid.y - 4));
-      t.setAttribute("fill", col + "88");
-      t.setAttribute("font-size", "8.5");
-      t.textContent = e.label;
-      edgeLayer.appendChild(t);
-      labelEl = t;
+    if (edge.label) {
+      const mid = cubicPt(route.sx, route.sy, route.c1x, route.c1y, route.c2x, route.c2y, route.tx, route.ty, route.labelT || 0.35);
+      labelEl = document.createElementNS(NS, "text");
+      labelEl.setAttribute("x", String(mid.x + (route.labelDx || 6)));
+      labelEl.setAttribute("y", String(mid.y + (route.labelDy || -4)));
+      labelEl.setAttribute("fill", color + "88");
+      labelEl.setAttribute("font-size", "8.5");
+      labelEl.textContent = edge.label;
+      edgeLayer.appendChild(labelEl);
     }
 
     const dot = document.createElementNS(NS, "circle");
-    dot.setAttribute("r", "1.3"); dot.setAttribute("fill", col);
+    dot.setAttribute("r", "1.3");
+    dot.setAttribute("fill", color);
     dot.setAttribute("opacity", "0");
     dotLayer.appendChild(dot);
-    edgeMap[e.from + "->" + e.to] = edgeRecords.length;
+    edgeMap[`${edge.from}->${edge.to}`] = edgeRecords.length;
     edgeRecords.push({
       el: path,
-      src: e.from,
-      tgt: e.to,
+      src: srcEndpoint,
+      tgt: tgtEndpoint,
+      fromKind,
+      toKind,
+      label: edge.label || "",
       labelEl,
-      sx: sp.x, sy: sp.y, c1x, c1y, c2x, c2y, tx: tp.x, ty: tp.y,
-      dot, offset: Math.random(), speed: 0.0006 + Math.random() * 0.0004,
+      sx: route.sx,
+      sy: route.sy,
+      c1x: route.c1x,
+      c1y: route.c1y,
+      c2x: route.c2x,
+      c2y: route.c2y,
+      tx: route.tx,
+      ty: route.ty,
+      labelT: route.labelT,
+      labelDx: route.labelDx,
+      labelDy: route.labelDy,
+      dot,
+      offset: Math.random(),
+      speed: 0.0006 + Math.random() * 0.0004,
     });
   }
+  assignFlowEdgeSpread(edgeRecords);
 
-  function updateNodePosition(nodeId) {
-    const rect = nodeRect.get(nodeId);
-    const group = nodeEls.get(nodeId);
-    if (!rect || !group) return;
-    group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
-  }
-
-  function updateEdgeGeometry(edge) {
-    const fromR = nodeRect.get(edge.src);
-    const toR = nodeRect.get(edge.tgt);
-    if (!fromR || !toR) return;
-    const sp = { x: fromR.x + fromR.w / 2, y: fromR.y + fromR.h };
-    const tp = { x: toR.x + toR.w / 2, y: toR.y };
-    let c1x;
-    let c1y;
-    let c2x;
-    let c2y;
-    if (Math.abs(tp.x - sp.x) < 1) {
-      c1x = sp.x;
-      c1y = (sp.y + tp.y) / 2;
-      c2x = tp.x;
-      c2y = (sp.y + tp.y) / 2;
-    } else {
-      const my = (sp.y + tp.y) / 2;
-      c1x = sp.x;
-      c1y = my;
-      c2x = tp.x;
-      c2y = my;
-    }
-    edge.sx = sp.x;
-    edge.sy = sp.y;
-    edge.tx = tp.x;
-    edge.ty = tp.y;
-    edge.c1x = c1x;
-    edge.c1y = c1y;
-    edge.c2x = c2x;
-    edge.c2y = c2y;
-    edge.el.setAttribute("d", `M${sp.x},${sp.y} C${c1x},${c1y} ${c2x},${c2y} ${tp.x},${tp.y}`);
-    if (edge.labelEl) {
-      const mid = cubicPt(sp.x, sp.y, c1x, c1y, c2x, c2y, tp.x, tp.y, 0.35);
-      edge.labelEl.setAttribute("x", String(mid.x + 6));
-      edge.labelEl.setAttribute("y", String(mid.y - 4));
-    }
-  }
-
-  function refreshLayoutForNode(nodeId) {
-    edgeRecords.forEach((edge) => {
-      if (edge.src === nodeId || edge.tgt === nodeId) {
-        updateEdgeGeometry(edge);
-      }
-    });
-  }
-
-  // Exec dot layer for live debug particle
   const execLayer = document.createElementNS(NS, "g");
   root.appendChild(execLayer);
+
   ctx._edgeMap = edgeMap;
   ctx._edgeRecords = edgeRecords;
-  ctx._spawnExecDot = function (edgeIdx, color) {
-    const e = edgeRecords[edgeIdx];
-    if (!e) return null;
+  ctx._captureLayout = captureLayout;
+  ctx._hasGroupControls = groups.length > 0;
+  ctx._expandAllGroups = () => {
+    if (!groups.length) return;
+    groups.forEach((group) => {
+      const state = groupState.get(group.id);
+      if (state) state.collapsed = false;
+    });
+    persistLayout();
+    ctx.requestRender?.();
+  };
+  ctx._collapseAllGroups = () => {
+    if (!groups.length) return;
+    groups.forEach((group) => {
+      const state = groupState.get(group.id);
+      if (!state) return;
+      const rect = expandedGroupBounds.get(group.id) || collapsedGroupRects.get(group.id);
+      if (rect) {
+        state.x = rect.x;
+        state.y = rect.y;
+      }
+      state.collapsed = true;
+    });
+    persistLayout();
+    ctx.requestRender?.();
+  };
+  ctx._spawnExecDot = function (edgeIdx, color, options = {}) {
+    const edge = edgeRecords[edgeIdx];
+    if (!edge) return null;
+    const radius = typeof options.radius === "number" ? options.radius : 5;
+    const speed = typeof options.speed === "number" ? options.speed : 0.012;
+    const trailScale = typeof options.trailScale === "number" ? options.trailScale : 1;
     const dot = document.createElementNS(NS, "circle");
-    dot.setAttribute("r", "5"); dot.setAttribute("fill", color);
+    dot.setAttribute("r", String(radius));
+    dot.setAttribute("fill", color);
     dot.setAttribute("opacity", "0.95");
     execLayer.appendChild(dot);
     const trails = [];
     for (let i = 0; i < 5; i++) {
-      const tr = document.createElementNS(NS, "circle");
-      tr.setAttribute("r", String(4 - i * 0.7));
-      tr.setAttribute("fill", color);
-      tr.setAttribute("opacity", String(0.35 - i * 0.06));
-      execLayer.appendChild(tr);
-      trails.push({ el: tr });
+      const trail = document.createElementNS(NS, "circle");
+      trail.setAttribute("r", String(Math.max(1, (4 - i * 0.7) * trailScale)));
+      trail.setAttribute("fill", color);
+      trail.setAttribute("opacity", String(0.35 - i * 0.06));
+      execLayer.appendChild(trail);
+      trails.push({ el: trail });
     }
-    return { el: dot, trails, t: 0, speed: 0.012, edge: e, alive: true };
+    return { el: dot, trails, t: 0, speed, edge, alive: true };
   };
   ctx._clearExecDots = function () {
     while (execLayer.firstChild) execLayer.removeChild(execLayer.firstChild);
   };
 
-  // Legend (node kinds present in this graph).
-  const lgItems = document.getElementById("lg-items");
-  lgItems.innerHTML = "";
-  document.getElementById("lg-title").textContent = "Node Types";
-  const kinds = Array.from(new Set(nodes.map((n) => n.kind)));
-  for (const k of kinds) {
-    const c = theme.nodeColor[k] || "#7aa2f7";
-    const div = document.createElement("div");
-    div.className = "lg-item";
-    div.innerHTML = k === "decision"
-      ? `<span class="lg-diamond" style="background:${c}22;border:1px solid ${c}55"></span>${k}`
-      : `<span class="lg-shape"   style="background:${c}22;border:1px solid ${c}55;${k === "entry" || k === "return" ? "border-radius:10px" : ""}"></span>${k}`;
-    lgItems.appendChild(div);
-  }
+  updateLegend(nodes);
 
   return {
     edgeRecords,
-    nodeRect,
+    nodeRect: nodeRectAll,
     nodes,
     initialView: { scale: 0.75, panX: 60, panY: 20 },
   };
+
+  function attachGroupInteractions(wrapper, group) {
+    let dragState = null;
+    wrapper.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      dragState = {
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        moved: false,
+        lastDx: 0,
+        lastDy: 0,
+      };
+      materializeCollapsedPositions(group.id);
+      wrapper.setPointerCapture?.(event.pointerId);
+      ctx.hideTooltip();
+      event.stopPropagation();
+      event.preventDefault();
+    });
+    wrapper.addEventListener("pointermove", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      const scale = canvasState?.scale || 1;
+      const dx = (event.clientX - dragState.startClientX) / scale;
+      const dy = (event.clientY - dragState.startClientY) / scale;
+      if (!dragState.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+        dragState.moved = true;
+      }
+      if (!dragState.moved) return;
+      shiftGroup(group.id, dx - dragState.lastDx, dy - dragState.lastDy);
+      dragState.lastDx = dx;
+      dragState.lastDy = dy;
+      refreshAllGeometry();
+      event.stopPropagation();
+      event.preventDefault();
+    });
+    wrapper.addEventListener("pointerup", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      if (dragState.moved) {
+        suppressPointerClicksUntil = performance.now() + 250;
+        persistLayout();
+      }
+      wrapper.releasePointerCapture?.(event.pointerId);
+      dragState = null;
+      event.stopPropagation();
+    });
+    wrapper.addEventListener("pointercancel", (event) => {
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+      dragState = null;
+    });
+  }
+
+  function materializeCollapsedPositions(groupId) {
+    const ids = [groupId, ...(groupDescendants.get(groupId) || [])];
+    for (const id of ids) {
+      const state = groupState.get(id);
+      const rect = collapsedGroupRects.get(id);
+      if (!state || !rect) continue;
+      if (typeof state.x !== "number") state.x = rect.x;
+      if (typeof state.y !== "number") state.y = rect.y;
+    }
+  }
+
+  function shiftGroup(groupId, dx, dy) {
+    if (!dx && !dy) return;
+    const group = groupById.get(groupId);
+    if (!group) return;
+    for (const nodeId of group.nodeIds) {
+      const rect = nodeRectAll.get(nodeId);
+      if (!rect) continue;
+      rect.x += dx;
+      rect.y += dy;
+    }
+    const ids = [groupId, ...(groupDescendants.get(groupId) || [])];
+    for (const id of ids) {
+      const state = groupState.get(id);
+      if (!state) continue;
+      if (typeof state.x === "number") state.x += dx;
+      if (typeof state.y === "number") state.y += dy;
+    }
+  }
+
+  function updateNodePosition(nodeId) {
+    const rect = nodeRectAll.get(nodeId);
+    const group = nodeEls.get(nodeId);
+    if (!rect || !group) return;
+    group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
+  }
+
+  function refreshAllGeometry() {
+    collapsedGroupRects = computeCollapsedGroupRects(visibility.visibleCollapsedGroupIds, groupById, groupState, nodeRectAll);
+    expandedGroupBounds = computeExpandedGroupBounds(
+      visibility.visibleExpandedGroupIds,
+      visibility.visibleNodeIds,
+      visibility.visibleCollapsedGroupIds,
+      groupById,
+      nodeRectAll,
+      collapsedGroupRects,
+    );
+    loopLaneRanks = buildLoopLaneRanks(nodes, positions, visibility.visibleNodeIds, groupDepth);
+
+    visibility.visibleNodeIds.forEach((nodeId) => updateNodePosition(nodeId));
+    for (const [groupId, elements] of groupEls.entries()) {
+      const bounds = expandedGroupBounds.get(groupId);
+      const group = groupById.get(groupId);
+      if (!bounds || !group) continue;
+      const chipWidth = Math.max(94, group.label.length * 6.2 + 34);
+      elements.region.setAttribute("x", String(bounds.x));
+      elements.region.setAttribute("y", String(bounds.y));
+      elements.region.setAttribute("width", String(bounds.w));
+      elements.region.setAttribute("height", String(bounds.h));
+      elements.chip.setAttribute("x", String(bounds.x + 10));
+      elements.chip.setAttribute("y", String(bounds.y - 10));
+      elements.chip.setAttribute("width", String(chipWidth));
+      elements.title.setAttribute("x", String(bounds.x + 34));
+      elements.title.setAttribute("y", String(bounds.y + 2));
+      positionGroupToggle(elements.toggle, bounds, { headerChip: true });
+    }
+    for (const [groupId, elements] of collapsedGroupEls.entries()) {
+      const rect = collapsedGroupRects.get(groupId);
+      if (!rect) continue;
+      elements.box.setAttribute("x", String(rect.x));
+      elements.box.setAttribute("y", String(rect.y));
+      elements.box.setAttribute("width", String(rect.w));
+      elements.box.setAttribute("height", String(rect.h));
+      let index = 0;
+      Array.from(elements.wrapper.querySelectorAll("text")).forEach((textNode) => {
+        textNode.setAttribute("x", String(rect.x + 29));
+        textNode.setAttribute("y", String(rect.y + 18 + index * LINE_H));
+        textNode.setAttribute("text-anchor", "start");
+        index += 1;
+      });
+      positionGroupToggle(elements.toggle, rect, { headerChip: false });
+    }
+    edgeRecords.forEach((edge) => updateEdgeGeometry(edge));
+  }
+
+  function toggleGroup(groupId) {
+    const state = groupState.get(groupId);
+    if (!state) return;
+    if (!state.collapsed) {
+      const rect = expandedGroupBounds.get(groupId);
+      if (rect) {
+        state.x = rect.x + (rect.w - GROUP_SUMMARY_W) / 2;
+        state.y = rect.y + Math.max(18, rect.h * 0.18);
+      }
+    }
+    state.collapsed = !state.collapsed;
+    persistLayout();
+    ctx.requestRender?.();
+  }
+
+  function endpointRect(endpointId) {
+    if (endpointId.startsWith("group:")) return collapsedGroupRects.get(endpointId.slice(6));
+    return nodeRectAll.get(endpointId);
+  }
+
+  function updateEdgeGeometry(edge) {
+    const fromRect = endpointRect(edge.src);
+    const toRect = endpointRect(edge.tgt);
+    if (!fromRect || !toRect) return;
+    const route = computeEdgeRoute(edge, fromRect, toRect, edge.fromKind, edge.toKind, loopLaneRanks);
+    edge.sx = route.sx;
+    edge.sy = route.sy;
+    edge.tx = route.tx;
+    edge.ty = route.ty;
+    edge.c1x = route.c1x;
+    edge.c1y = route.c1y;
+    edge.c2x = route.c2x;
+    edge.c2y = route.c2y;
+    edge.labelT = route.labelT;
+    edge.labelDx = route.labelDx;
+    edge.labelDy = route.labelDy;
+    edge.el.setAttribute("d", route.d);
+    edge.el.setAttribute("marker-end", `url(#a-${edge.fromKind || "default"})`);
+    if (edge.labelEl) {
+      const mid = cubicPt(route.sx, route.sy, route.c1x, route.c1y, route.c2x, route.c2y, route.tx, route.ty, route.labelT || 0.35);
+      edge.labelEl.setAttribute("x", String(mid.x + (route.labelDx || 6)));
+      edge.labelEl.setAttribute("y", String(mid.y + (route.labelDy || -4)));
+    }
+  }
+
+  function captureLayout() {
+    const snapshot = { nodes: {}, groups: {} };
+    for (const [nodeId, rect] of nodeRectAll.entries()) {
+      snapshot.nodes[nodeId] = { x: rect.x, y: rect.y };
+    }
+    for (const group of groups) {
+      const state = groupState.get(group.id);
+      if (!state) continue;
+      snapshot.groups[group.id] = {
+        collapsed: !!state.collapsed,
+        ...(typeof state.x === "number" ? { x: state.x } : {}),
+        ...(typeof state.y === "number" ? { y: state.y } : {}),
+      };
+    }
+    return snapshot;
+  }
+
+  function persistLayout() {
+    ctx.onLayoutChanged?.(captureLayout());
+  }
+}
+
+function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil) {
+  const color = theme.nodeColor[node.kind] || theme.nodeColor.process;
+  const group = document.createElementNS(NS, "g");
+  group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
+  group.dataset.id = node.id;
+  group.style.cursor = "pointer";
+
+  let shape;
+  if (node.kind === "decision") {
+    shape = document.createElementNS(NS, "polygon");
+    shape.setAttribute("points", `${rect.w / 2},0 ${rect.w},${rect.h / 2} ${rect.w / 2},${rect.h} 0,${rect.h / 2}`);
+    shape.setAttribute("fill", color + "12");
+    shape.setAttribute("stroke", color + "55");
+  } else if (node.kind === "loop") {
+    shape = document.createElementNS(NS, "polygon");
+    shape.setAttribute("points", `18,0 ${rect.w - 18},0 ${rect.w},${rect.h / 2} ${rect.w - 18},${rect.h} 18,${rect.h} 0,${rect.h / 2}`);
+    shape.setAttribute("fill", color + "14");
+    shape.setAttribute("stroke", color + "65");
+  } else if (node.kind === "break") {
+    shape = document.createElementNS(NS, "polygon");
+    shape.setAttribute("points", `0,0 ${rect.w - 24},0 ${rect.w},${rect.h / 2} ${rect.w - 24},${rect.h} 0,${rect.h}`);
+    shape.setAttribute("fill", color + "16");
+    shape.setAttribute("stroke", color + "70");
+  } else if (node.kind === "continue") {
+    shape = document.createElementNS(NS, "polygon");
+    shape.setAttribute("points", `20,0 ${rect.w},0 ${rect.w - 20},${rect.h / 2} ${rect.w},${rect.h} 20,${rect.h} 0,${rect.h / 2}`);
+    shape.setAttribute("fill", color + "16");
+    shape.setAttribute("stroke", color + "70");
+  } else if (node.kind === "loop_else") {
+    shape = document.createElementNS(NS, "rect");
+    shape.setAttribute("width", String(rect.w));
+    shape.setAttribute("height", String(rect.h));
+    shape.setAttribute("rx", "10");
+    shape.setAttribute("ry", "10");
+    shape.setAttribute("fill", color + "12");
+    shape.setAttribute("stroke", color + "65");
+    shape.setAttribute("stroke-dasharray", "6 4");
+  } else if (node.kind === "entry" || node.kind === "return") {
+    shape = document.createElementNS(NS, "rect");
+    shape.setAttribute("width", String(rect.w));
+    shape.setAttribute("height", String(rect.h));
+    shape.setAttribute("rx", "16");
+    shape.setAttribute("ry", "16");
+    shape.setAttribute("fill", color + "1c");
+    shape.setAttribute("stroke", color + "55");
+  } else {
+    shape = document.createElementNS(NS, "rect");
+    shape.setAttribute("width", String(rect.w));
+    shape.setAttribute("height", String(rect.h));
+    shape.setAttribute("rx", "5");
+    shape.setAttribute("ry", "5");
+    shape.setAttribute("fill", color + "10");
+    shape.setAttribute("stroke", color + "35");
+  }
+  shape.setAttribute("stroke-width", "1.2");
+  group.appendChild(shape);
+
+  const totalLineCount = preparedNode.lines.length + (preparedNode.typeLine ? 1 : 0);
+  const totalHeight = totalLineCount * LINE_H;
+  preparedNode.lines.forEach((line, index) => {
+    const text = document.createElementNS(NS, "text");
+    text.setAttribute("x", String(rect.w / 2));
+    text.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + index * LINE_H + 9));
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("fill", color + "dd");
+    text.setAttribute("font-size", "10");
+    text.textContent = line;
+    group.appendChild(text);
+  });
+  if (preparedNode.typeLine) {
+    const typeText = document.createElementNS(NS, "text");
+    typeText.setAttribute("x", String(rect.w / 2));
+    typeText.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + preparedNode.lines.length * LINE_H + 9));
+    typeText.setAttribute("text-anchor", "middle");
+    typeText.setAttribute("fill", color + "88");
+    typeText.setAttribute("font-size", "8");
+    typeText.setAttribute("font-style", "italic");
+    typeText.textContent = preparedNode.typeLine;
+    group.appendChild(typeText);
+  }
+
+  group.addEventListener("mouseenter", (event) => ctx.showTooltip(event, node));
+  group.addEventListener("mousemove", (event) => ctx.moveTooltip(event));
+  group.addEventListener("mouseleave", () => ctx.hideTooltip());
+  group.addEventListener("click", (event) => {
+    if (performance.now() < getSuppressUntil()) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    ctx.onNodeClick(node);
+  });
+
+  nodeLayer.appendChild(group);
+  return group;
+}
+
+function normalizeGroups(rawGroups) {
+  if (!Array.isArray(rawGroups)) return [];
+  return rawGroups
+    .filter((group) => group && typeof group.id === "string" && Array.isArray(group.nodeIds) && group.nodeIds.length)
+    .map((group) => ({
+      ...group,
+      kind: String(group.kind || "branch"),
+      label: String(group.label || group.kind || "group"),
+      nodeIds: Array.from(new Set(group.nodeIds.map(String))),
+      nodeSet: new Set(group.nodeIds.map(String)),
+      parentGroupId: group.parentGroupId ? String(group.parentGroupId) : null,
+    }));
+}
+
+function buildNodeGroupChains(groups) {
+  const chains = new Map();
+  const depth = buildGroupDepthMap(groups);
+  for (const group of groups) {
+    for (const nodeId of group.nodeIds) {
+      if (!chains.has(nodeId)) chains.set(nodeId, []);
+      chains.get(nodeId).push(group.id);
+    }
+  }
+  for (const ids of chains.values()) {
+    ids.sort((left, right) => (depth.get(right) || 0) - (depth.get(left) || 0));
+  }
+  return chains;
+}
+
+function buildGroupDepthMap(groups) {
+  const byId = new Map(groups.map((group) => [group.id, group]));
+  const depth = new Map();
+  function resolve(groupId) {
+    if (depth.has(groupId)) return depth.get(groupId);
+    const group = byId.get(groupId);
+    if (!group || !group.parentGroupId) {
+      depth.set(groupId, 0);
+      return 0;
+    }
+    const value = resolve(group.parentGroupId) + 1;
+    depth.set(groupId, value);
+    return value;
+  }
+  groups.forEach((group) => resolve(group.id));
+  return depth;
+}
+
+function buildGroupDescendants(groups) {
+  const children = new Map();
+  groups.forEach((group) => children.set(group.id, []));
+  groups.forEach((group) => {
+    if (!group.parentGroupId || !children.has(group.parentGroupId)) return;
+    children.get(group.parentGroupId).push(group.id);
+  });
+  const descendants = new Map();
+  function collect(groupId) {
+    const direct = children.get(groupId) || [];
+    const all = [];
+    direct.forEach((childId) => {
+      all.push(childId, ...collect(childId));
+    });
+    descendants.set(groupId, all);
+    return all;
+  }
+  groups.forEach((group) => collect(group.id));
+  return descendants;
+}
+
+function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState) {
+  const visibleNodeIds = new Set();
+  const visibleCollapsedGroupIds = [];
+  const visibleExpandedGroupIds = [];
+  for (const group of groups) {
+    const nearestCollapsedAncestor = nearestCollapsedGroup(group.id, groupById, groupState);
+    if (nearestCollapsedAncestor && nearestCollapsedAncestor !== group.id) continue;
+    if (groupState.get(group.id)?.collapsed) visibleCollapsedGroupIds.push(group.id);
+    else visibleExpandedGroupIds.push(group.id);
+  }
+  for (const node of nodes) {
+    const endpoint = resolveVisibleEndpoint(node.id, nodeGroupChains, groupState);
+    if (!endpoint || endpoint.startsWith("group:")) continue;
+    visibleNodeIds.add(node.id);
+  }
+  return { visibleNodeIds, visibleCollapsedGroupIds, visibleExpandedGroupIds };
+}
+
+function nearestCollapsedGroup(groupId, groupById, groupState) {
+  let current = groupById.get(groupId);
+  while (current) {
+    if (groupState.get(current.id)?.collapsed) return current.id;
+    current = current.parentGroupId ? groupById.get(current.parentGroupId) : null;
+  }
+  return null;
+}
+
+function resolveVisibleEndpoint(nodeId, nodeGroupChains, groupState) {
+  const chain = nodeGroupChains.get(nodeId) || [];
+  for (const groupId of chain) {
+    if (groupState.get(groupId)?.collapsed) return groupKey(groupId);
+  }
+  return nodeId;
+}
+
+function computeCollapsedGroupRects(groupIds, groupById, groupState, nodeRectAll) {
+  const rects = new Map();
+  for (const groupId of groupIds) {
+    const group = groupById.get(groupId);
+    if (!group) continue;
+    const bounds = computeBounds(group.nodeIds.map((nodeId) => nodeRectAll.get(nodeId)).filter(Boolean));
+    if (!bounds) continue;
+    const state = groupState.get(groupId) || {};
+    const lines = summarizeGroup(group);
+    const h = Math.max(GROUP_SUMMARY_MIN_H, 18 + lines.length * LINE_H + 10);
+    const x = typeof state.x === "number" ? state.x : bounds.x + (bounds.w - GROUP_SUMMARY_W) / 2;
+    const y = typeof state.y === "number" ? state.y : bounds.y + Math.max(18, bounds.h * 0.18);
+    rects.set(groupId, { x, y, w: GROUP_SUMMARY_W, h });
+  }
+  return rects;
+}
+
+function computeExpandedGroupBounds(groupIds, visibleNodeIds, visibleCollapsedGroupIds, groupById, nodeRectAll, collapsedGroupRects) {
+  const bounds = new Map();
+  for (const groupId of groupIds) {
+    const group = groupById.get(groupId);
+    if (!group) continue;
+    const rects = [];
+    visibleNodeIds.forEach((nodeId) => {
+      if (!group.nodeSet.has(nodeId)) return;
+      const rect = nodeRectAll.get(nodeId);
+      if (rect) rects.push(rect);
+    });
+    visibleCollapsedGroupIds.forEach((childId) => {
+      if (childId === groupId) return;
+      const child = groupById.get(childId);
+      if (!child || !child.nodeIds.some((nodeId) => group.nodeSet.has(nodeId))) return;
+      const rect = collapsedGroupRects.get(childId);
+      if (rect) rects.push(rect);
+    });
+    const box = computeBounds(rects);
+    if (!box) continue;
+    bounds.set(groupId, {
+      x: box.x - GROUP_PAD_X,
+      y: box.y - GROUP_PAD_Y,
+      w: box.w + GROUP_PAD_X * 2,
+      h: box.h + GROUP_PAD_Y * 2,
+    });
+  }
+  return bounds;
+}
+
+function computeBounds(rects) {
+  if (!rects.length) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  rects.forEach((rect) => {
+    minX = Math.min(minX, rect.x);
+    minY = Math.min(minY, rect.y);
+    maxX = Math.max(maxX, rect.x + rect.w);
+    maxY = Math.max(maxY, rect.y + rect.h);
+  });
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function endpointKind(endpointId, nodesById, groupById) {
+  if (endpointId.startsWith("group:")) {
+    const group = groupById.get(endpointId.slice(6));
+    if (!group) return "process";
+    if (group.kind === "branch") return "decision";
+    if (group.kind === "function_body") return "compute";
+    if (group.kind === "loop") return "loop";
+    return "process";
+  }
+  return nodesById.get(endpointId)?.kind || "process";
+}
+
+function groupColor(kind) {
+  if (kind === "branch") return theme.nodeColor.decision;
+  if (kind === "loop") return theme.nodeColor.loop;
+  if (kind === "function_body") return theme.nodeColor.compute;
+  return theme.accent;
+}
+
+function summarizeGroup(group) {
+  const count = group.nodeIds.length;
+  return [String(group.label || group.kind || "group"), `${count} ${count === 1 ? "node" : "nodes"}`];
+}
+
+function updateLegend(nodes) {
+  const lgItems = document.getElementById("lg-items");
+  if (!lgItems) return;
+  lgItems.innerHTML = "";
+  document.getElementById("lg-title").textContent = "Node Types";
+  const kinds = Array.from(new Set(nodes.map((node) => node.kind)));
+  for (const kind of kinds) {
+    const color = theme.nodeColor[kind] || "#7aa2f7";
+    const div = document.createElement("div");
+    div.className = "lg-item";
+    div.innerHTML = kind === "decision"
+      ? `<span class="lg-diamond" style="background:${color}22;border:1px solid ${color}55"></span>${kind}`
+      : kind === "loop"
+        ? `<span class="lg-hex" style="background:${color}22;border:1px solid ${color}55"></span>${kind}`
+      : kind === "break"
+        ? `<span class="lg-break" style="background:${color}22;border:1px solid ${color}55"></span>${kind}`
+      : kind === "continue"
+        ? `<span class="lg-continue" style="background:${color}22;border:1px solid ${color}55"></span>${kind}`
+      : kind === "loop_else"
+        ? `<span class="lg-loop-else" style="background:${color}22;border:1px dashed ${color}77"></span>${kind.replace("_", " ")}`
+      : `<span class="lg-shape" style="background:${color}22;border:1px solid ${color}55;${kind === "entry" || kind === "return" ? "border-radius:10px" : ""}"></span>${kind}`;
+    lgItems.appendChild(div);
+  }
+}
+
+function buildLoopLaneRanks(nodes, positions, visibleNodeIds, groupDepth) {
+  const loops = nodes
+    .filter((node) => node.kind === "loop" && visibleNodeIds.has(node.id))
+    .map((node) => ({ node, pos: positions.get(node.id) }))
+    .filter((entry) => !!entry.pos)
+    .sort((left, right) => left.pos.y - right.pos.y || left.pos.x - right.pos.x);
+  const ranks = new Map();
+  loops.forEach((entry, index) => {
+    let rank = groupDepth.get(entry.node.id) || 0;
+    for (let i = 0; i < index; i++) {
+      const other = loops[i];
+      if (Math.abs(other.pos.x - entry.pos.x) < NODE_W * 0.85 && Math.abs(other.pos.y - entry.pos.y) < 340) rank += 1;
+    }
+    ranks.set(entry.node.id, rank);
+  });
+  return ranks;
+}
+
+function computeEdgeRoute(edge, fromRect, toRect, fromKind, toKind, loopLaneRanks) {
+  if (edge.src?.startsWith("group:") || edge.tgt?.startsWith("group:")) {
+    return makeDefaultRoute(edge, fromRect, toRect);
+  }
+  const label = String(edge.label || "").toLowerCase();
+  if ((label === "repeat" || label === "continue") && toKind === "loop") {
+    return makeLoopBackRoute(edge, fromRect, toRect, label === "continue", loopLaneRanks);
+  }
+  if (fromKind === "loop" && (label === "done" || toKind === "loop_else")) {
+    return makeLoopExitRoute(edge, fromRect, toRect, toKind === "loop_else", loopLaneRanks);
+  }
+  if (fromKind === "loop") {
+    return makeLoopForwardRoute(fromRect, toRect, label);
+  }
+  return makeDefaultRoute(edge, fromRect, toRect);
+}
+
+function makeDefaultRoute(edge, fromRect, toRect) {
+  const sourceLane = (edge.sourceLaneOffset || 0) + (edge.bundleLaneOffset || 0);
+  const targetLane = (edge.targetLaneOffset || 0) - (edge.bundleLaneOffset || 0);
+  const sourceAnchor = pickAnchor(fromRect, toRect, sourceLane);
+  const targetAnchor = pickAnchor(toRect, fromRect, targetLane);
+  const bend = Math.max(24, Math.min(120, Math.hypot(targetAnchor.x - sourceAnchor.x, targetAnchor.y - sourceAnchor.y) * 0.35));
+  const sx = sourceAnchor.x;
+  const sy = sourceAnchor.y;
+  const tx = targetAnchor.x;
+  const ty = targetAnchor.y;
+  const c1x = sx + sourceAnchor.dx * bend;
+  const c1y = sy + sourceAnchor.dy * bend;
+  const c2x = tx + targetAnchor.dx * bend;
+  const c2y = ty + targetAnchor.dy * bend;
+  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: 0.35, labelDx: 6, labelDy: -4 };
+}
+
+function makeLoopForwardRoute(fromRect, toRect, label) {
+  const sx = fromRect.x + fromRect.w / 2;
+  const sy = fromRect.y + fromRect.h;
+  const tx = toRect.x + toRect.w / 2;
+  const ty = toRect.y;
+  const spread = Math.max(18, Math.min(64, Math.abs(tx - sx) * 0.25));
+  const c1x = sx;
+  const c1y = sy + 42;
+  const c2x = tx + Math.sign(tx - sx || 1) * spread;
+  const c2y = ty - 34;
+  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: label === "done" ? 0.45 : 0.42, labelDx: 8, labelDy: -6 };
+}
+
+function makeLoopBackRoute(edge, fromRect, toRect, isContinue, loopLaneRanks) {
+  const loopId = edge.tgt.replace(/^group:/, "");
+  const loopRank = loopLaneRanks.get(loopId) || 0;
+  const sx = fromRect.x;
+  const sy = fromRect.y + fromRect.h / 2;
+  const tx = toRect.x + toRect.w * 0.22;
+  const ty = toRect.y + toRect.h * 0.22;
+  const laneX = Math.min(fromRect.x, toRect.x) - (isContinue ? 58 : 74) - loopRank * 26;
+  const topY = Math.min(fromRect.y, toRect.y) - (isContinue ? 16 : 26) - Math.min(24, loopRank * 7);
+  const c1x = laneX;
+  const c1y = sy;
+  const c2x = laneX;
+  const c2y = topY;
+  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: 0.48, labelDx: -26, labelDy: -8 };
+}
+
+function makeLoopExitRoute(edge, fromRect, toRect, isLoopElse, loopLaneRanks) {
+  const loopId = edge.src.replace(/^group:/, "");
+  const loopRank = loopLaneRanks.get(loopId) || 0;
+  const sx = fromRect.x + fromRect.w;
+  const sy = fromRect.y + fromRect.h / 2;
+  const tx = isLoopElse ? toRect.x + toRect.w / 2 : toRect.x;
+  const ty = isLoopElse ? toRect.y : toRect.y + toRect.h / 2;
+  const laneX = Math.max(fromRect.x + fromRect.w, toRect.x + toRect.w) + (isLoopElse ? 26 : 42) + loopRank * 24;
+  const c1x = laneX;
+  const c1y = sy;
+  const c2x = laneX;
+  const c2y = ty - (isLoopElse ? 10 : 0);
+  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: 0.42, labelDx: 12, labelDy: -6 };
+}
+
+function pickAnchor(source, target, laneOffset = 0) {
+  const sourceCenterX = source.x + source.w / 2;
+  const sourceCenterY = source.y + source.h / 2;
+  const targetCenterX = target.x + target.w / 2;
+  const targetCenterY = target.y + target.h / 2;
+  const dx = targetCenterX - sourceCenterX;
+  const dy = targetCenterY - sourceCenterY;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    if (dx >= 0) return { x: source.x + source.w, y: sourceCenterY + laneOffset, dx: 1, dy: 0 };
+    return { x: source.x, y: sourceCenterY + laneOffset, dx: -1, dy: 0 };
+  }
+  if (dy >= 0) return { x: sourceCenterX + laneOffset, y: source.y + source.h, dx: 0, dy: 1 };
+  return { x: sourceCenterX + laneOffset, y: source.y, dx: 0, dy: -1 };
+}
+
+function assignFlowEdgeSpread(edgeRecords) {
+  const bySource = new Map();
+  const byTarget = new Map();
+  const byBundle = new Map();
+  edgeRecords.forEach((edge) => {
+    if (!bySource.has(edge.src)) bySource.set(edge.src, []);
+    bySource.get(edge.src).push(edge);
+    if (!byTarget.has(edge.tgt)) byTarget.set(edge.tgt, []);
+    byTarget.get(edge.tgt).push(edge);
+    const bundleKey = `${edge.src}->${edge.tgt}`;
+    if (!byBundle.has(bundleKey)) byBundle.set(bundleKey, []);
+    byBundle.get(bundleKey).push(edge);
+  });
+  bySource.forEach((bucket) => {
+    bucket.forEach((edge, index) => {
+      edge.sourceLaneOffset = (index - (bucket.length - 1) / 2) * 13;
+    });
+  });
+  byTarget.forEach((bucket) => {
+    bucket.forEach((edge, index) => {
+      edge.targetLaneOffset = (index - (bucket.length - 1) / 2) * 13;
+    });
+  });
+  byBundle.forEach((bucket) => {
+    bucket.forEach((edge, index) => {
+      edge.bundleLaneOffset = (index - (bucket.length - 1) / 2) * 7;
+    });
+  });
+}
+
+function makeGroupToggle(wrapper, color, collapsed, onToggle) {
+  const hit = document.createElementNS(NS, "circle");
+  hit.setAttribute("r", String(GROUP_TOGGLE_R));
+  hit.setAttribute("fill", color + "1e");
+  hit.setAttribute("stroke", color + "75");
+  hit.setAttribute("stroke-width", "1");
+  hit.style.cursor = "pointer";
+  wrapper.appendChild(hit);
+
+  const glyph = document.createElementNS(NS, "text");
+  glyph.setAttribute("text-anchor", "middle");
+  glyph.setAttribute("dominant-baseline", "central");
+  glyph.setAttribute("fill", color + "ee");
+  glyph.setAttribute("font-size", "10");
+  glyph.setAttribute("font-weight", "700");
+  glyph.style.cursor = "pointer";
+  glyph.textContent = collapsed ? "+" : "-";
+  wrapper.appendChild(glyph);
+
+  const trigger = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onToggle();
+  };
+  [hit, glyph].forEach((node) => {
+    node.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    node.addEventListener("click", trigger);
+  });
+  return { hit, glyph };
+}
+
+function positionGroupToggle(toggle, bounds, options = {}) {
+  const cx = bounds.x + GROUP_TOGGLE_R + 8;
+  const cy = options.headerChip ? bounds.y - 1 : bounds.y + GROUP_TOGGLE_R + 6;
+  toggle.hit.setAttribute("cx", String(cx));
+  toggle.hit.setAttribute("cy", String(cy));
+  toggle.glyph.setAttribute("x", String(cx));
+  toggle.glyph.setAttribute("y", String(cy + 0.5));
 }
 
 function prepareNode(node) {
   const meta = node.metadata || {};
-  const rawLines = Array.isArray(meta.displayLines) && meta.displayLines.length
+  const lines = Array.isArray(meta.displayLines) && meta.displayLines.length
     ? meta.displayLines.map(String)
     : String(node.label || "").split("\n");
-  const displayLines = rawLines;
   const typeLine = meta.typeLabel ? String(meta.typeLabel) : "";
-  const totalLineCount = displayLines.length + (typeLine ? 1 : 0);
+  const totalLineCount = lines.length + (typeLine ? 1 : 0);
   const h = Math.max(NODE_MIN_H, 16 + totalLineCount * LINE_H + 8);
-  return { lines: displayLines, typeLine, h };
+  return { lines, typeLine, h };
+}
+
+function groupKey(groupId) {
+  return `group:${groupId}`;
 }

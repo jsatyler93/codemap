@@ -3,6 +3,10 @@
 CodeMap uses Python's standard `ast` module to extract symbols and call
 sites. Resolution is intentionally conservative.
 
+The analyzer now attaches explicit provenance and confidence metadata to the
+facts it emits so the UI and downstream code can distinguish verified facts
+from heuristic ones instead of treating them as equally certain.
+
 ## What is extracted
 
 Per file:
@@ -42,6 +46,39 @@ rather than fabricate. The renderer additionally:
 - draws `unresolved` edges (when shown) with a sparse dotted pattern
 - draws `resolved` edges solid
 
+Each call site also carries:
+
+- `resolutionSource`: where the conclusion came from, such as `ast-local`,
+  `ast-import-from`, `ast-self-member`, `ast-class-member`, `jedi`,
+  `builtin`, or `out-of-scope-import`
+- `confidence`: `high`, `medium`, or `low`
+- `externalTarget`: best-known textual target for builtin or out-of-scope calls
+
+Confidence policy:
+
+- `high`: exact local/member/import match or a Jedi-confirmed symbol
+- `medium`: class-member style inference (`Class.method`, `cls.method`) or
+  imported code outside the analyzed file set
+- `low`: unresolved remnants such as import misses where a module was analyzed
+  but no matching symbol could be justified
+
+This keeps the analysis falsifiable: we record what was observed, how it was
+derived, and how certain the analyzer is, instead of silently upgrading
+ guesses into facts.
+
+## Type provenance
+
+Extracted parameter, attribute, and return types now carry source and
+confidence information:
+
+- annotations → `typeSource=annotation`, `typeConfidence=high`
+- docstrings → `typeSource=docstring`, `typeConfidence=medium`
+- inferred instance assignments such as `self.x = []` →
+  `typeSource=value-inference`, `typeConfidence=low`
+
+Return types carry the same distinction via `returnTypeSource` and
+`returnTypeConfidence`.
+
 ## Flowchart granularity
 
 `python/flowchart.py` walks one function's AST and emits:
@@ -67,3 +104,6 @@ This produces approximate, readable charts — not full control-flow graphs.
   exotic `sys.path` layouts may produce missing edges
 - generic `lambda`/comprehension call sites are recorded but their
   containing function still owns them
+- out-of-scope imports are classified explicitly, but they are still not
+  resolved into internal edges unless the target symbol exists in the
+  analyzed file set or Jedi can map it confidently

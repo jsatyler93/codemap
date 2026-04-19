@@ -1,6 +1,7 @@
 import { SourceRef } from "./graphTypes";
 
 export type PySymbolKind = "function" | "method" | "class" | "module";
+export type EvidenceConfidence = "high" | "medium" | "low";
 
 export interface PyCallSite {
   // Best-effort textual representation of the callee expression as it appears
@@ -11,6 +12,12 @@ export interface PyCallSite {
   // The candidate symbol id this call resolves to, if any.
   resolvedTo?: string;
   resolution: "resolved" | "likely" | "unresolved";
+  // Where the resolution came from: local AST rule, import rule, Jedi, builtin, etc.
+  resolutionSource?: string;
+  // Confidence in the call classification.
+  confidence?: EvidenceConfidence;
+  // For out-of-scope or builtin calls, the best-known textual target.
+  externalTarget?: string;
 }
 
 export interface PyParam {
@@ -19,6 +26,8 @@ export interface PyParam {
   type?: string;
   /** Where the type came from. */
   typeSource?: "annotation" | "docstring";
+  /** Confidence in the extracted type. */
+  typeConfidence?: EvidenceConfidence;
   /** Default value as source text, if any. */
   default?: string;
   /** True for `*args`. */
@@ -32,6 +41,8 @@ export interface PyParam {
 export interface PyAttr {
   name: string;
   type?: string;
+  typeSource?: "annotation" | "value-inference";
+  typeConfidence?: EvidenceConfidence;
   line: number;
 }
 
@@ -65,6 +76,7 @@ export interface PySymbol {
   // For functions/methods: return type string if known.
   returnType?: string;
   returnTypeSource?: "annotation" | "docstring";
+  returnTypeConfidence?: EvidenceConfidence;
   // First line of the docstring, if any.
   docSummary?: string;
   // Refined sub-kind for methods.
@@ -103,5 +115,14 @@ export interface PyAnalysisResult {
     typeCoveragePct: number;
     jediEnabled: boolean;
     jediResolved: number;
+    callResolution?: {
+      total: number;
+      resolved: number;
+      likely: number;
+      unresolved: number;
+      builtin: number;
+      outOfScope: number;
+      jedi: number;
+    };
   };
 }

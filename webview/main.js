@@ -12,22 +12,26 @@ const canvasEl   = document.getElementById("canvas");
 const tooltip    = document.getElementById("tooltip");
 const titleEl    = document.getElementById("title");
 const statsEl    = document.getElementById("stats");
-const ambientBtn = document.getElementById("btn-ambient");
 const execBtn    = document.getElementById("btn-exec");
 const stepBtn    = document.getElementById("btn-step");
 const resetBtn   = document.getElementById("btn-reset");
 const clearBtn   = document.getElementById("btn-clear");
 const refreshBtn = document.getElementById("btn-refresh");
 const searchBox  = document.getElementById("search-box");
+const canvasControls = document.getElementById("canvas-controls");
+const collapseGroupsBtn = document.getElementById("btn-collapse-groups");
+const expandGroupsBtn = document.getElementById("btn-expand-groups");
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
-let flowOn = true;
 let time = 0;
+let uiState = { showEvidence: false };
+let lastStepParticleAt = 0;
+const LAYOUT_STORAGE_PREFIX = "codemap.layout.v1:";
+const STEP_PARTICLE_INTERVAL_MS = 1150;
 
 function showTooltip(e, n) {
-  const kind = n.kind || "node";
   const meta = n.metadata || {};
   const module = n.module || "";
   const sig = meta.params
@@ -39,12 +43,14 @@ function showTooltip(e, n) {
   const connLine = (typeof n._connOut === "number")
     ? `<div class="tt-conn">↗ ${n._connOut} out · ↙ ${n._connIn} in</div>`
     : "";
+  const evidence = uiState.showEvidence ? buildEvidenceHtml(meta) : "";
   tooltip.innerHTML = `
     ${module ? `<div class="tt-module">${escapeHtml(module)}</div>` : ""}
     <div class="tt-func">${escapeHtml(n.label || n.id)}</div>
     ${sig}${doc}
     ${n.source ? `<div class="tt-file">${escapeHtml(shortPath(n.source.file))}:${n.source.line}</div>` : ""}
     ${connLine}
+    ${evidence}
   `;
   tooltip.style.opacity = "1";
   moveTooltip(e);
@@ -58,6 +64,42 @@ function formatParam(p) {
   if (p.default !== undefined) s += ` = ${escapeHtml(p.default)}`;
   return s;
 }
+
+function buildEvidenceHtml(meta) {
+  const lines = [];
+  const params = Array.isArray(meta.params) ? meta.params : [];
+  params.forEach((param) => {
+    if (!param.type || (!param.typeSource && !param.typeConfidence)) return;
+    lines.push(`${escapeHtml(param.name)}: ${formatEvidenceBits(param.typeSource, param.typeConfidence)}`);
+  });
+  if (meta.returnType && (meta.returnTypeSource || meta.returnTypeConfidence)) {
+    lines.push(`returns: ${formatEvidenceBits(meta.returnTypeSource, meta.returnTypeConfidence)}`);
+  }
+  appendAttributeEvidence(lines, "class", meta.classAttributes);
+  appendAttributeEvidence(lines, "instance", meta.instanceAttributes);
+  if (!lines.length) return "";
+  const body = lines.slice(0, 5).map((line) => `<div class="tt-evidence-row">${line}</div>`).join("");
+  const extra = lines.length > 5
+    ? `<div class="tt-evidence-more">+${lines.length - 5} more evidence items</div>`
+    : "";
+  return `<div class="tt-evidence"><div class="tt-evidence-title">Evidence</div>${body}${extra}</div>`;
+}
+
+function appendAttributeEvidence(lines, label, attrs) {
+  if (!Array.isArray(attrs)) return;
+  attrs.forEach((attr) => {
+    if (!attr?.name || !attr?.type || (!attr.typeSource && !attr.typeConfidence)) return;
+    lines.push(`${escapeHtml(label)} ${escapeHtml(attr.name)}: ${formatEvidenceBits(attr.typeSource, attr.typeConfidence)}`);
+  });
+}
+
+function formatEvidenceBits(source, confidence) {
+  const bits = [];
+  if (source) bits.push(escapeHtml(String(source)));
+  if (confidence) bits.push(`<span class="tt-evidence-confidence">${escapeHtml(String(confidence))}</span>`);
+  return bits.join(" · ");
+}
+
 function moveTooltip(e) {
   tooltip.style.left = (e.clientX + 16) + "px";
   tooltip.style.top  = (e.clientY - 10) + "px";
@@ -109,11 +151,14 @@ function updateStats(graph) {
   statsEl.textContent = parts.join(" · ");
 }
 
-function renderGraph(graph) {
+function renderGraph(graph, options = {}) {
   if (!graph || typeof graph !== "object") return;
   if (!Array.isArray(graph.nodes)) graph.nodes = [];
   if (!Array.isArray(graph.edges)) graph.edges = [];
   currentGraph = graph;
+  const preservedView = options.preserveView
+    ? { scale: canvas.state.scale, panX: canvas.state.panX, panY: canvas.state.panY }
+    : null;
 
   // Reset exec trace state
   execStep = -1;
@@ -132,10 +177,16 @@ function renderGraph(graph) {
   try {
     canvas.clear();
     if (canvas.clearScaleListeners) canvas.clearScaleListeners();
+    const layoutKey = buildLayoutStorageKey(graph);
     const ctx = {
       root: canvas.root,
       defs: canvas.defs,
       canvas: canvas,
+      layoutSnapshot: loadLayoutSnapshot(layoutKey),
+      onLayoutChanged: (snapshot) => saveLayoutSnapshot(layoutKey, snapshot),
+      requestRender: () => {
+        if (currentGraph) renderGraph(currentGraph, { preserveView: true });
+      },
       showTooltip, moveTooltip, hideTooltip, onNodeClick,
       onNodeDblClick,
     };
@@ -159,7 +210,9 @@ function renderGraph(graph) {
       renderCtx._execTimeline = timeline;
     }
 
-    if (current.initialView) {
+    if (preservedView) {
+      canvas.reset(preservedView);
+    } else if (current.initialView) {
       canvas.reset(current.initialView);
     } else {
       canvas.reset();
@@ -167,6 +220,7 @@ function renderGraph(graph) {
 
     updateExecPanel(graph);
     updateLegend(graph);
+    updateCanvasControls(graph);
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
     vscode.postMessage({ type: "debug", message: "[render-error] " + msg });
@@ -184,6 +238,10 @@ function updateLegend(graph) {
       { color: "#9ece6a", label: "entry / exit" },
       { color: "#7aa2f7", label: "process" },
       { color: "#e0af68", label: "decision" },
+      { color: "#7dcfff", label: "loop" },
+      { color: "#ff9e64", label: "break" },
+      { color: "#73daca", label: "continue" },
+      { color: "#c0caf5", label: "loop else" },
       { color: "#f7768e", label: "error / raise" },
       { color: "#bb9af7", label: "compute" },
       { color: "#73daca", label: "output" },
@@ -207,27 +265,27 @@ function updateLegend(graph) {
   }
 }
 
+function updateCanvasControls(graph) {
+  if (!canvasControls || !collapseGroupsBtn || !expandGroupsBtn) return;
+  const enabled = !!renderCtx._hasGroupControls;
+  canvasControls.style.display = enabled ? "flex" : "none";
+  collapseGroupsBtn.disabled = !enabled;
+  expandGroupsBtn.disabled = !enabled;
+}
+
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (msg && msg.type === "setGraph") {
     renderGraph(msg.graph);
   } else if (msg && msg.type === "setRuntimeFrame") {
     renderRuntimeFrame(msg.frame, msg.highlightNodeIds || []);
+  } else if (msg && msg.type === "setUiState") {
+    uiState = { ...uiState, ...(msg.state || {}) };
+    hideTooltip();
   }
 });
 
 // ── Toolbar buttons ──
-ambientBtn.addEventListener("click", () => {
-  flowOn = !flowOn;
-  ambientBtn.classList.toggle("active", flowOn);
-  if (!flowOn && current) {
-    for (const r of current.edgeRecords) {
-      if (r.ambDots) r.ambDots.forEach((ad) => ad.el.setAttribute("opacity", "0"));
-      else r.dot.setAttribute("opacity", "0");
-    }
-  }
-});
-
 execBtn.addEventListener("click", () => {
   toggleAutoTrace();
 });
@@ -246,7 +304,16 @@ clearBtn.addEventListener("click", () => {
 });
 
 refreshBtn.addEventListener("click", () => {
+  clearStoredLayouts();
   vscode.postMessage({ type: "requestRefresh" });
+});
+
+collapseGroupsBtn?.addEventListener("click", () => {
+  renderCtx._collapseAllGroups?.();
+});
+
+expandGroupsBtn?.addEventListener("click", () => {
+  renderCtx._expandAllGroups?.();
 });
 
 searchBox.addEventListener("input", () => {
@@ -323,13 +390,11 @@ function resetExecPanelDisplay() {
   const epDesc = document.getElementById("ep-desc");
   const epStep = document.getElementById("ep-step");
   const epHint = document.getElementById("ep-hint");
-  const epBar  = document.getElementById("ep-bar");
   const panel  = document.getElementById("exec-panel");
   if (epFunc) epFunc.textContent = "—";
   if (epDesc) epDesc.textContent = "";
   if (epStep) epStep.textContent = "";
-  if (epHint) epHint.textContent = "Press ▶ auto trace or ⏭ step-by-step";
-  if (epBar)  epBar.style.width = "0%";
+  if (epHint) epHint.textContent = "Auto or step mode";
   if (panel) {
     panel.classList.remove("active-exec", "active-step");
   }
@@ -339,6 +404,7 @@ function highlightExecStep() {
   const timeline = renderCtx._execTimeline;
   if (!timeline || execStep < 0 || execStep >= timeline.length) return;
   if (renderCtx._highlightStep) renderCtx._highlightStep(execStep);
+  spawnCurrentStepParticle(true);
   updateExecStepDisplay();
 }
 
@@ -350,7 +416,6 @@ function updateExecStepDisplay() {
   const epDesc = document.getElementById("ep-desc");
   const epStep = document.getElementById("ep-step");
   const epHint = document.getElementById("ep-hint");
-  const epBar  = document.getElementById("ep-bar");
   if (execStep < 0) {
     resetExecPanelDisplay();
     return;
@@ -359,8 +424,7 @@ function updateExecStepDisplay() {
   if (epFunc) epFunc.textContent = step.label || "—";
   if (epDesc) epDesc.textContent = step.desc || "";
   if (epStep) epStep.textContent = `Step ${execStep + 1} / ${timeline.length}`;
-  if (epHint) epHint.textContent = execAutoMode ? "Auto-tracing..." : "→ next · ← back · A auto";
-  if (epBar)  epBar.style.width = ((execStep + 1) / timeline.length * 100) + "%";
+  if (epHint) epHint.textContent = execAutoMode ? "Auto tracing" : "← back  → next";
   if (panel) {
     panel.classList.toggle("active-exec", execAutoMode);
     panel.classList.toggle("active-step", execStepMode && !execAutoMode);
@@ -377,6 +441,7 @@ function toggleAutoTrace() {
   execAutoMode = true;
   execBtn.classList.add("active");
   execStep = -1;
+  lastStepParticleAt = 0;
   if (renderCtx._clearExecDots) renderCtx._clearExecDots();
   execDots = [];
   advanceAutoTrace();
@@ -393,6 +458,7 @@ function stopAutoTrace() {
 function toggleStepMode() {
   if (execStepMode) {
     execStepMode = false;
+    lastStepParticleAt = 0;
     stepBtn.classList.remove("active");
     return;
   }
@@ -400,6 +466,7 @@ function toggleStepMode() {
   execStepMode = true;
   stepBtn.classList.add("active");
   execStep = -1;
+  lastStepParticleAt = 0;
   updateExecStepDisplay();
 }
 
@@ -408,6 +475,7 @@ function clearExecTrace() {
   execStepMode = false;
   stepBtn.classList.remove("active");
   execStep = -1;
+  lastStepParticleAt = 0;
   execDots = [];
   if (renderCtx._clearExecDots) renderCtx._clearExecDots();
   resetExecPanelDisplay();
@@ -437,10 +505,29 @@ function advanceAutoTrace() {
   }
 }
 
+function spawnCurrentStepParticle(force = false) {
+  if (!execStepMode || execAutoMode || execStep < 0) return;
+  const timeline = renderCtx._execTimeline;
+  const spawnFn = renderCtx._spawnExecDot;
+  const edgeMap = renderCtx._edgeMap;
+  if (!timeline || !spawnFn || !edgeMap) return;
+  const step = timeline[execStep];
+  if (!step?.edge) return;
+  const now = performance.now();
+  if (!force && now - lastStepParticleAt < STEP_PARTICLE_INTERVAL_MS) return;
+  const edgeIdx = edgeMap[step.edge[0] + "->" + step.edge[1]];
+  if (typeof edgeIdx !== "number") return;
+  const d = spawnFn(edgeIdx, "#f7e76d", { radius: 6.5, speed: 0.0048, trailScale: 1.15 });
+  if (d) {
+    execDots.push(d);
+    lastStepParticleAt = now;
+  }
+}
+
 // Animation loop
 function loop() {
   time++;
-  if (flowOn && current) {
+  if (current) {
     for (const r of current.edgeRecords) {
       if (r.ambDots) {
         for (const ad of r.ambDots) {
@@ -459,6 +546,7 @@ function loop() {
       }
     }
   }
+  spawnCurrentStepParticle(false);
   for (let i = execDots.length - 1; i >= 0; i--) {
     const d = execDots[i];
     if (!d.alive) continue;
@@ -783,4 +871,56 @@ function cssEscape(s) {
     return window.CSS.escape(s);
   }
   return String(s).replace(/(["\\])/g, "\\$1");
+}
+
+function buildLayoutStorageKey(graph) {
+  const meta = graph.metadata || {};
+  const nodeIds = Array.isArray(graph.nodes)
+    ? graph.nodes.map((node) => node.id).sort()
+    : [];
+  return LAYOUT_STORAGE_PREFIX + JSON.stringify([
+    graph.graphType || "graph",
+    graph.title || "",
+    meta.module || "",
+    Array.isArray(graph.rootNodeIds) ? graph.rootNodeIds : [],
+    nodeIds,
+  ]);
+}
+
+function loadLayoutSnapshot(key) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLayoutSnapshot(key, snapshot) {
+  try {
+    if (!snapshot || typeof snapshot !== "object") {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, JSON.stringify(snapshot));
+  } catch {
+    // Ignore webview storage failures.
+  }
+}
+
+function clearStoredLayouts() {
+  try {
+    const keys = [];
+    for (let index = 0; index < window.localStorage.length; index++) {
+      const key = window.localStorage.key(index);
+      if (key && key.startsWith(LAYOUT_STORAGE_PREFIX)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach((key) => window.localStorage.removeItem(key));
+  } catch {
+    // Ignore webview storage failures.
+  }
 }

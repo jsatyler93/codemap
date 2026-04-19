@@ -25,6 +25,7 @@ path; jedi is purely optional.
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import os
 import re
@@ -42,6 +43,9 @@ ParamDict = Dict[str, Any]
 AttrDict = Dict[str, Any]
 Resolution = Tuple[str, str]  # (symbol_id, resolution_kind)
 AliasInfo = Tuple[str, ...]   # ("module", mod) or ("from", mod, name)
+CallResolution = Dict[str, Any]
+
+BUILTIN_NAMES = set(dir(builtins))
 
 # --- helpers ------------------------------------------------------------------
 
@@ -268,6 +272,8 @@ class FileExtractor(ast.NodeVisitor):
                 class_attrs.append({
                     "name": stmt.target.id,
                     "type": _unparse(stmt.annotation),
+                    "typeSource": "annotation",
+                    "typeConfidence": "high",
                     "line": stmt.lineno,
                 })
         instance_attrs = _collect_self_attrs(node)
@@ -319,9 +325,11 @@ class FileExtractor(ast.NodeVisitor):
         params = _extract_params(node, in_class, method_kind, doc_params)
         return_type = _unparse(node.returns)  # type: ignore[attr-defined]
         return_type_source: Optional[str] = "annotation" if return_type else None
+        return_type_confidence: Optional[str] = "high" if return_type else None
         if not return_type and doc_ret:
             return_type = doc_ret
             return_type_source = "docstring"
+            return_type_confidence = "medium"
 
         # Type-coverage stats: count each param + the return as a slot.
         for p in params:
@@ -345,6 +353,7 @@ class FileExtractor(ast.NodeVisitor):
             "params": params,
             "returnType": return_type,
             "returnTypeSource": return_type_source,
+            "returnTypeConfidence": return_type_confidence,
             "docSummary": _doc_summary(docstring),
             "calls": [],
         }
@@ -363,6 +372,8 @@ class FileExtractor(ast.NodeVisitor):
                     "line": getattr(child, "lineno", 0),
                     "column": call_lookup_column(child.func),
                     "resolution": "unresolved",
+                    "resolutionSource": "unresolved",
+                    "confidence": "low",
                 })
 
         self.symbols[sid] = symbol
@@ -462,9 +473,11 @@ def _mk_param(
     if annotation:
         p["type"] = annotation
         p["typeSource"] = "annotation"
+        p["typeConfidence"] = "high"
     elif name in doc_params:
         p["type"] = doc_params[name]
         p["typeSource"] = "docstring"
+        p["typeConfidence"] = "medium"
     if default is not None:
         p["default"] = default
     return p
@@ -489,6 +502,8 @@ def _collect_self_attrs(class_node: ast.ClassDef) -> List[AttrDict]:
                 attrs.append({
                     "name": t.attr,
                     "type": _unparse(n.annotation),
+                    "typeSource": "annotation",
+                    "typeConfidence": "high",
                     "line": n.lineno,
                 })
         elif isinstance(n, ast.Assign):
@@ -497,9 +512,12 @@ def _collect_self_attrs(class_node: ast.ClassDef) -> List[AttrDict]:
                     if t.attr in seen:
                         continue
                     seen.add(t.attr)
+                    inferred = _infer_value_type(n.value)
                     attrs.append({
                         "name": t.attr,
-                        "type": _infer_value_type(n.value),
+                        "type": inferred,
+                        "typeSource": "value-inference" if inferred else None,
+                        "typeConfidence": "low" if inferred else None,
                         "line": n.lineno,
                     })
     return attrs
@@ -581,8 +599,7 @@ def resolve_calls(symbols: SymbolMap, modules: ModuleMap) -> None:
                 owning_class_id, class_methods,
             )
             if target:
-                call["resolvedTo"] = target[0]
-                call["resolution"] = target[1]
+                call.update(target)
 
 
 def _resolve_one(
@@ -593,7 +610,7 @@ def _resolve_one(
     symbols: SymbolMap,
     owning_class_id: Optional[str],
     class_methods: Dict[str, Dict[str, str]],
-) -> Optional[Resolution]:
+) -> Optional[CallResolution]:
     if not text:
         return None
     head, *rest = text.split(".")
@@ -602,11 +619,21 @@ def _resolve_one(
         method_name = rest[0]
         mid = class_methods.get(owning_class_id, {}).get(method_name)
         if mid:
-            return (mid, "resolved" if head == "self" else "likely")
+            return _call_resolution(
+                resolved_to=mid,
+                resolution="resolved" if head == "self" else "likely",
+                resolution_source="ast-self-member" if head == "self" else "ast-class-member",
+                confidence="high" if head == "self" else "medium",
+            )
         return None
 
     if not rest and head in locals_map:
-        return (locals_map[head], "resolved")
+        return _call_resolution(
+            resolved_to=locals_map[head],
+            resolution="resolved",
+            resolution_source="ast-local",
+            confidence="high",
+        )
 
     if head in aliases:
         ainfo = aliases[head]
@@ -615,35 +642,96 @@ def _resolve_one(
             if not rest:
                 cand = f"{src_mod}:{orig}"
                 if cand in symbols:
-                    return (cand, "resolved")
-                return (cand, "likely")
+                    return _call_resolution(
+                        resolved_to=cand,
+                        resolution="resolved",
+                        resolution_source="ast-import-from",
+                        confidence="high",
+                    )
+                return _out_of_scope_resolution(f"{src_mod}.{orig}", src_mod in modules)
             class_cand = f"{src_mod}:{orig}"
             if class_cand in symbols and symbols[class_cand]["kind"] == "class":
                 mid = class_methods.get(class_cand, {}).get(rest[0])
                 if mid:
-                    return (mid, "likely")
-            return None
+                    return _call_resolution(
+                        resolved_to=mid,
+                        resolution="likely",
+                        resolution_source="ast-imported-class-member",
+                        confidence="medium",
+                    )
+            return _out_of_scope_resolution(".".join([src_mod, orig, *rest]), src_mod in modules)
         if ainfo[0] == "module":
             target_mod = ainfo[1]
             if rest:
                 cand = f"{target_mod}:{rest[0]}"
                 if cand in symbols:
-                    return (cand, "resolved")
+                    return _call_resolution(
+                        resolved_to=cand,
+                        resolution="resolved",
+                        resolution_source="ast-import-module",
+                        confidence="high",
+                    )
                 if len(rest) >= 2:
                     class_id = f"{target_mod}:{rest[0]}"
                     if class_id in symbols and symbols[class_id]["kind"] == "class":
                         mid = class_methods.get(class_id, {}).get(rest[1])
                         if mid:
-                            return (mid, "likely")
-            return None
+                            return _call_resolution(
+                                resolved_to=mid,
+                                resolution="likely",
+                                resolution_source="ast-imported-class-member",
+                                confidence="medium",
+                            )
+            return _out_of_scope_resolution(".".join([target_mod, *rest]), target_mod in modules)
 
     if rest and head in locals_map:
         cls_id = locals_map[head]
         if symbols.get(cls_id, {}).get("kind") == "class":
             mid = class_methods.get(cls_id, {}).get(rest[0])
             if mid:
-                return (mid, "likely")
+                return _call_resolution(
+                    resolved_to=mid,
+                    resolution="likely",
+                    resolution_source="ast-class-member",
+                    confidence="medium",
+                )
+    if head in BUILTIN_NAMES:
+        return _call_resolution(
+            resolution="unresolved",
+            resolution_source="builtin",
+            confidence="high",
+            external_target=text,
+        )
     return None
+
+
+def _call_resolution(
+    *,
+    resolution: str,
+    resolution_source: str,
+    confidence: str,
+    resolved_to: Optional[str] = None,
+    external_target: Optional[str] = None,
+) -> CallResolution:
+    out: CallResolution = {
+        "resolution": resolution,
+        "resolutionSource": resolution_source,
+        "confidence": confidence,
+    }
+    if resolved_to is not None:
+        out["resolvedTo"] = resolved_to
+    if external_target is not None:
+        out["externalTarget"] = external_target
+    return out
+
+
+def _out_of_scope_resolution(target_text: str, analyzed_module_present: bool) -> CallResolution:
+    return _call_resolution(
+        resolution="unresolved",
+        resolution_source="out-of-scope-import" if not analyzed_module_present else "import-miss",
+        confidence="medium" if not analyzed_module_present else "low",
+        external_target=target_text,
+    )
 
 
 # --- optional: jedi-backed upgrade -------------------------------------------
@@ -701,6 +789,8 @@ def try_jedi_upgrade(symbols: SymbolMap, files: List[str], project_root: str) ->
             if cand:
                 call["resolvedTo"] = cand
                 call["resolution"] = "resolved"
+                call["resolutionSource"] = "jedi"
+                call["confidence"] = "high"
                 upgraded += 1
     return upgraded
 
@@ -760,6 +850,31 @@ def index_files(files: List[str], root: str, use_jedi: bool = True) -> Dict[str,
     jedi_upgraded = try_jedi_upgrade(symbols, files, root) if use_jedi else 0
     jedi_enabled = use_jedi and _jedi_available()
 
+    call_summary = {
+        "total": 0,
+        "resolved": 0,
+        "likely": 0,
+        "unresolved": 0,
+        "builtin": 0,
+        "outOfScope": 0,
+        "jedi": 0,
+    }
+    for sym in symbols.values():
+        if sym["kind"] not in ("function", "method"):
+            continue
+        for call in sym["calls"]:
+            call_summary["total"] += 1
+            resolution = call.get("resolution", "unresolved")
+            if resolution in call_summary:
+                call_summary[resolution] += 1
+            source = call.get("resolutionSource")
+            if source == "builtin":
+                call_summary["builtin"] += 1
+            elif source == "out-of-scope-import":
+                call_summary["outOfScope"] += 1
+            elif source == "jedi":
+                call_summary["jedi"] += 1
+
     coverage = (agg["typed_slots"] / agg["type_slots"] * 100) if agg["type_slots"] > 0 else 0.0
     return {
         "symbols": symbols,
@@ -774,6 +889,7 @@ def index_files(files: List[str], root: str, use_jedi: bool = True) -> Dict[str,
             "typeCoveragePct": round(coverage, 1),
             "jediEnabled": jedi_enabled,
             "jediResolved": jedi_upgraded,
+            "callResolution": call_summary,
         },
     }
 

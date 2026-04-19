@@ -819,6 +819,8 @@ function symbolToNode(sym: PySymbol, color?: string): GraphNode {
       decorators: sym.decorators ?? [],
       params: sym.params ?? [],
       returnType: sym.returnType,
+      returnTypeSource: sym.returnTypeSource,
+      returnTypeConfidence: sym.returnTypeConfidence,
       docSummary: sym.docSummary,
       methodKind: sym.methodKind,
       bases: sym.bases,
