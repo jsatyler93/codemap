@@ -26,6 +26,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const fileTreeView = vscode.window.createTreeView("codemap.files", {
     treeDataProvider: fileTreeProvider,
     showCollapseAll: true,
+    manageCheckboxStateManually: true,
   });
   fileTreeProvider.attachTreeView(fileTreeView);
   context.subscriptions.push(fileTreeView, fileTreeProvider);
