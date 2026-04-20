@@ -183,6 +183,18 @@ export async function indexWorkspace(
   });
 }
 
+export async function indexIdlWorkspace(
+  extensionPath: string,
+  files: string[],
+  root: string,
+): Promise<PyAnalysisResult> {
+  return runPythonHelper<PyAnalysisResult>(extensionPath, "idl_analyzer.py", {
+    command: "index",
+    files,
+    root,
+  });
+}
+
 export async function buildFlowchartFor(
   extensionPath: string,
   file: string,
@@ -193,6 +205,17 @@ export async function buildFlowchartFor(
     file,
     line,
     analysis,
+  });
+}
+
+export async function buildIdlFlowchartFor(
+  extensionPath: string,
+  file: string,
+  line: number,
+): Promise<GraphDocument> {
+  return runPythonHelper<GraphDocument>(extensionPath, "idl_flowchart.py", {
+    file,
+    line,
   });
 }
 

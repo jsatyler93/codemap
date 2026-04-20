@@ -2,17 +2,23 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
-import { buildFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
+import { buildFlowchartFor, buildIdlFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
+import { JavaScriptWorkspaceIndexer } from "./javascript/analysis/javascriptWorkspaceIndexer";
+import { buildJavaScriptFlowchartFor } from "./javascript/analysis/javascriptFlowchartBuilder";
+import { IdlWorkspaceIndexer } from "./idl/analysis/idlWorkspaceIndexer";
 import { DebugSyncService } from "./live/debugSync";
 import { NavigationController } from "./navigation/navigationController";
 import { ActionsViewProvider } from "./providers/actionsViewProvider";
 import { FileTreeProvider } from "./providers/fileTreeProvider";
 import { buildWorkspaceGraph } from "./python/analysis/pythonCallGraphBuilder";
 import { GraphDocument } from "./python/model/graphTypes";
+import { computeModuleColorMap } from "./python/analysis/hierarchicalGraphBuilder";
 
 export function activate(context: vscode.ExtensionContext): void {
-  const indexer = new PythonWorkspaceIndexer(context.extensionPath);
-  context.subscriptions.push(indexer);
+  const pythonIndexer = new PythonWorkspaceIndexer(context.extensionPath);
+  const javascriptIndexer = new JavaScriptWorkspaceIndexer();
+  const idlIndexer = new IdlWorkspaceIndexer(context.extensionPath);
+  context.subscriptions.push(pythonIndexer, javascriptIndexer, idlIndexer);
   const output = vscode.window.createOutputChannel("CodeMap");
   context.subscriptions.push(output);
   let provider: GraphWebviewProvider;
@@ -38,6 +44,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("codemap.pythonPath")) {
         resetInterpreterCache();
+        pythonIndexer.invalidate();
+        idlIndexer.invalidate();
+        jsWorkspaceGraphCache = undefined;
+        idlWorkspaceGraphCache = undefined;
+        navController.invalidateCache();
       }
     }),
   );
@@ -81,10 +92,19 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
-        const analysis = await indexer.getAnalysis();
+        const language = languageForPath(source.file);
         const graph = await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Window, title: "CodeMap: building flowchart..." },
-          () => buildFlowchartFor(context.extensionPath, source.file, source.line, analysis),
+          async () => {
+            if (language === "javascript") {
+              return buildJavaScriptFlowchartFor(source.file, source.line);
+            }
+            if (language === "idl") {
+              return buildIdlFlowchartFor(context.extensionPath, source.file, source.line);
+            }
+            const analysis = await pythonIndexer.getAnalysis();
+            return buildFlowchartFor(context.extensionPath, source.file, source.line, analysis);
+          },
         );
         if (graph && graph.nodes && graph.nodes.length > 0) {
           logGraph(graph);
@@ -102,7 +122,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const navController = new NavigationController(
     context.extensionPath,
-    indexer,
+    pythonIndexer,
     (graph) => {
       logGraph(graph);
       provider.show(graph);
@@ -110,14 +130,19 @@ export function activate(context: vscode.ExtensionContext): void {
     (message) => output.appendLine(message),
   );
 
+  let jsWorkspaceGraphCache: GraphDocument | undefined;
+  let idlWorkspaceGraphCache: GraphDocument | undefined;
+
   // Workspace call graph is the default view.
-  lastCommand = () => navController.showWorkspaceCallGraph();
+  lastCommand = () => runShowWorkspaceGraph();
 
   // Auto-start debug sync so it's always on.
   debugSync.start();
   void fileTreeProvider.initialize().then(() => {
     const checkedFiles = fileTreeProvider.getCheckedFiles();
-    indexer.setIncludedFiles(checkedFiles);
+    pythonIndexer.setIncludedFiles(checkedFiles);
+    javascriptIndexer.setIncludedFiles(checkedFiles);
+    idlIndexer.setIncludedFiles(checkedFiles);
     actionsViewProvider.updateSelection(fileTreeProvider.getSelectionSummary());
   }).catch((e) => {
     output.appendLine(`[file-tree] init failed: ${(e as Error).message}`);
@@ -125,8 +150,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     fileTreeProvider.onDidChangeCheckedFiles((checkedFiles) => {
-      indexer.setIncludedFiles(checkedFiles);
+      pythonIndexer.setIncludedFiles(checkedFiles);
+      javascriptIndexer.setIncludedFiles(checkedFiles);
+      idlIndexer.setIncludedFiles(checkedFiles);
       navController.invalidateCache();
+      jsWorkspaceGraphCache = undefined;
+      idlWorkspaceGraphCache = undefined;
       actionsViewProvider.updateSelection(fileTreeProvider.getSelectionSummary());
       if (provider.isVisible() && lastCommand) {
         lastCommand().catch((e) => showError(e));
@@ -189,17 +218,27 @@ export function activate(context: vscode.ExtensionContext): void {
       await runShowFlowchart();
     }),
     vscode.commands.registerCommand("codemap.showWorkspaceGraph", async () => {
-      lastCommand = () => navController.showWorkspaceCallGraph();
-      await navController.showWorkspaceCallGraph().catch(showError);
+      lastCommand = runShowWorkspaceGraph;
+      await runShowWorkspaceGraph().catch(showError);
     }),
     vscode.commands.registerCommand("codemap.showFileGraph", async (resource?: vscode.Uri) => {
-      const file = await resolveTargetPythonFile(resource);
+      const file = await resolveTargetSourceFile(resource);
       if (!file) return;
       lastCommand = () => runShowFileGraph(file);
       await runShowFileGraph(file);
     }),
     vscode.commands.registerCommand("codemap.refresh", async () => {
-      await indexer.getAnalysis(true);
+      const preferred = preferredWorkspaceLanguage(fileTreeProvider.getCheckedFiles(), vscode.window.activeTextEditor?.document.uri.fsPath);
+      if (preferred === "javascript") {
+        await javascriptIndexer.getAnalysis(true);
+      } else if (preferred === "idl") {
+        await idlIndexer.getAnalysis(true);
+      } else {
+        await pythonIndexer.getAnalysis(true);
+      }
+      jsWorkspaceGraphCache = undefined;
+      idlWorkspaceGraphCache = undefined;
+      navController.invalidateCache();
       if (lastCommand) {
         await lastCommand();
       } else {
@@ -229,24 +268,61 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  async function requireActivePython(): Promise<vscode.TextEditor | undefined> {
+  async function requireActiveSupportedEditor(): Promise<vscode.TextEditor | undefined> {
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "python") {
-      vscode.window.showWarningMessage("CodeMap: open a Python file first.");
+    const language = editor ? languageForDocument(editor.document) : undefined;
+    if (!editor || !language) {
+      vscode.window.showWarningMessage("CodeMap: open a Python, JavaScript/TypeScript, or IDL file first.");
       return undefined;
     }
     return editor;
   }
 
   async function runShowFlowchart(): Promise<void> {
-    const editor = await requireActivePython();
+    const editor = await requireActiveSupportedEditor();
     if (!editor) return;
     const file = editor.document.uri.fsPath;
     const line = editor.selection.active.line + 1;
+    const language = languageForDocument(editor.document);
+    if (!language) {
+      vscode.window.showWarningMessage("CodeMap: selected file is not supported.");
+      return;
+    }
+
     try {
+      if (language === "javascript") {
+        const analysis = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
+          () => javascriptIndexer.getAnalysis(),
+        );
+        logAnalysis(analysis, "flowchart-js");
+        const graph = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Window, title: "CodeMap: building JavaScript flowchart..." },
+          () => Promise.resolve(buildJavaScriptFlowchartFor(file, line)),
+        );
+        logGraph(graph);
+        provider.show(graph);
+        return;
+      }
+
+      if (language === "idl") {
+        const analysis = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing IDL workspace..." },
+          () => idlIndexer.getAnalysis(),
+        );
+        logAnalysis(analysis, "flowchart-idl");
+        const graph = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Window, title: "CodeMap: building IDL flowchart..." },
+          () => buildIdlFlowchartFor(context.extensionPath, file, line),
+        );
+        logGraph(graph);
+        provider.show(graph);
+        return;
+      }
+
       const analysis = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
-        () => indexer.getAnalysis(),
+        () => pythonIndexer.getAnalysis(),
       );
       logAnalysis(analysis, "flowchart");
       const graph = await vscode.window.withProgress(
@@ -260,15 +336,61 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  async function resolveTargetPythonFile(resource?: vscode.Uri): Promise<string | undefined> {
+  async function runShowWorkspaceGraph(forceRefresh = false): Promise<void> {
+    const preferred = preferredWorkspaceLanguage(
+      fileTreeProvider.getCheckedFiles(),
+      vscode.window.activeTextEditor?.document.uri.fsPath,
+    );
+    if (preferred === "javascript") {
+      const analysis = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing JavaScript workspace..." },
+        () => javascriptIndexer.getAnalysis(forceRefresh),
+      );
+      logAnalysis(analysis, "workspace-js");
+      if (!jsWorkspaceGraphCache || forceRefresh) {
+        const colors = computeModuleColorMap(analysis);
+        jsWorkspaceGraphCache = buildWorkspaceGraph(analysis, colors);
+        jsWorkspaceGraphCache = {
+          ...jsWorkspaceGraphCache,
+          title: "JavaScript workspace",
+          subtitle: `${jsWorkspaceGraphCache.nodes.length} symbols · ${jsWorkspaceGraphCache.edges.length} call edges`,
+        };
+      }
+      logGraph(jsWorkspaceGraphCache);
+      provider.show(jsWorkspaceGraphCache);
+      return;
+    }
+    if (preferred === "idl") {
+      const analysis = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing IDL workspace..." },
+        () => idlIndexer.getAnalysis(forceRefresh),
+      );
+      logAnalysis(analysis, "workspace-idl");
+      if (!idlWorkspaceGraphCache || forceRefresh) {
+        const colors = computeModuleColorMap(analysis);
+        idlWorkspaceGraphCache = buildWorkspaceGraph(analysis, colors);
+        idlWorkspaceGraphCache = {
+          ...idlWorkspaceGraphCache,
+          title: "IDL workspace",
+          subtitle: `${idlWorkspaceGraphCache.nodes.length} symbols · ${idlWorkspaceGraphCache.edges.length} call edges`,
+        };
+      }
+      logGraph(idlWorkspaceGraphCache);
+      provider.show(idlWorkspaceGraphCache);
+      return;
+    }
+    await navController.showWorkspaceCallGraph(forceRefresh);
+  }
+
+  async function resolveTargetSourceFile(resource?: vscode.Uri): Promise<string | undefined> {
     const candidate = resource?.scheme === "file" ? resource : vscode.window.activeTextEditor?.document.uri;
     if (!candidate || candidate.scheme !== "file") {
-      vscode.window.showWarningMessage("CodeMap: open a Python file first.");
+      vscode.window.showWarningMessage("CodeMap: open a Python, JavaScript/TypeScript, or IDL file first.");
       return undefined;
     }
     const doc = await vscode.workspace.openTextDocument(candidate);
-    if (doc.languageId !== "python") {
-      vscode.window.showWarningMessage("CodeMap: selected file is not a Python file.");
+    if (!languageForDocument(doc)) {
+      vscode.window.showWarningMessage("CodeMap: selected file type is not supported.");
       return undefined;
     }
     return candidate.fsPath;
@@ -276,13 +398,21 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function runShowFileGraph(file: string): Promise<void> {
     try {
+      const language = languageForPath(file);
       const analysis = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
-        () => indexer.getAnalysis(),
+        () => language === "javascript"
+          ? javascriptIndexer.getAnalysis()
+          : language === "idl"
+            ? idlIndexer.getAnalysis()
+            : pythonIndexer.getAnalysis(),
       );
-      logAnalysis(analysis, "file-graph");
+      logAnalysis(
+        analysis,
+        language === "javascript" ? "file-graph-js" : language === "idl" ? "file-graph-idl" : "file-graph",
+      );
 
-      const workspaceGraph = buildWorkspaceGraph(analysis);
+      const workspaceGraph = buildWorkspaceGraph(analysis, computeModuleColorMap(analysis));
       const target = normalizePath(file);
       const fileNodeSet = new Set<string>();
       workspaceGraph.nodes.forEach((node) => {
@@ -342,6 +472,50 @@ export function activate(context: vscode.ExtensionContext): void {
       showError(e);
     }
   }
+}
+
+function languageForDocument(doc: vscode.TextDocument): "python" | "javascript" | "idl" | undefined {
+  if (doc.languageId === "python") return "python";
+  if (isJavaScriptLikeLanguageId(doc.languageId)) return "javascript";
+  if (doc.languageId === "idl" || path.extname(doc.uri.fsPath).toLowerCase() === ".pro") return "idl";
+  return undefined;
+}
+
+function languageForPath(filePath: string): "python" | "javascript" | "idl" | undefined {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".py") return "python";
+  if ([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"].includes(ext)) return "javascript";
+  if (ext === ".pro") return "idl";
+  return undefined;
+}
+
+function isJavaScriptLikeLanguageId(languageId: string): boolean {
+  return languageId === "javascript"
+    || languageId === "javascriptreact"
+    || languageId === "typescript"
+    || languageId === "typescriptreact";
+}
+
+function preferredWorkspaceLanguage(checkedFiles: string[], activeFilePath: string | undefined): "python" | "javascript" | "idl" {
+  const activeLanguage = activeFilePath ? languageForPath(activeFilePath) : undefined;
+  if (activeLanguage === "javascript") return "javascript";
+  if (activeLanguage === "python") return "python";
+  if (activeLanguage === "idl") return "idl";
+
+  let hasPython = false;
+  let hasJavaScript = false;
+  let hasIdl = false;
+  for (const filePath of checkedFiles) {
+    const lang = languageForPath(filePath);
+    if (lang === "python") hasPython = true;
+    if (lang === "javascript") hasJavaScript = true;
+    if (lang === "idl") hasIdl = true;
+    if (hasPython && hasJavaScript && hasIdl) break;
+  }
+
+  if (hasIdl && !hasPython && !hasJavaScript) return "idl";
+  if (hasJavaScript && !hasPython) return "javascript";
+  return "python";
 }
 
 function normalizePath(filePath: string): string {

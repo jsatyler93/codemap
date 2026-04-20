@@ -1,7 +1,7 @@
 {
   "name": "codemap",
   "displayName": "CodeMap",
-  "description": "Python-first interactive flowcharts, call graphs, and workspace visualization for VS Code.",
+  "description": "Interactive flowcharts, call graphs, and workspace visualization for Python, JavaScript/TypeScript, and IDL in VS Code.",
   "version": "0.1.0",
   "publisher": "local",
   "engines": {
@@ -14,6 +14,12 @@
   ],
   "activationEvents": [
     "onLanguage:python",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:idl",
+    "workspaceContains:**/*.pro",
     "onDebug"
   ],
   "main": "./out/extension.js",
@@ -45,7 +51,7 @@
     "commands": [
       {
         "command": "codemap.showFlowchart",
-        "title": "CodeMap: Show Python Flowchart for Current Function",
+        "title": "CodeMap: Show Flowchart for Current Function",
         "category": "CodeMap"
       },
       {
@@ -67,26 +73,26 @@
     "menus": {
       "editor/context": [
         {
-          "when": "resourceLangId == python",
+          "when": "resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFlowchart",
           "group": "codemap@1"
         },
         {
-          "when": "resourceLangId == python",
+          "when": "resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFileGraph",
           "group": "codemap@2"
         }
       ],
       "editor/title/context": [
         {
-          "when": "resourceLangId == python",
+          "when": "resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFileGraph",
           "group": "navigation@2"
         }
       ],
       "explorer/context": [
         {
-          "when": "resourceLangId == python",
+          "when": "resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFileGraph",
           "group": "navigation@2"
         }
@@ -104,7 +110,7 @@
         "codemap.workspace.maxFiles": {
           "type": "number",
           "default": 400,
-          "description": "Cap on number of Python files to index in workspace graph."
+          "description": "Cap on number of source files to index in workspace graph."
         },
         "codemap.useJedi": {
           "type": "boolean",

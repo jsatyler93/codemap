@@ -25,7 +25,6 @@ const searchBox  = document.getElementById("search-box");
 const canvasControls = document.getElementById("canvas-controls");
 const collapseGroupsBtn = document.getElementById("btn-collapse-groups");
 const expandGroupsBtn = document.getElementById("btn-expand-groups");
-const overlayBadge = document.getElementById("overlay-badge");
 const overlayLegacyLabel = overlayLegacyToggle ? overlayLegacyToggle.closest("label") : null;
 const overlayModernLabel = overlayModernToggle ? overlayModernToggle.closest("label") : null;
 
@@ -208,7 +207,6 @@ function renderGraph(graph, options = {}) {
     if (graph.graphType === "dataflow") {
       result = renderDataflowView(graph);
       current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
-      updateOverlayBadge(graph, current);
       updateStats(graph);
       updateLegend(graph);
       updateCanvasControls(graph);
@@ -220,7 +218,6 @@ function renderGraph(graph, options = {}) {
       safeRenderSuperimposed(graph, result, ctx);
     } else {
       result = renderCallGraph(graph, ctx);
-      updateOverlayBadge(graph, result);
     }
     current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
 
@@ -253,33 +250,13 @@ function renderGraph(graph, options = {}) {
 }
 
 function safeRenderSuperimposed(graph, result, ctx) {
-  if (graph.graphType !== "flowchart") {
-    updateOverlayBadge(graph, result);
-    return;
-  }
+  if (graph.graphType !== "flowchart") return;
   try {
     renderSuperimposedDataflow(graph, ctx.root, result || {}, overlayPrefs);
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
     vscode.postMessage({ type: "debug", message: "[overlay-error] " + msg });
   }
-  updateOverlayBadge(graph, result);
-}
-
-function updateOverlayBadge(graph, result) {
-  if (!overlayBadge) return;
-  if (!graph || graph.graphType !== "flowchart") {
-    overlayBadge.classList.remove("visible");
-    overlayBadge.textContent = "";
-    return;
-  }
-  const modeParts = [];
-  if (overlayPrefs.showLegacyOverlay) modeParts.push("Last-Writer Heuristic");
-  if (overlayPrefs.showModernOverlay) modeParts.push("Reaching-Defs + Interprocedural");
-  const modeLabel = modeParts.length ? modeParts.join(" + ") : "off";
-  const nodeCount = result?.nodeRect ? result.nodeRect.size : (Array.isArray(graph.nodes) ? graph.nodes.length : 0);
-  overlayBadge.textContent = `Flowchart Overlay: ${modeLabel} (${nodeCount} nodes)`;
-  overlayBadge.classList.add("visible");
 }
 
 function updateOverlayControls(graph) {

@@ -1,6 +1,6 @@
 # CodeMap Technical Implementation
 
-This document explains how the extension currently works at runtime, from file scope selection to graph rendering and debug synchronization.
+This document explains how the extension currently works at runtime, from file scope selection to graph rendering and debug synchronization for Python and JavaScript/TypeScript.
 
 ## 0) Concrete IR and adapter internals (actual implementation)
 
@@ -465,3 +465,126 @@ Runtime loads the bundled webview script from dist/webview/main.js.
 4. Provider posts graph, main.js dispatches to flowchartView
 
 This is the current technical implementation as represented by the codebase.
+
+## 13) Current-state extension notes (Python + JavaScript/TypeScript)
+
+This section captures the latest implementation state added after the initial Python-first architecture.
+
+### 13.1 Multi-language scope model
+
+Scope selection in `src/providers/fileTreeProvider.ts` is now language-inclusive:
+
+- Included source extensions:
+  - `.py`
+  - `.js`, `.jsx`, `.mjs`, `.cjs`
+  - `.ts`, `.tsx`
+- Tree watcher pattern uses source globs, not only Python globs.
+- Badge and selection summary now refer to `source files` (not Python-only).
+- `manageCheckboxStateManually: true` is enabled in `src/extension.ts` when creating `codemap.files` TreeView, so partial file/folder selection works correctly and does not collapse to all-or-none.
+
+### 13.2 JavaScript/TypeScript workspace analysis pipeline
+
+New runtime components:
+
+- `src/javascript/analysis/javascriptWorkspaceIndexer.ts`
+  - Cache + debounce invalidation model parallel to Python indexer.
+  - Watches `**/*.{js,jsx,mjs,cjs,ts,tsx}`.
+  - Honors scope-selected files and `codemap.workspace.maxFiles`.
+- `src/javascript/analysis/javascriptAnalyzer.ts`
+  - Uses TypeScript compiler AST (`typescript` package) to parse JS/TS files.
+  - Emits a `PyAnalysisResult`-compatible shape for reuse of existing graph builder code.
+  - Collects symbols:
+    - modules
+    - classes
+    - functions
+    - methods
+  - Collects callsites with best-effort static resolution:
+    - same-class (`this.method`)
+    - same-module function/class lookup
+    - unique global name fallback
+    - unresolved external target fallback
+  - Emits summary counts and call-resolution buckets.
+
+### 13.3 JavaScript/TypeScript flowchart pipeline
+
+New runtime component:
+
+- `src/javascript/analysis/javascriptFlowchartBuilder.ts`
+  - Parses current file and finds innermost function/method containing cursor line.
+  - Emits `GraphDocument` with `graphType: flowchart`.
+  - Handles core control flow statements:
+    - `if/else`
+    - `for/while/do/for...of/for...in`
+    - `return`
+    - `throw`
+    - `break`
+    - `continue`
+  - Produces node kinds compatible with existing flowchart renderer:
+    - `entry`, `process`, `compute`, `decision`, `loop`, `return`, `error`, `break`, `continue`.
+
+### 13.4 Command routing behavior (language-aware)
+
+`src/extension.ts` now dispatches by language:
+
+- `codemap.showFlowchart`
+  - Python file -> Python analyzer + `python/flowchart.py`
+  - JS/TS file -> `javascriptFlowchartBuilder`
+- `codemap.showFileGraph`
+  - Builds workspace analysis from matching language indexer.
+  - Reuses existing file-scoped subgraph extraction.
+- `codemap.showWorkspaceGraph`
+  - Chooses preferred language based on active file first, then selected scope files.
+  - Python path uses existing `NavigationController`.
+  - JavaScript path builds a workspace graph from JavaScript analysis.
+- `codemap.refresh`
+  - Refreshes the preferred language analysis and invalidates per-language graph caches.
+
+### 13.5 package.json command/menu/activation updates
+
+`package.json` now includes:
+
+- Activation events for:
+  - `javascript`
+  - `javascriptreact`
+  - `typescript`
+  - `typescriptreact`
+- Context menu availability for `showFlowchart` and `showFileGraph` on both Python and JS/TS language ids.
+- `showFlowchart` command title generalized from Python-only wording.
+
+### 13.6 Webview behavior updates reflected in current implementation
+
+Current webview behavior (latest):
+
+- Flowchart overlay rendering is flowchart-only (not callgraph/workspace).
+- Overlay toggles remain in toolbar for flowchart mode.
+- Overlay badge was intentionally removed from the UI.
+- Superimposed dashed dataflow-style edges are derived with fallback inference when explicit reads/writes metadata is absent.
+- Legend supports scroll mode when item count exceeds threshold (>6 items), to keep very large module legends usable.
+
+### 13.7 Sample JavaScript workload for visualization testing
+
+Added sample folder:
+
+- `samples/javascript_demo/`
+  - `app.js`
+  - `pipeline.js`
+  - `cache.js`
+  - `scheduler.js`
+  - `metrics.js`
+  - `transforms.js`
+
+This sample includes:
+
+- async orchestration and retries
+- loops and branching
+- class methods and cross-module calls
+- moderate call depth and fan-out for workspace/file graph testing
+- enough control-flow shape for flowchart testing
+
+### 13.8 Practical JS testing sequence
+
+1. Open `samples/javascript_demo/app.js` and run `CodeMap: Show Flowchart for Current Function` with cursor inside `main`.
+2. Run `CodeMap: Call Graph for File` from `pipeline.js`.
+3. Run `CodeMap: Workspace Call Graph` with active editor in JavaScript sample to force JS workspace routing.
+4. In Scope tree, check/uncheck subsets of JS files and verify graph rerenders with partial selection.
+

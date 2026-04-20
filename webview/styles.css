@@ -320,29 +320,6 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   100% { filter: drop-shadow(0 0 0 rgba(247, 231, 109, 0)); }
 }
 
-#overlay-badge {
-  position: fixed;
-  top: 52px;
-  right: 14px;
-  z-index: 140;
-  padding: 4px 10px;
-  border: 1px solid #2a3042;
-  border-radius: 999px;
-  background: rgba(10, 12, 18, 0.92);
-  color: #8ea3d4;
-  font-family: Consolas, monospace;
-  font-size: 10px;
-  letter-spacing: 0.2px;
-  opacity: 0;
-  transform: translateY(-2px);
-  transition: opacity 140ms ease, transform 140ms ease;
-  pointer-events: none;
-}
-#overlay-badge.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 .df-overlay {
   position: absolute;
   inset: 0;

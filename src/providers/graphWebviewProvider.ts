@@ -159,7 +159,6 @@ export class GraphWebviewProvider {
     <button class="canvas-btn" id="btn-collapse-groups">collapse all</button>
     <button class="canvas-btn" id="btn-expand-groups">expand all</button>
   </div>
-  <div id="overlay-badge" aria-live="polite"></div>
   <div id="tooltip"></div>
   <div id="legend">
     <div class="lg-title" id="lg-title">Modules</div>
