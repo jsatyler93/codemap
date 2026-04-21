@@ -374,80 +374,148 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
   const { oldAnchor, newAnchor, semanticZoom, focalKey } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
   const sceneDx = oldAnchor.x - newAnchor.x;
   const sceneDy = oldAnchor.y - newAnchor.y;
-  const easeInOut = "cubic-bezier(0.25, 1, 0.5, 1)";
-  const dur = FLOWCHART_LAYER_TRANSITION_MS;
+  
+  // Slower, extremely smooth timing for visible continuous morphing
+  const dur = 750; 
+  const phase1Dur = 250;
+  const phase2Dur = 500;
+  const easeInOut = "cubic-bezier(0.35, 0, 0.25, 1)"; 
+
+  function elementBoundingBox(element) {
+    try { return element.getBBox(); } catch { return { width: 100, height: 60 }; }
+  }
 
   if (semanticZoom === "in") {
-    // DRILLDOWN / ZOOM IN: We are expanding the focal node to become the new scene.
-    // Old scene grows and fades out. New scene grows from a tiny point inside the focal node.
+    // ----------------------------------------------------
+    //  ZOOM IN (Drilldown)
+    // ----------------------------------------------------
+    let scaleIn = 0.15;
+    let scaleOut = 6.6;
+    if (oldNodes.has(focalKey)) {
+        const fBox = elementBoundingBox(oldNodes.get(focalKey)[0]);
+        const sBox = elementBoundingBox(newScene);
+        if (sBox.width > 0 && fBox.width > 0) {
+            scaleIn = fBox.width / sBox.width;
+            scaleOut = 1 / scaleIn;
+            // constrain to reasonable visualization bounds
+            scaleIn = Math.max(0.04, Math.min(0.5, scaleIn));
+            scaleOut = Math.max(2, Math.min(25, scaleOut));
+        }
+    }
+
     oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
     newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
 
-    // 1. Fade away things "not needed" in the old scene quickly, leaving the focal node visible a bit longer.
+    // Phase 1: Clear the deck (fade non-focal items)
     oldNodes.forEach((elements, key) => {
-      if (key === focalKey) return; // Keep focal node a bit
-      elements.forEach(el => {
-        animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.45, easing: "linear" });
-      });
+      if (key === focalKey) return; 
+      elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: phase1Dur, easing: "ease-out" }));
     });
-    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4 })));
+    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: phase1Dur, easing: "ease-out" })));
 
-    // 2. Entire old scene scales up (user moves into it)
-    oldScene.style.opacity = "0";
-    oldScene.style.transform = `translate(0px, 0px) scale(2.5)`;
-    animateSceneElement(oldScene, [
-      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-      { opacity: 0, transform: "translate(0px, 0px) scale(2.5)" }
-    ], { duration: dur, easing: easeInOut });
-
-    // 3. New scene structure materializes and scales up from a tiny point (the node expanding).
-    newScene.style.opacity = "1";
-    newScene.style.transform = `translate(0px, 0px) scale(1)`;
-    animateSceneElement(newScene, [
-      { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px) scale(0.15)` },
-      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
-    ], { duration: dur, easing: easeInOut });
-
-  } else if (semanticZoom === "out") {
-    // COLLAPSE / ZOOM OUT: The current layer shrinks back into the focal node.
-    oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
-    newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
-
-    // New node fades in while scaling down from a huge size to its resting state.
-    // Old nodes shrink down entirely and fade out.
-    oldNodes.forEach((elements) => {
-        elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.5, delay: dur * 0.1 }));
-    });
-    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4 })));
-
-    // Old scene shrinks down into the node.
-    oldScene.style.opacity = "0";
-    oldScene.style.transform = `translate(${-sceneDx}px, ${-sceneDy}px) scale(0.15)`;
-    animateSceneElement(oldScene, [
-      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-      { opacity: 0, transform: `translate(${-sceneDx}px, ${-sceneDy}px) scale(0.15)` }
-    ], { duration: dur, easing: easeInOut });
-
-    // New scene shrinks down into place (the parent context returning)
-    newScene.style.opacity = "1";
-    newScene.style.transform = `translate(0px, 0px) scale(1)`;
-    animateSceneElement(newScene, [
-      { opacity: 0, transform: `translate(0px, 0px) scale(2.5)` },
-      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
-    ], { duration: dur, easing: easeInOut });
-
-    // Keep the focal node in the new scene hidden briefly to enhance the illusion it's forming from the shrink.
-    if (newNodes.has(focalKey)) {
-        newNodes.get(focalKey).forEach(el => {
+    // Phase 2: The actual camera zoom and crossfade
+    // Fade out the focal node itself while zooming past it
+    if (oldNodes.has(focalKey)) {
+        oldNodes.get(focalKey).forEach(el => {
             animateSceneElement(el, [
-                { opacity: 0 },
-                { opacity: 1 }
-            ], { duration: dur * 0.4, delay: dur * 0.6 });
+                { opacity: 1 },
+                { opacity: 0 }
+            ], { duration: phase2Dur * 0.8, delay: phase1Dur, easing: easeInOut });
         });
     }
 
+    // Zoom the old scene forward past the camera
+    oldScene.style.opacity = "0";
+    oldScene.style.transform = `translate(0px, 0px) scale(${scaleOut})`;
+    animateSceneElement(oldScene, [
+      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      { opacity: 0, transform: `translate(0px, 0px) scale(${scaleOut})` }
+    ], { duration: phase2Dur, delay: phase1Dur, easing: easeInOut });
+
+    // Materialize the new scene from exactly within the focal node bounds
+    newScene.style.opacity = "1";
+    newScene.style.transform = `translate(0px, 0px) scale(1)`;
+    animateSceneElement(newScene, [
+      { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px) scale(${scaleIn})` },
+      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
+    ], { duration: phase2Dur, delay: phase1Dur, easing: easeInOut });
+
+  } else if (semanticZoom === "out") {
+    // ----------------------------------------------------
+    //  ZOOM OUT (Collapse)
+    // ----------------------------------------------------
+    let scaleIn = 0.15;
+    let scaleOut = 6.6;
+    if (newNodes.has(focalKey)) {
+        const fBox = elementBoundingBox(newNodes.get(focalKey)[0]);
+        const sBox = elementBoundingBox(oldScene);
+        if (sBox.width > 0 && fBox.width > 0) {
+            scaleIn = fBox.width / sBox.width; // the old scene shrinks down to the focal node size
+            scaleOut = 1 / scaleIn; // the new scene shrinks down from a huge size
+            scaleIn = Math.max(0.04, Math.min(0.5, scaleIn));
+            scaleOut = Math.max(2, Math.min(25, scaleOut));
+        }
+    }
+
+    oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
+    newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
+
+    // Keep the focal node in the new scene perfectly hidden until Phase 2
+    if (newNodes.has(focalKey)) {
+        newNodes.get(focalKey).forEach(el => el.style.opacity = "0");
+    }
+    
+    // Hide new edges & nodes initially
+    newNodes.forEach((elements, key) => {
+        if (key === focalKey) return;
+        elements.forEach(el => el.style.opacity = "0");
+    });
+    newEdges.forEach(elements => elements.forEach(el => el.style.opacity = "0"));
+
+    // Zoom the old scene down into the focal dot
+    oldScene.style.opacity = "0";
+    oldScene.style.transform = `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})`;
+    animateSceneElement(oldScene, [
+      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      { opacity: 0, transform: `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})` }
+    ], { duration: dur, easing: easeInOut });
+
+    // The new parent scene collapses from around the camera into its normal framing
+    newScene.style.opacity = "1";
+    newScene.style.transform = `translate(0px, 0px) scale(1)`;
+    animateSceneElement(newScene, [
+      { opacity: 0, transform: `translate(0px, 0px) scale(${scaleOut})` },
+      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
+    ], { duration: dur, easing: easeInOut });
+
+    // Phase 2: Fade the focal node safely as the scene settles
+    if (newNodes.has(focalKey)) {
+        newNodes.get(focalKey).forEach(el => {
+            el.style.opacity = "1";
+            animateSceneElement(el, [
+                { opacity: 0 },
+                { opacity: 1 }
+            ], { duration: dur * 0.4, delay: dur * 0.5, easing: "ease-in" });
+        });
+    }
+
+    // Phase 2: Materialize the rest of the parent context
+    newNodes.forEach((elements, key) => {
+        if (key === focalKey) return;
+        elements.forEach(el => {
+            el.style.opacity = "1";
+            animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.6 });
+        });
+    });
+    newEdges.forEach(elements => elements.forEach(el => {
+        el.style.opacity = "1";
+        animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.6 });
+    }));
+
   } else {
-    // DEFAULT / PAN TRANSITION
+    // ----------------------------------------------------
+    //  DEFAULT CROSSFADE
+    // ----------------------------------------------------
     const enterDelay = FLOWCHART_LAYER_EXIT_MS;
     
     oldScene.style.opacity = "1";
@@ -493,7 +561,7 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
     newScene.style.opacity = "1";
     newScene.style.transform = "none";
     retainOnlySceneLayer(newScene);
-  }, FLOWCHART_LAYER_TRANSITION_MS + FLOWCHART_LAYER_EDGE_DELAY_MS + 140);
+  }, (semanticZoom !== "none" ? dur : FLOWCHART_LAYER_TRANSITION_MS + FLOWCHART_LAYER_EDGE_DELAY_MS) + 140);
 }
 
 function renderGraph(graph, options = {}) {
