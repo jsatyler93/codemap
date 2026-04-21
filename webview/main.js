@@ -371,172 +371,146 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
   const newNodes = collectSceneTransitionElements(newScene, "[data-transition-key]", "transitionKey");
   const oldEdges = collectSceneTransitionElements(oldScene, "[data-edge-key]", "edgeKey");
   const newEdges = collectSceneTransitionElements(newScene, "[data-edge-key]", "edgeKey");
-  const { oldAnchor, newAnchor, semanticZoom, focalKey } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
-  const sceneDx = oldAnchor.x - newAnchor.x;
-  const sceneDy = oldAnchor.y - newAnchor.y;
-  
-  const sharedKeys = new Set([...oldNodes.keys()].filter(k => newNodes.has(k)));
-  const sharedEdges = new Set([...oldEdges.keys()].filter(k => newEdges.has(k)));
+  const { focalKey, semanticZoom } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
 
-  const dur = 750; 
-  const easeInOut = "cubic-bezier(0.35, 0, 0.25, 1)"; 
+  // Slow, continuous morph
+  const dur = 850;
+  const easeMorph = "cubic-bezier(0.4, 0.0, 0.2, 1)";
 
-  function elementBoundingBox(element) {
-    try { return element.getBBox(); } catch { return { width: 100, height: 60 }; }
+  function bbox(element) {
+    try { return element.getBBox(); } catch { return null; }
   }
-  function getCenter(elements) {
-    if (!elements || !elements[0]) return { x: 0, y: 0 };
-    const b = elementBoundingBox(elements[0]);
+  function centerOf(elements) {
+    if (!elements || !elements[0]) return null;
+    const b = bbox(elements[0]);
+    if (!b) return null;
     return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
   }
 
-  if (semanticZoom === "none") {
-    // STRICT FLIP MORPH: No container fading/scaling to avoid 'dark middle'.
-    // Preserves shared elements identically and organically slides them into place.
-    oldScene.style.opacity = "1";
-    oldScene.style.transform = "none";
-    newScene.style.opacity = "1";
-    newScene.style.transform = "none";
-
-    // Unshared Old: Fade out quickly
-    oldNodes.forEach((elements, key) => {
-      if (sharedKeys.has(key)) {
-        // Hide instantly in old scene to avoid visually doubling the element during transit
-        elements.forEach(el => el.style.opacity = "0");
-      } else {
-        elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" }));
-      }
-    });
-    oldEdges.forEach((elements, key) => {
-      if (sharedEdges.has(key)) {
-        elements.forEach(el => el.style.opacity = "0");
-      } else {
-        elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" }));
-      }
-    });
-
-    // Shared & New
-    newNodes.forEach((elements, key) => {
-      if (sharedKeys.has(key)) {
-        const oldC = getCenter(oldNodes.get(key));
-        const newC = getCenter(elements);
-        const dx = oldC.x - newC.x;
-        const dy = oldC.y - newC.y;
-        elements.forEach(el => {
-          el.style.opacity = "1"; // Never goes dark!
-          animateSceneElement(el, [
-            { transform: `translate(${dx}px, ${dy}px)` },
-            { transform: `translate(0px, 0px)` }
-          ], { duration: dur, easing: easeInOut });
-        });
-      } else {
-        // Fade in newly appeared nodes smoothly
-        elements.forEach(el => animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.6, delay: dur * 0.4, easing: "ease-in" }));
-      }
-    });
-    newEdges.forEach((elements, key) => {
-      if (sharedEdges.has(key)) {
-        // Crossfade paths locally in place, keeping combined opacity continuous
-        elements.forEach(el => {
-          el.style.opacity = "1";
-          animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.5, easing: easeInOut });
-        });
-        oldEdges.get(key).forEach(el => {
-          el.style.opacity = "1";
-          animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.5, easing: easeInOut });
-        });
-      } else {
-        elements.forEach(el => animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.6, delay: dur * 0.4, easing: "ease-in" }));
-      }
-    });
-
-  } else if (semanticZoom === "in") {
-    // ZOOM IN (Drilldown)
-    let scaleIn = 0.15, scaleOut = 6.6;
-    if (oldNodes.has(focalKey)) {
-        const fBox = elementBoundingBox(oldNodes.get(focalKey)[0]);
-        const sBox = elementBoundingBox(newScene);
-        if (sBox.width > 0 && fBox.width > 0) {
-            scaleIn = fBox.width / sBox.width;
-            scaleOut = 1 / scaleIn;
-            scaleIn = Math.max(0.04, Math.min(0.5, scaleIn));
-            scaleOut = Math.max(2, Math.min(25, scaleOut));
-        }
-    }
-
-    oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
-    newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
-
-    // Only fade non-focal items. Keep container opacities high!
-    oldNodes.forEach((elements, key) => {
-      if (key !== focalKey) elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" }));
-    });
-    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" })));
-
-    // oldScene container zooms forward. Fade it out starting later to avoid dark middle.
-    oldScene.style.opacity = "0";
-    oldScene.style.transform = `translate(0px, 0px) scale(${scaleOut})`;
-    animateSceneElement(oldScene, [
-      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-      { opacity: 1, transform: `translate(0px, 0px) scale(${scaleOut * 0.5})`, offset: 0.5 },
-      { opacity: 0, transform: `translate(0px, 0px) scale(${scaleOut})` }
-    ], { duration: dur, easing: easeInOut });
-
-    // newScene starts at fully opaque but tiny, growing seamlessly.
-    newScene.style.opacity = "1";
-    newScene.style.transform = `translate(0px, 0px) scale(1)`;
-    animateSceneElement(newScene, [
-      { opacity: 0.5, transform: `translate(${sceneDx}px, ${sceneDy}px) scale(${scaleIn})` },
-      { opacity: 1, transform: `translate(${sceneDx * 0.5}px, ${sceneDy * 0.5}px) scale(${Math.max(scaleIn, 0.4)})`, offset: 0.2 },
-      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
-    ], { duration: dur, easing: easeInOut });
-
-  } else if (semanticZoom === "out") {
-    // ZOOM OUT (Collapse)
-    let scaleIn = 0.15, scaleOut = 6.6;
-    if (newNodes.has(focalKey)) {
-        const fBox = elementBoundingBox(newNodes.get(focalKey)[0]);
-        const sBox = elementBoundingBox(oldScene);
-        if (sBox.width > 0 && fBox.width > 0) {
-            scaleIn = fBox.width / sBox.width; 
-            scaleOut = 1 / scaleIn; 
-            scaleIn = Math.max(0.04, Math.min(0.5, scaleIn));
-            scaleOut = Math.max(2, Math.min(25, scaleOut));
-        }
-    }
-
-    oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
-    newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
-
-    // new parent scene collapses into place. Quick fade-in prevents popping.
-    newScene.style.opacity = "1";
-    newScene.style.transform = `translate(0px, 0px) scale(1)`;
-    animateSceneElement(newScene, [
-      { opacity: 0, transform: `translate(0px, 0px) scale(${scaleOut})` },
-      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
-    ], { duration: dur, easing: easeInOut });
-
-    // old child scene shrinks down and fades late
-    oldScene.style.opacity = "0";
-    oldScene.style.transform = `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})`;
-    animateSceneElement(oldScene, [
-      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-      { opacity: 1, transform: `translate(${-sceneDx * 0.5}px, ${-sceneDy * 0.5}px) scale(${scaleIn * 2})`, offset: 0.5 },
-      { opacity: 0, transform: `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})` }
-    ], { duration: dur, easing: easeInOut });
-
-    // Make new elements (except the focal node area which is covered by oldScene shrinking) appear smoothly
-    newNodes.forEach((elements, key) => {
-        elements.forEach(el => {
-            el.style.opacity = "1";
-            animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.4 });
-        });
-    });
-    newEdges.forEach(elements => elements.forEach(el => {
-        el.style.opacity = "1";
-        animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.4 });
-    }));
+  // Determine focal anchors for entering / exiting elements.
+  // Drilldown: new contents bloom OUT from where the old focal group sat.
+  // Collapse: old contents converge INTO where the new focal group will sit.
+  let bloomFrom = null;   // entering elements appear from here
+  let convergeTo = null;  // exiting elements collapse toward here
+  if (semanticZoom === "in" && focalKey && oldNodes.has(focalKey)) {
+    bloomFrom = centerOf(oldNodes.get(focalKey));
   }
+  if (semanticZoom === "out" && focalKey && newNodes.has(focalKey)) {
+    convergeTo = centerOf(newNodes.get(focalKey));
+  }
+
+  // Make sure scene containers have NO transforms — every motion is per-element.
+  oldScene.style.transform = "none";
+  oldScene.style.opacity = "1";
+  newScene.style.transform = "none";
+  newScene.style.opacity = "1";
+
+  const sharedNodeKeys = new Set([...newNodes.keys()].filter((k) => oldNodes.has(k)));
+  const sharedEdgeKeys = new Set([...newEdges.keys()].filter((k) => oldEdges.has(k)));
+
+  // ── SHARED NODES: hide the old copy, animate the new copy from old → new pos ──
+  sharedNodeKeys.forEach((key) => {
+    oldNodes.get(key).forEach((el) => { el.style.opacity = "0"; });
+    const oldC = centerOf(oldNodes.get(key));
+    const newC = centerOf(newNodes.get(key));
+    if (!oldC || !newC) return;
+    const dx = oldC.x - newC.x;
+    const dy = oldC.y - newC.y;
+    newNodes.get(key).forEach((el) => {
+      el.style.opacity = "1";
+      animateSceneElement(el, [
+        { opacity: 1, transform: `translate(${dx}px, ${dy}px)` },
+        { opacity: 1, transform: "translate(0px, 0px)" },
+      ], { duration: dur, easing: easeMorph });
+    });
+  });
+
+  // ── SHARED EDGES: same idea — keep visible at all times, just move ──
+  sharedEdgeKeys.forEach((key) => {
+    oldEdges.get(key).forEach((el) => { el.style.opacity = "0"; });
+    const oldC = centerOf(oldEdges.get(key));
+    const newC = centerOf(newEdges.get(key));
+    if (!oldC || !newC) {
+      newEdges.get(key).forEach((el) => { el.style.opacity = "1"; });
+      return;
+    }
+    const dx = oldC.x - newC.x;
+    const dy = oldC.y - newC.y;
+    newEdges.get(key).forEach((el) => {
+      el.style.opacity = "1";
+      animateSceneElement(el, [
+        { opacity: 1, transform: `translate(${dx}px, ${dy}px)` },
+        { opacity: 1, transform: "translate(0px, 0px)" },
+      ], { duration: dur, easing: easeMorph });
+    });
+  });
+
+  // ── EXITING NODES (in old but not new): fade out, optionally converge toward the focal collapse target ──
+  oldNodes.forEach((elements, key) => {
+    if (sharedNodeKeys.has(key)) return;
+    elements.forEach((el) => {
+      const c = centerOf([el]);
+      if (convergeTo && c) {
+        const dx = convergeTo.x - c.x;
+        const dy = convergeTo.y - c.y;
+        animateSceneElement(el, [
+          { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+          { opacity: 0, transform: `translate(${dx}px, ${dy}px) scale(0.12)` },
+        ], { duration: dur, easing: easeMorph });
+      } else {
+        animateSceneElement(el, [
+          { opacity: 1 },
+          { opacity: 0 },
+        ], { duration: Math.round(dur * 0.45), easing: "ease-out" });
+      }
+    });
+  });
+
+  // ── EXITING EDGES: fade out (faster) ──
+  oldEdges.forEach((elements, key) => {
+    if (sharedEdgeKeys.has(key)) return;
+    elements.forEach((el) => {
+      animateSceneElement(el, [
+        { opacity: 1 },
+        { opacity: 0 },
+      ], { duration: Math.round(dur * 0.4), easing: "ease-out" });
+    });
+  });
+
+  // ── ENTERING NODES (in new but not old): fade in, optionally bloom from the focal drilldown source ──
+  newNodes.forEach((elements, key) => {
+    if (sharedNodeKeys.has(key)) return;
+    elements.forEach((el) => {
+      const c = centerOf([el]);
+      if (bloomFrom && c) {
+        const dx = bloomFrom.x - c.x;
+        const dy = bloomFrom.y - c.y;
+        el.style.opacity = "1";
+        animateSceneElement(el, [
+          { opacity: 0, transform: `translate(${dx}px, ${dy}px) scale(0.12)` },
+          { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+        ], { duration: dur, easing: easeMorph });
+      } else {
+        el.style.opacity = "1";
+        animateSceneElement(el, [
+          { opacity: 0 },
+          { opacity: 1 },
+        ], { duration: Math.round(dur * 0.5), delay: Math.round(dur * 0.4), easing: "ease-in" });
+      }
+    });
+  });
+
+  // ── ENTERING EDGES: fade in late so they trail the node arrival ──
+  newEdges.forEach((elements, key) => {
+    if (sharedEdgeKeys.has(key)) return;
+    elements.forEach((el) => {
+      el.style.opacity = "1";
+      animateSceneElement(el, [
+        { opacity: 0 },
+        { opacity: 1 },
+      ], { duration: Math.round(dur * 0.4), delay: Math.round(dur * 0.55), easing: "ease-in" });
+    });
+  });
 
   window.setTimeout(() => {
     if (token !== flowchartTransitionToken) return;
@@ -545,7 +519,7 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
     newScene.style.opacity = "1";
     newScene.style.transform = "none";
     retainOnlySceneLayer(newScene);
-  }, dur + 100);
+  }, dur + 120);
 }
 
 function renderGraph(graph, options = {}) {
