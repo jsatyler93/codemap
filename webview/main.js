@@ -45,6 +45,7 @@ const FLOWCHART_LAYER_TRANSITION_MS = FLOWCHART_LAYER_EXIT_MS + FLOWCHART_LAYER_
 const FLOWCHART_LAYER_EDGE_DELAY_MS = 90;
 
 /** Current breadcrumb trail for progressive flowchart reading. */
+let previousFlowchartBreadcrumb = [];
 let flowchartBreadcrumb = []; // [{groupId, label}, ...]
 let flowchartTransitionToken = 0;
 
@@ -253,6 +254,44 @@ function elementVisualCenter(element) {
 }
 
 function computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene) {
+  // Semantic semantic zooming: if breadcrumb changed, we know where we came from
+  // Drilldown (Zoom IN)
+  if (flowchartBreadcrumb.length > previousFlowchartBreadcrumb.length) {
+    const targetGroup = flowchartBreadcrumb[flowchartBreadcrumb.length - 1];
+    if (targetGroup && targetGroup.groupId) {
+      const groupKey = `group:${targetGroup.groupId}`;
+      if (oldNodes.has(groupKey)) {
+        const center = elementVisualCenter(oldNodes.get(groupKey)[0]);
+        let newCenter = center;
+        try {
+          const newBox = newScene?.getBBox();
+          if (newBox && Number.isFinite(newBox.width)) {
+            newCenter = { x: newBox.x + newBox.width / 2, y: newBox.y + newBox.height / 2 };
+          }
+        } catch {}
+        return { oldAnchor: center, newAnchor: newCenter, hasCommon: false, semanticZoom: "in", focalKey: groupKey };
+      }
+    }
+  }
+  // Collapse (Zoom OUT)
+  if (flowchartBreadcrumb.length < previousFlowchartBreadcrumb.length) {
+    const targetGroup = previousFlowchartBreadcrumb[previousFlowchartBreadcrumb.length - 1];
+    if (targetGroup && targetGroup.groupId) {
+      const groupKey = `group:${targetGroup.groupId}`;
+      if (newNodes.has(groupKey)) {
+        const center = elementVisualCenter(newNodes.get(groupKey)[0]);
+        let oldCenter = center;
+        try {
+          const oldBox = oldScene?.getBBox();
+          if (oldBox && Number.isFinite(oldBox.width)) {
+            oldCenter = { x: oldBox.x + oldBox.width / 2, y: oldBox.y + oldBox.height / 2 };
+          }
+        } catch {}
+        return { oldAnchor: oldCenter, newAnchor: center, hasCommon: false, semanticZoom: "out", focalKey: groupKey };
+      }
+    }
+  }
+
   const oldCommon = [];
   const newCommon = [];
   newNodes.forEach((elements, key) => {
@@ -271,23 +310,24 @@ function computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene) {
         y: newCommon.reduce((sum, point) => sum + point.y, 0) / newCommon.length,
       },
       hasCommon: true,
+      semanticZoom: "none"
     };
   }
   try {
     const newBox = newScene?.getBBox();
     if (newBox && Number.isFinite(newBox.width)) {
       const center = { x: newBox.x + newBox.width / 2, y: newBox.y + newBox.height / 2 };
-      return { oldAnchor: center, newAnchor: center, hasCommon: false };
+      return { oldAnchor: center, newAnchor: center, hasCommon: false, semanticZoom: "none" };
     }
   } catch {}
   try {
     const oldBox = oldScene?.getBBox();
     if (oldBox && Number.isFinite(oldBox.width)) {
       const center = { x: oldBox.x + oldBox.width / 2, y: oldBox.y + oldBox.height / 2 };
-      return { oldAnchor: center, newAnchor: center, hasCommon: false };
+      return { oldAnchor: center, newAnchor: center, hasCommon: false, semanticZoom: "none" };
     }
   } catch {}
-  return { oldAnchor: { x: 0, y: 0 }, newAnchor: { x: 0, y: 0 }, hasCommon: false };
+  return { oldAnchor: { x: 0, y: 0 }, newAnchor: { x: 0, y: 0 }, hasCommon: false, semanticZoom: "none" };
 }
 
 function offsetTowardAnchor(center, anchor, distance) {
@@ -331,50 +371,127 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
   const newNodes = collectSceneTransitionElements(newScene, "[data-transition-key]", "transitionKey");
   const oldEdges = collectSceneTransitionElements(oldScene, "[data-edge-key]", "edgeKey");
   const newEdges = collectSceneTransitionElements(newScene, "[data-edge-key]", "edgeKey");
-  const { oldAnchor, newAnchor } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
+  const { oldAnchor, newAnchor, semanticZoom, focalKey } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
   const sceneDx = oldAnchor.x - newAnchor.x;
   const sceneDy = oldAnchor.y - newAnchor.y;
-  const enterDelay = FLOWCHART_LAYER_EXIT_MS;
+  const easeInOut = "cubic-bezier(0.25, 1, 0.5, 1)";
+  const dur = FLOWCHART_LAYER_TRANSITION_MS;
 
-  oldScene.style.opacity = "1";
-  oldScene.style.transform = "translate(0px, 0px) scale(1)";
-  newScene.style.opacity = "0";
-  newScene.style.transform = `translate(${sceneDx}px, ${sceneDy}px)`;
+  if (semanticZoom === "in") {
+    // DRILLDOWN / ZOOM IN: We are expanding the focal node to become the new scene.
+    // Old scene grows and fades out. New scene grows from a tiny point inside the focal node.
+    oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
+    newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
 
-  oldNodes.forEach((elements, key) => {
-    if (newNodes.has(key)) return;
-    elements.forEach((element) => {
-      animateSceneElement(element, [
-        { opacity: 1, transform: "translate(0px, 0px)" },
-        { opacity: 0, transform: "translate(0px, 0px)" },
-      ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.95) });
+    // 1. Fade away things "not needed" in the old scene quickly, leaving the focal node visible a bit longer.
+    oldNodes.forEach((elements, key) => {
+      if (key === focalKey) return; // Keep focal node a bit
+      elements.forEach(el => {
+        animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.45, easing: "linear" });
+      });
     });
-  });
+    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4 })));
 
-  oldEdges.forEach((elements, key) => {
-    if (newEdges.has(key)) return;
-    elements.forEach((element) => {
-      animateSceneElement(element, [
-        { opacity: 1 },
-        { opacity: 0 },
-      ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.9) });
+    // 2. Entire old scene scales up (user moves into it)
+    oldScene.style.opacity = "0";
+    oldScene.style.transform = `translate(0px, 0px) scale(2.5)`;
+    animateSceneElement(oldScene, [
+      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      { opacity: 0, transform: "translate(0px, 0px) scale(2.5)" }
+    ], { duration: dur, easing: easeInOut });
+
+    // 3. New scene structure materializes and scales up from a tiny point (the node expanding).
+    newScene.style.opacity = "1";
+    newScene.style.transform = `translate(0px, 0px) scale(1)`;
+    animateSceneElement(newScene, [
+      { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px) scale(0.15)` },
+      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
+    ], { duration: dur, easing: easeInOut });
+
+  } else if (semanticZoom === "out") {
+    // COLLAPSE / ZOOM OUT: The current layer shrinks back into the focal node.
+    oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
+    newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
+
+    // New node fades in while scaling down from a huge size to its resting state.
+    // Old nodes shrink down entirely and fade out.
+    oldNodes.forEach((elements) => {
+        elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.5, delay: dur * 0.1 }));
     });
-  });
+    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4 })));
 
-  animateSceneElement(newScene, [
-    { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px)` },
-    { opacity: 1, transform: "translate(0px, 0px)" },
-  ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
-  animateSceneElement(oldScene, [
-    { opacity: 1, transform: "translate(0px, 0px)" },
-    { opacity: 0, transform: "translate(0px, 0px)" },
-  ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
+    // Old scene shrinks down into the node.
+    oldScene.style.opacity = "0";
+    oldScene.style.transform = `translate(${-sceneDx}px, ${-sceneDy}px) scale(0.15)`;
+    animateSceneElement(oldScene, [
+      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      { opacity: 0, transform: `translate(${-sceneDx}px, ${-sceneDy}px) scale(0.15)` }
+    ], { duration: dur, easing: easeInOut });
+
+    // New scene shrinks down into place (the parent context returning)
+    newScene.style.opacity = "1";
+    newScene.style.transform = `translate(0px, 0px) scale(1)`;
+    animateSceneElement(newScene, [
+      { opacity: 0, transform: `translate(0px, 0px) scale(2.5)` },
+      { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
+    ], { duration: dur, easing: easeInOut });
+
+    // Keep the focal node in the new scene hidden briefly to enhance the illusion it's forming from the shrink.
+    if (newNodes.has(focalKey)) {
+        newNodes.get(focalKey).forEach(el => {
+            animateSceneElement(el, [
+                { opacity: 0 },
+                { opacity: 1 }
+            ], { duration: dur * 0.4, delay: dur * 0.6 });
+        });
+    }
+
+  } else {
+    // DEFAULT / PAN TRANSITION
+    const enterDelay = FLOWCHART_LAYER_EXIT_MS;
+    
+    oldScene.style.opacity = "1";
+    oldScene.style.transform = "translate(0px, 0px) scale(1)";
+    newScene.style.opacity = "0";
+    newScene.style.transform = `translate(${sceneDx}px, ${sceneDy}px)`;
+
+    oldNodes.forEach((elements, key) => {
+      if (newNodes.has(key)) return;
+      elements.forEach((element) => {
+        animateSceneElement(element, [
+          { opacity: 1, transform: "translate(0px, 0px)" },
+          { opacity: 0, transform: "translate(0px, 0px)" },
+        ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.95) });
+      });
+    });
+
+    oldEdges.forEach((elements, key) => {
+      if (newEdges.has(key)) return;
+      elements.forEach((element) => {
+        animateSceneElement(element, [
+          { opacity: 1 },
+          { opacity: 0 },
+        ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.9) });
+      });
+    });
+
+    animateSceneElement(newScene, [
+      { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px)` },
+      { opacity: 1, transform: "translate(0px, 0px)" },
+    ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
+    
+    animateSceneElement(oldScene, [
+      { opacity: 1, transform: "translate(0px, 0px)" },
+      { opacity: 0, transform: "translate(0px, 0px)" },
+    ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
+  }
 
   window.setTimeout(() => {
     if (token !== flowchartTransitionToken) return;
     if (oldScene.isConnected) oldScene.remove();
     newScene.style.pointerEvents = "auto";
     newScene.style.opacity = "1";
+    newScene.style.transform = "none";
     retainOnlySceneLayer(newScene);
   }, FLOWCHART_LAYER_TRANSITION_MS + FLOWCHART_LAYER_EDGE_DELAY_MS + 140);
 }
@@ -589,10 +706,12 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   if (msg && msg.type === "setGraph") {
     // Top-level graph: reset breadcrumb and render in overview mode.
+    previousFlowchartBreadcrumb = flowchartBreadcrumb;
     flowchartBreadcrumb = [];
     updateBreadcrumbUi();
     renderGraph(msg.graph, { progressiveMode: msg.graph.graphType === "flowchart" ? "overview" : "none" });
   } else if (msg && msg.type === "flowchartLayer") {
+    previousFlowchartBreadcrumb = flowchartBreadcrumb;
     flowchartBreadcrumb = msg.breadcrumb || [];
     updateBreadcrumbUi();
     const mode = flowchartBreadcrumb.length === 0 ? "overview" : "drilldown";
