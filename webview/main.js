@@ -375,29 +375,90 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
   const sceneDx = oldAnchor.x - newAnchor.x;
   const sceneDy = oldAnchor.y - newAnchor.y;
   
-  // Slower, extremely smooth timing for visible continuous morphing
+  const sharedKeys = new Set([...oldNodes.keys()].filter(k => newNodes.has(k)));
+  const sharedEdges = new Set([...oldEdges.keys()].filter(k => newEdges.has(k)));
+
   const dur = 750; 
-  const phase1Dur = 250;
-  const phase2Dur = 500;
   const easeInOut = "cubic-bezier(0.35, 0, 0.25, 1)"; 
 
   function elementBoundingBox(element) {
     try { return element.getBBox(); } catch { return { width: 100, height: 60 }; }
   }
+  function getCenter(elements) {
+    if (!elements || !elements[0]) return { x: 0, y: 0 };
+    const b = elementBoundingBox(elements[0]);
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  }
 
-  if (semanticZoom === "in") {
-    // ----------------------------------------------------
-    //  ZOOM IN (Drilldown)
-    // ----------------------------------------------------
-    let scaleIn = 0.15;
-    let scaleOut = 6.6;
+  if (semanticZoom === "none") {
+    // STRICT FLIP MORPH: No container fading/scaling to avoid 'dark middle'.
+    // Preserves shared elements identically and organically slides them into place.
+    oldScene.style.opacity = "1";
+    oldScene.style.transform = "none";
+    newScene.style.opacity = "1";
+    newScene.style.transform = "none";
+
+    // Unshared Old: Fade out quickly
+    oldNodes.forEach((elements, key) => {
+      if (sharedKeys.has(key)) {
+        // Hide instantly in old scene to avoid visually doubling the element during transit
+        elements.forEach(el => el.style.opacity = "0");
+      } else {
+        elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" }));
+      }
+    });
+    oldEdges.forEach((elements, key) => {
+      if (sharedEdges.has(key)) {
+        elements.forEach(el => el.style.opacity = "0");
+      } else {
+        elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" }));
+      }
+    });
+
+    // Shared & New
+    newNodes.forEach((elements, key) => {
+      if (sharedKeys.has(key)) {
+        const oldC = getCenter(oldNodes.get(key));
+        const newC = getCenter(elements);
+        const dx = oldC.x - newC.x;
+        const dy = oldC.y - newC.y;
+        elements.forEach(el => {
+          el.style.opacity = "1"; // Never goes dark!
+          animateSceneElement(el, [
+            { transform: `translate(${dx}px, ${dy}px)` },
+            { transform: `translate(0px, 0px)` }
+          ], { duration: dur, easing: easeInOut });
+        });
+      } else {
+        // Fade in newly appeared nodes smoothly
+        elements.forEach(el => animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.6, delay: dur * 0.4, easing: "ease-in" }));
+      }
+    });
+    newEdges.forEach((elements, key) => {
+      if (sharedEdges.has(key)) {
+        // Crossfade paths locally in place, keeping combined opacity continuous
+        elements.forEach(el => {
+          el.style.opacity = "1";
+          animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.5, easing: easeInOut });
+        });
+        oldEdges.get(key).forEach(el => {
+          el.style.opacity = "1";
+          animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.5, easing: easeInOut });
+        });
+      } else {
+        elements.forEach(el => animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.6, delay: dur * 0.4, easing: "ease-in" }));
+      }
+    });
+
+  } else if (semanticZoom === "in") {
+    // ZOOM IN (Drilldown)
+    let scaleIn = 0.15, scaleOut = 6.6;
     if (oldNodes.has(focalKey)) {
         const fBox = elementBoundingBox(oldNodes.get(focalKey)[0]);
         const sBox = elementBoundingBox(newScene);
         if (sBox.width > 0 && fBox.width > 0) {
             scaleIn = fBox.width / sBox.width;
             scaleOut = 1 / scaleIn;
-            // constrain to reasonable visualization bounds
             scaleIn = Math.max(0.04, Math.min(0.5, scaleIn));
             scaleOut = Math.max(2, Math.min(25, scaleOut));
         }
@@ -406,52 +467,39 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
     oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
     newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
 
-    // Phase 1: Clear the deck (fade non-focal items)
+    // Only fade non-focal items. Keep container opacities high!
     oldNodes.forEach((elements, key) => {
-      if (key === focalKey) return; 
-      elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: phase1Dur, easing: "ease-out" }));
+      if (key !== focalKey) elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" }));
     });
-    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: phase1Dur, easing: "ease-out" })));
+    oldEdges.forEach(elements => elements.forEach(el => animateSceneElement(el, [{ opacity: 1 }, { opacity: 0 }], { duration: dur * 0.4, easing: "ease-out" })));
 
-    // Phase 2: The actual camera zoom and crossfade
-    // Fade out the focal node itself while zooming past it
-    if (oldNodes.has(focalKey)) {
-        oldNodes.get(focalKey).forEach(el => {
-            animateSceneElement(el, [
-                { opacity: 1 },
-                { opacity: 0 }
-            ], { duration: phase2Dur * 0.8, delay: phase1Dur, easing: easeInOut });
-        });
-    }
-
-    // Zoom the old scene forward past the camera
+    // oldScene container zooms forward. Fade it out starting later to avoid dark middle.
     oldScene.style.opacity = "0";
     oldScene.style.transform = `translate(0px, 0px) scale(${scaleOut})`;
     animateSceneElement(oldScene, [
       { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      { opacity: 1, transform: `translate(0px, 0px) scale(${scaleOut * 0.5})`, offset: 0.5 },
       { opacity: 0, transform: `translate(0px, 0px) scale(${scaleOut})` }
-    ], { duration: phase2Dur, delay: phase1Dur, easing: easeInOut });
+    ], { duration: dur, easing: easeInOut });
 
-    // Materialize the new scene from exactly within the focal node bounds
+    // newScene starts at fully opaque but tiny, growing seamlessly.
     newScene.style.opacity = "1";
     newScene.style.transform = `translate(0px, 0px) scale(1)`;
     animateSceneElement(newScene, [
-      { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px) scale(${scaleIn})` },
+      { opacity: 0.5, transform: `translate(${sceneDx}px, ${sceneDy}px) scale(${scaleIn})` },
+      { opacity: 1, transform: `translate(${sceneDx * 0.5}px, ${sceneDy * 0.5}px) scale(${Math.max(scaleIn, 0.4)})`, offset: 0.2 },
       { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
-    ], { duration: phase2Dur, delay: phase1Dur, easing: easeInOut });
+    ], { duration: dur, easing: easeInOut });
 
   } else if (semanticZoom === "out") {
-    // ----------------------------------------------------
-    //  ZOOM OUT (Collapse)
-    // ----------------------------------------------------
-    let scaleIn = 0.15;
-    let scaleOut = 6.6;
+    // ZOOM OUT (Collapse)
+    let scaleIn = 0.15, scaleOut = 6.6;
     if (newNodes.has(focalKey)) {
         const fBox = elementBoundingBox(newNodes.get(focalKey)[0]);
         const sBox = elementBoundingBox(oldScene);
         if (sBox.width > 0 && fBox.width > 0) {
-            scaleIn = fBox.width / sBox.width; // the old scene shrinks down to the focal node size
-            scaleOut = 1 / scaleIn; // the new scene shrinks down from a huge size
+            scaleIn = fBox.width / sBox.width; 
+            scaleOut = 1 / scaleIn; 
             scaleIn = Math.max(0.04, Math.min(0.5, scaleIn));
             scaleOut = Math.max(2, Math.min(25, scaleOut));
         }
@@ -460,27 +508,7 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
     oldScene.style.transformOrigin = `${oldAnchor.x}px ${oldAnchor.y}px`;
     newScene.style.transformOrigin = `${newAnchor.x}px ${newAnchor.y}px`;
 
-    // Keep the focal node in the new scene perfectly hidden until Phase 2
-    if (newNodes.has(focalKey)) {
-        newNodes.get(focalKey).forEach(el => el.style.opacity = "0");
-    }
-    
-    // Hide new edges & nodes initially
-    newNodes.forEach((elements, key) => {
-        if (key === focalKey) return;
-        elements.forEach(el => el.style.opacity = "0");
-    });
-    newEdges.forEach(elements => elements.forEach(el => el.style.opacity = "0"));
-
-    // Zoom the old scene down into the focal dot
-    oldScene.style.opacity = "0";
-    oldScene.style.transform = `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})`;
-    animateSceneElement(oldScene, [
-      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-      { opacity: 0, transform: `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})` }
-    ], { duration: dur, easing: easeInOut });
-
-    // The new parent scene collapses from around the camera into its normal framing
+    // new parent scene collapses into place. Quick fade-in prevents popping.
     newScene.style.opacity = "1";
     newScene.style.transform = `translate(0px, 0px) scale(1)`;
     animateSceneElement(newScene, [
@@ -488,70 +516,26 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
       { opacity: 1, transform: `translate(0px, 0px) scale(1)` }
     ], { duration: dur, easing: easeInOut });
 
-    // Phase 2: Fade the focal node safely as the scene settles
-    if (newNodes.has(focalKey)) {
-        newNodes.get(focalKey).forEach(el => {
-            el.style.opacity = "1";
-            animateSceneElement(el, [
-                { opacity: 0 },
-                { opacity: 1 }
-            ], { duration: dur * 0.4, delay: dur * 0.5, easing: "ease-in" });
-        });
-    }
+    // old child scene shrinks down and fades late
+    oldScene.style.opacity = "0";
+    oldScene.style.transform = `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})`;
+    animateSceneElement(oldScene, [
+      { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      { opacity: 1, transform: `translate(${-sceneDx * 0.5}px, ${-sceneDy * 0.5}px) scale(${scaleIn * 2})`, offset: 0.5 },
+      { opacity: 0, transform: `translate(${-sceneDx}px, ${-sceneDy}px) scale(${scaleIn})` }
+    ], { duration: dur, easing: easeInOut });
 
-    // Phase 2: Materialize the rest of the parent context
+    // Make new elements (except the focal node area which is covered by oldScene shrinking) appear smoothly
     newNodes.forEach((elements, key) => {
-        if (key === focalKey) return;
         elements.forEach(el => {
             el.style.opacity = "1";
-            animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.6 });
+            animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.4 });
         });
     });
     newEdges.forEach(elements => elements.forEach(el => {
         el.style.opacity = "1";
-        animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.6 });
+        animateSceneElement(el, [{ opacity: 0 }, { opacity: 1 }], { duration: dur * 0.4, delay: dur * 0.4 });
     }));
-
-  } else {
-    // ----------------------------------------------------
-    //  DEFAULT CROSSFADE
-    // ----------------------------------------------------
-    const enterDelay = FLOWCHART_LAYER_EXIT_MS;
-    
-    oldScene.style.opacity = "1";
-    oldScene.style.transform = "translate(0px, 0px) scale(1)";
-    newScene.style.opacity = "0";
-    newScene.style.transform = `translate(${sceneDx}px, ${sceneDy}px)`;
-
-    oldNodes.forEach((elements, key) => {
-      if (newNodes.has(key)) return;
-      elements.forEach((element) => {
-        animateSceneElement(element, [
-          { opacity: 1, transform: "translate(0px, 0px)" },
-          { opacity: 0, transform: "translate(0px, 0px)" },
-        ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.95) });
-      });
-    });
-
-    oldEdges.forEach((elements, key) => {
-      if (newEdges.has(key)) return;
-      elements.forEach((element) => {
-        animateSceneElement(element, [
-          { opacity: 1 },
-          { opacity: 0 },
-        ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.9) });
-      });
-    });
-
-    animateSceneElement(newScene, [
-      { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px)` },
-      { opacity: 1, transform: "translate(0px, 0px)" },
-    ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
-    
-    animateSceneElement(oldScene, [
-      { opacity: 1, transform: "translate(0px, 0px)" },
-      { opacity: 0, transform: "translate(0px, 0px)" },
-    ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
   }
 
   window.setTimeout(() => {
@@ -561,7 +545,7 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
     newScene.style.opacity = "1";
     newScene.style.transform = "none";
     retainOnlySceneLayer(newScene);
-  }, (semanticZoom !== "none" ? dur : FLOWCHART_LAYER_TRANSITION_MS + FLOWCHART_LAYER_EDGE_DELAY_MS) + 140);
+  }, dur + 100);
 }
 
 function renderGraph(graph, options = {}) {
