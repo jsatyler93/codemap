@@ -442,6 +442,7 @@ export function renderFlowchart(graph, ctx) {
     const color = groupColor(group.kind);
     const wrapper = document.createElementNS(NS, "g");
     wrapper.dataset.collapsedGroupId = group.id;
+    wrapper.dataset.transitionKey = `group:${group.id}`;
     wrapper.style.cursor = "grab";
 
     // Render collapsed group as an alphabet circle
@@ -531,6 +532,7 @@ export function renderFlowchart(graph, ctx) {
     const ay2 = baseY + aw * Math.cos(angle);
 
     const pathGroup = document.createElementNS(NS, "g");
+    pathGroup.dataset.edgeKey = buildFlowTransitionEdgeKey({ from: srcEndpoint, to: tgtEndpoint, label: edge.label || "" });
 
     const path = document.createElementNS(NS, "path");
     path.setAttribute("d", d);
@@ -550,15 +552,13 @@ export function renderFlowchart(graph, ctx) {
     arrowHead.setAttribute("stroke-linejoin", "round");
     pathGroup.appendChild(arrowHead);
     
-    edgeLayer.appendChild(pathGroup);
-
     const hitPath = document.createElementNS(NS, "path");
     hitPath.setAttribute("d", d);
     hitPath.setAttribute("fill", "none");
     hitPath.setAttribute("stroke", "transparent");
     hitPath.setAttribute("stroke-width", String(EDGE_HIT_W));
     hitPath.setAttribute("pointer-events", "stroke");
-    edgeLayer.appendChild(hitPath);
+    pathGroup.appendChild(hitPath);
 
     let labelEl = null;
     if (edge.label) {
@@ -570,8 +570,10 @@ export function renderFlowchart(graph, ctx) {
       labelEl.setAttribute("font-size", "8.5");
       labelEl.style.fontFamily = "serif";
       labelEl.textContent = edge.label;
-      edgeLayer.appendChild(labelEl);
+      pathGroup.appendChild(labelEl);
     }
+
+    edgeLayer.appendChild(pathGroup);
 
     const dot = document.createElementNS(NS, "circle");
     dot.setAttribute("r", "1.3");
@@ -1153,6 +1155,7 @@ function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil, 
   const group = document.createElementNS(NS, "g");
   group.setAttribute("transform", `translate(${rect.x},${rect.y})`);
   group.dataset.id = node.id;
+  group.dataset.transitionKey = `node:${node.id}`;
   group.style.cursor = "pointer";
 
   let { top: t, bottom: b } = nodeChipText(node);
@@ -2699,4 +2702,8 @@ function clamp01(value) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function buildFlowTransitionEdgeKey(edge) {
+  return `edge:${edge.from}->${edge.to}::${String(edge.label || "")}`;
 }

@@ -1,7 +1,7 @@
 // Webview entry point. Receives GraphDocument JSON from the extension host
 // and dispatches to the appropriate view renderer.
 
-import { makeSvgCanvas } from "./shared/panZoom.js";
+import { NS, makeSvgCanvas } from "./shared/panZoom.js";
 import { cubicPt } from "./shared/geometry.js";
 import { renderFlowchart } from "./views/flowchart/flowchartView.js";
 import { renderCallGraph } from "./views/callgraph/callGraphView.js";
@@ -39,9 +39,14 @@ let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
 const LAYOUT_STORAGE_PREFIX = "codemap.layout.v3:";
 const STEP_PARTICLE_INTERVAL_MS = 1150;
+const FLOWCHART_LAYER_EXIT_MS = 220;
+const FLOWCHART_LAYER_ENTER_MS = 360;
+const FLOWCHART_LAYER_TRANSITION_MS = FLOWCHART_LAYER_EXIT_MS + FLOWCHART_LAYER_ENTER_MS;
+const FLOWCHART_LAYER_EDGE_DELAY_MS = 90;
 
 /** Current breadcrumb trail for progressive flowchart reading. */
 let flowchartBreadcrumb = []; // [{groupId, label}, ...]
+let flowchartTransitionToken = 0;
 
 function showTooltip(e, n) {
   if (n && n.tooltipKind === "edge") {
@@ -184,13 +189,206 @@ function updateStats(graph) {
   statsEl.textContent = parts.join(" · ");
 }
 
+function createSceneRoot(graphType) {
+  const scene = document.createElementNS(NS, "g");
+  scene.dataset.sceneLayer = "true";
+  scene.dataset.graphType = graphType || "graph";
+  canvas.root.appendChild(scene);
+  return scene;
+}
+
+function clearSceneLayers() {
+  Array.from(canvas.root.children).forEach((child) => {
+    if (child?.dataset?.sceneLayer === "true") {
+      canvas.root.removeChild(child);
+    }
+  });
+}
+
+function retainOnlySceneLayer(sceneEl) {
+  Array.from(canvas.root.children).forEach((child) => {
+    if (child?.dataset?.sceneLayer === "true" && child !== sceneEl) {
+      canvas.root.removeChild(child);
+    }
+  });
+}
+
+function clearDefs() {
+  while (canvas.defs.firstChild) canvas.defs.removeChild(canvas.defs.firstChild);
+}
+
+function shouldAnimateFlowchartTransition(graph, previousGraph, previousRender, options) {
+  return !!(
+    graph?.graphType === "flowchart"
+    && previousGraph?.graphType === "flowchart"
+    && previousRender?.sceneEl
+    && previousRender.sceneEl.isConnected
+    && !options.preserveView
+    && !options.disableSceneTransition
+  );
+}
+
+function collectSceneTransitionElements(sceneEl, selector, attributeName) {
+  const result = new Map();
+  if (!sceneEl) return result;
+  sceneEl.querySelectorAll(selector).forEach((element) => {
+    const key = element.dataset?.[attributeName];
+    if (!key) return;
+    if (!result.has(key)) result.set(key, []);
+    result.get(key).push(element);
+  });
+  return result;
+}
+
+function elementVisualCenter(element) {
+  try {
+    const box = element.getBBox();
+    return {
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    };
+  } catch {
+    return { x: 0, y: 0 };
+  }
+}
+
+function computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene) {
+  const oldCommon = [];
+  const newCommon = [];
+  newNodes.forEach((elements, key) => {
+    if (!oldNodes.has(key)) return;
+    oldCommon.push(elementVisualCenter(oldNodes.get(key)[0]));
+    newCommon.push(elementVisualCenter(elements[0]));
+  });
+  if (oldCommon.length && newCommon.length) {
+    return {
+      oldAnchor: {
+        x: oldCommon.reduce((sum, point) => sum + point.x, 0) / oldCommon.length,
+        y: oldCommon.reduce((sum, point) => sum + point.y, 0) / oldCommon.length,
+      },
+      newAnchor: {
+        x: newCommon.reduce((sum, point) => sum + point.x, 0) / newCommon.length,
+        y: newCommon.reduce((sum, point) => sum + point.y, 0) / newCommon.length,
+      },
+      hasCommon: true,
+    };
+  }
+  try {
+    const newBox = newScene?.getBBox();
+    if (newBox && Number.isFinite(newBox.width)) {
+      const center = { x: newBox.x + newBox.width / 2, y: newBox.y + newBox.height / 2 };
+      return { oldAnchor: center, newAnchor: center, hasCommon: false };
+    }
+  } catch {}
+  try {
+    const oldBox = oldScene?.getBBox();
+    if (oldBox && Number.isFinite(oldBox.width)) {
+      const center = { x: oldBox.x + oldBox.width / 2, y: oldBox.y + oldBox.height / 2 };
+      return { oldAnchor: center, newAnchor: center, hasCommon: false };
+    }
+  } catch {}
+  return { oldAnchor: { x: 0, y: 0 }, newAnchor: { x: 0, y: 0 }, hasCommon: false };
+}
+
+function offsetTowardAnchor(center, anchor, distance) {
+  const dx = anchor.x - center.x;
+  const dy = anchor.y - center.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return {
+    x: (dx / len) * distance,
+    y: (dy / len) * distance,
+  };
+}
+
+function animateSceneElement(element, keyframes, options) {
+  element.style.transformBox = "fill-box";
+  element.style.transformOrigin = "center";
+  if (typeof element.animate === "function") {
+    const animation = element.animate(keyframes, { fill: "both", easing: "cubic-bezier(0.22, 1, 0.36, 1)", ...options });
+    animation.onfinish = () => {
+      const last = keyframes[keyframes.length - 1] || {};
+      if (last.opacity !== undefined) element.style.opacity = String(last.opacity);
+      if (last.transform !== undefined) element.style.transform = String(last.transform);
+    };
+    return animation;
+  }
+  const last = keyframes[keyframes.length - 1] || {};
+  if (last.opacity !== undefined) element.style.opacity = String(last.opacity);
+  if (last.transform !== undefined) element.style.transform = String(last.transform);
+  return null;
+}
+
+function animateFlowchartSceneTransition(previousRender, nextRender) {
+  const token = ++flowchartTransitionToken;
+  const oldScene = previousRender?.sceneEl;
+  const newScene = nextRender?.sceneEl;
+  if (!oldScene || !newScene) return;
+
+  oldScene.style.pointerEvents = "none";
+  newScene.style.pointerEvents = "none";
+
+  const oldNodes = collectSceneTransitionElements(oldScene, "[data-transition-key]", "transitionKey");
+  const newNodes = collectSceneTransitionElements(newScene, "[data-transition-key]", "transitionKey");
+  const oldEdges = collectSceneTransitionElements(oldScene, "[data-edge-key]", "edgeKey");
+  const newEdges = collectSceneTransitionElements(newScene, "[data-edge-key]", "edgeKey");
+  const { oldAnchor, newAnchor } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
+  const sceneDx = oldAnchor.x - newAnchor.x;
+  const sceneDy = oldAnchor.y - newAnchor.y;
+  const enterDelay = FLOWCHART_LAYER_EXIT_MS;
+
+  oldScene.style.opacity = "1";
+  oldScene.style.transform = "translate(0px, 0px) scale(1)";
+  newScene.style.opacity = "0";
+  newScene.style.transform = `translate(${sceneDx}px, ${sceneDy}px)`;
+
+  oldNodes.forEach((elements, key) => {
+    if (newNodes.has(key)) return;
+    elements.forEach((element) => {
+      animateSceneElement(element, [
+        { opacity: 1, transform: "translate(0px, 0px)" },
+        { opacity: 0, transform: "translate(0px, 0px)" },
+      ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.95) });
+    });
+  });
+
+  oldEdges.forEach((elements, key) => {
+    if (newEdges.has(key)) return;
+    elements.forEach((element) => {
+      animateSceneElement(element, [
+        { opacity: 1 },
+        { opacity: 0 },
+      ], { duration: Math.round(FLOWCHART_LAYER_EXIT_MS * 0.9) });
+    });
+  });
+
+  animateSceneElement(newScene, [
+    { opacity: 0, transform: `translate(${sceneDx}px, ${sceneDy}px)` },
+    { opacity: 1, transform: "translate(0px, 0px)" },
+  ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
+  animateSceneElement(oldScene, [
+    { opacity: 1, transform: "translate(0px, 0px)" },
+    { opacity: 0, transform: "translate(0px, 0px)" },
+  ], { duration: FLOWCHART_LAYER_ENTER_MS, delay: enterDelay + 20 });
+
+  window.setTimeout(() => {
+    if (token !== flowchartTransitionToken) return;
+    if (oldScene.isConnected) oldScene.remove();
+    newScene.style.pointerEvents = "auto";
+    newScene.style.opacity = "1";
+    retainOnlySceneLayer(newScene);
+  }, FLOWCHART_LAYER_TRANSITION_MS + FLOWCHART_LAYER_EDGE_DELAY_MS + 140);
+}
+
 function renderGraph(graph, options = {}) {
   if (!graph || typeof graph !== "object") return;
   if (!Array.isArray(graph.nodes)) graph.nodes = [];
   if (!Array.isArray(graph.edges)) graph.edges = [];
+  const previousGraph = currentGraph;
+  const previousRender = current;
   currentGraph = graph;
   updateOverlayControls(graph);
-  const preservedView = options.preserveView
+  const animateFlowchartTransition = shouldAnimateFlowchartTransition(graph, previousGraph, previousRender, options);
+  const preservedView = (options.preserveView || animateFlowchartTransition)
     ? { scale: canvas.state.scale, panX: canvas.state.panX, panY: canvas.state.panY }
     : null;
 
@@ -220,11 +418,17 @@ function renderGraph(graph, options = {}) {
   try {
     removeDataflowOverlay();
     clearSuperimposedDataflow(canvas.root);
-    canvas.clear();
     if (canvas.clearScaleListeners) canvas.clearScaleListeners();
+    if (animateFlowchartTransition) {
+      retainOnlySceneLayer(previousRender?.sceneEl || null);
+      clearDefs();
+    } else {
+      canvas.clear();
+    }
+    const sceneRoot = createSceneRoot(graph.graphType);
     const layoutKey = buildLayoutStorageKey(graph, uiState.layoutMode || (uiState.treeView ? "tree" : "lanes"));
     const ctx = {
-      root: canvas.root,
+      root: sceneRoot,
       defs: canvas.defs,
       canvas: canvas,
       uiState,
@@ -259,7 +463,7 @@ function renderGraph(graph, options = {}) {
     } else {
       result = renderCallGraph(graph, ctx);
     }
-    current = result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes };
+    current = { ...(result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes }), sceneEl: sceneRoot };
 
     // Copy renderer-attached helpers into shared renderCtx
     Object.keys(ctx).forEach((k) => { if (k.startsWith("_")) renderCtx[k] = ctx[k]; });
@@ -278,6 +482,12 @@ function renderGraph(graph, options = {}) {
       canvas.reset(current.initialView);
     } else {
       canvas.reset();
+    }
+
+    if (animateFlowchartTransition) {
+      animateFlowchartSceneTransition(previousRender, current);
+    } else {
+      sceneRoot.style.pointerEvents = "auto";
     }
 
     updateExecPanel(graph);
