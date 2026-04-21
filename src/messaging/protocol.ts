@@ -72,7 +72,54 @@ export interface UiStateView {
   attractStrength: number;
   ambientRepelStrength: number;
   cohesionStrength: number;
+  layoutMode?: "tree" | "lanes" | "freeform";
   treeView: boolean;
+  /** Flowchart progressive reading state – undefined means overview mode */
+  flowchartFocusGroupId?: string;
+  flowchartBreadcrumb?: BreadcrumbEntry[];
+}
+
+/** One entry in the flowchart breadcrumb trail */
+export interface BreadcrumbEntry {
+  /** Group or block node id that was drilled into */
+  groupId: string;
+  /** Human-readable label to display in the breadcrumb */
+  label: string;
+}
+
+/**
+ * Webview → host: user has clicked a compound block and wants to drill into
+ * the focused subgraph for that region.
+ */
+export interface DrilldownFlowchartMessage {
+  type: "drilldownFlowchart";
+  /** The group/block node id to focus on */
+  groupId: string;
+  /** Label shown in breadcrumb for this level */
+  label: string;
+}
+
+/**
+ * Webview → host: user wants to navigate back to a parent breadcrumb level.
+ * Passing `null` breadcrumbIndex means "go back to overview (top)".
+ */
+export interface FlowchartBreadcrumbNavigateMessage {
+  type: "flowchartBreadcrumbNavigate";
+  /** 0-based index of the breadcrumb entry to restore; -1 = root overview */
+  breadcrumbIndex: number;
+}
+
+/**
+ * Host → webview: delivers a new focused flowchart layer together with the
+ * updated breadcrumb state.  The webview replaces its current canvas content.
+ */
+export interface FlowchartLayerMessage {
+  type: "flowchartLayer";
+  graph: import("../python/model/graphTypes").GraphDocument;
+  /** Full breadcrumb trail at this point (empty = overview) */
+  breadcrumb: BreadcrumbEntry[];
+  /** The group id being focused, or null for overview */
+  focusGroupId: string | null;
 }
 
 export interface SetUiStateMessage {
@@ -84,12 +131,15 @@ export type FromExtensionMessage =
   | SetGraphMessage
   | SetThemeMessage
   | SetRuntimeFrameMessage
-  | SetUiStateMessage;
+  | SetUiStateMessage
+  | FlowchartLayerMessage;
 export type FromWebviewMessage =
   | RevealNodeMessage
   | RequestRefreshMessage
   | RequestFlowchartMessage
   | NavigateLevelMessage
   | NavigatePeripheralMessage
+  | DrilldownFlowchartMessage
+  | FlowchartBreadcrumbNavigateMessage
   | ReadyMessage
   | DebugMessage;

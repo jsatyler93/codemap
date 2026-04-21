@@ -27,19 +27,44 @@ const collapseGroupsBtn = document.getElementById("btn-collapse-groups");
 const expandGroupsBtn = document.getElementById("btn-expand-groups");
 const overlayLegacyLabel = overlayLegacyToggle ? overlayLegacyToggle.closest("label") : null;
 const overlayModernLabel = overlayModernToggle ? overlayModernToggle.closest("label") : null;
+const breadcrumbEl = document.getElementById("flowchart-breadcrumb");
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let time = 0;
-let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, treeView: false };
+let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false };
 let overlayPrefs = { showLegacyOverlay: true, showModernOverlay: true };
 let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
-const LAYOUT_STORAGE_PREFIX = "codemap.layout.v1:";
+const LAYOUT_STORAGE_PREFIX = "codemap.layout.v3:";
 const STEP_PARTICLE_INTERVAL_MS = 1150;
 
+/** Current breadcrumb trail for progressive flowchart reading. */
+let flowchartBreadcrumb = []; // [{groupId, label}, ...]
+
 function showTooltip(e, n) {
+  if (n && n.tooltipKind === "edge") {
+    const meta = n.metadata || {};
+    const sourceTypes = Array.isArray(meta.sourceTypeBits) ? meta.sourceTypeBits : [];
+    const targetTypes = Array.isArray(meta.targetTypeBits) ? meta.targetTypeBits : [];
+    const edgeLabel = meta.edgeLabel ? `<div class="tt-conn">${escapeHtml(meta.edgeLabel)}</div>` : "";
+    const sourceBlock = sourceTypes.length
+      ? `<div class="tt-section"><div class="tt-section-title">Known Types Leaving Source</div>${sourceTypes.map((line) => `<div class="tt-section-row">${escapeHtml(line)}</div>`).join("")}</div>`
+      : "";
+    const targetBlock = targetTypes.length
+      ? `<div class="tt-section"><div class="tt-section-title">Known Types At Next Node</div>${targetTypes.map((line) => `<div class="tt-section-row">${escapeHtml(line)}</div>`).join("")}</div>`
+      : "";
+    tooltip.innerHTML = `
+      <div class="tt-type">edge flow</div>
+      <div class="tt-func">${escapeHtml(meta.fromLabel || "")} → ${escapeHtml(meta.toLabel || "")}</div>
+      ${edgeLabel}
+      ${(sourceBlock || targetBlock) ? `${sourceBlock}${targetBlock}` : `<div class="tt-file">No strong type evidence on this edge yet</div>`}
+    `;
+    tooltip.style.opacity = "1";
+    moveTooltip(e);
+    return;
+  }
   const meta = n.metadata || {};
   const module = n.module || "";
   const sig = meta.params
@@ -169,6 +194,15 @@ function renderGraph(graph, options = {}) {
     ? { scale: canvas.state.scale, panX: canvas.state.panX, panY: canvas.state.panY }
     : null;
 
+  // Compute progressive mode: use explicit option when provided (initial renders),
+  // otherwise derive from current breadcrumb state so requestRender re-renders
+  // inside the flowchart get the correct mode automatically.
+  const progressiveMode = options.progressiveMode !== undefined
+    ? options.progressiveMode
+    : graph.graphType === "flowchart"
+      ? (flowchartBreadcrumb.length > 0 ? "drilldown" : "overview")
+      : "none";
+
   // Reset exec trace state
   execStep = -1;
   execAutoMode = false;
@@ -188,7 +222,7 @@ function renderGraph(graph, options = {}) {
     clearSuperimposedDataflow(canvas.root);
     canvas.clear();
     if (canvas.clearScaleListeners) canvas.clearScaleListeners();
-    const layoutKey = buildLayoutStorageKey(graph);
+    const layoutKey = buildLayoutStorageKey(graph, uiState.layoutMode || (uiState.treeView ? "tree" : "lanes"));
     const ctx = {
       root: canvas.root,
       defs: canvas.defs,
@@ -201,6 +235,12 @@ function renderGraph(graph, options = {}) {
       },
       showTooltip, moveTooltip, hideTooltip, onNodeClick,
       onNodeDblClick,
+      // Progressive flowchart reading mode: "overview" | "drilldown" | "none"
+      progressiveMode,
+      // Called by flowchartView when the user triggers a drilldown on a group.
+      onDrilldownGroup(groupId, label) {
+        vscode.postMessage({ type: "drilldownFlowchart", groupId, label });
+      },
     };
 
     let result;
@@ -243,6 +283,8 @@ function renderGraph(graph, options = {}) {
     updateExecPanel(graph);
     updateLegend(graph);
     updateCanvasControls(graph);
+    // Refresh the breadcrumb bar in case graph type changed.
+    updateBreadcrumbUi();
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
     vscode.postMessage({ type: "debug", message: "[render-error] " + msg });
@@ -274,7 +316,9 @@ function scheduleUiStateRender() {
   if (pendingUiStateRender) clearTimeout(pendingUiStateRender);
   pendingUiStateRender = setTimeout(() => {
     pendingUiStateRender = null;
-    renderGraph(currentGraph, { preserveView: true });
+    const mode = flowchartBreadcrumb.length > 0 ? "drilldown"
+      : currentGraph.graphType === "flowchart" ? "overview" : "none";
+    renderGraph(currentGraph, { preserveView: true, progressiveMode: mode });
   }, 70);
 }
 
@@ -334,7 +378,15 @@ function updateCanvasControls(graph) {
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (msg && msg.type === "setGraph") {
-    renderGraph(msg.graph);
+    // Top-level graph: reset breadcrumb and render in overview mode.
+    flowchartBreadcrumb = [];
+    updateBreadcrumbUi();
+    renderGraph(msg.graph, { progressiveMode: msg.graph.graphType === "flowchart" ? "overview" : "none" });
+  } else if (msg && msg.type === "flowchartLayer") {
+    flowchartBreadcrumb = msg.breadcrumb || [];
+    updateBreadcrumbUi();
+    const mode = flowchartBreadcrumb.length === 0 ? "overview" : "drilldown";
+    renderGraph(msg.graph, { progressiveMode: mode });
   } else if (msg && msg.type === "setRuntimeFrame") {
     renderRuntimeFrame(msg.frame, msg.highlightNodeIds || []);
   } else if (msg && msg.type === "setUiState") {
@@ -343,6 +395,46 @@ window.addEventListener("message", (event) => {
     scheduleUiStateRender();
   }
 });
+
+/**
+ * Rebuild the breadcrumb bar DOM from the current flowchartBreadcrumb state.
+ * The bar is always visible when a flowchart is active so users can see that
+ * progressive reading mode is in effect.
+ */
+function updateBreadcrumbUi() {
+  if (!breadcrumbEl) return;
+  const isFlowchart = currentGraph && currentGraph.graphType === "flowchart";
+  if (!isFlowchart) {
+    breadcrumbEl.style.display = "none";
+    breadcrumbEl.innerHTML = "";
+    return;
+  }
+  // Always show the bar for flowcharts — it signals progressive reading mode.
+  breadcrumbEl.style.display = "block";
+  if (flowchartBreadcrumb.length === 0) {
+    breadcrumbEl.innerHTML = `<span style="color:#454a60">&#8962; overview</span>&nbsp;<span style="color:#454a60;font-size:9px">&mdash; click <strong style="color:#7aa2f7">+</strong> on a block to drill in</span>`;
+    return;
+  }
+  const parts = [];
+  // Root overview crumb (always clickable)
+  parts.push(`<span class="bc-crumb bc-root" data-bc-index="-1" style="cursor:pointer;color:#7aa2f7">&#8962; overview</span>`);
+  flowchartBreadcrumb.forEach((crumb, i) => {
+    parts.push(`<span style="color:#454a60;margin:0 5px">›</span>`);
+    const isLast = i === flowchartBreadcrumb.length - 1;
+    if (isLast) {
+      parts.push(`<span style="color:#c0caf5">${escapeHtml(crumb.label)}</span>`);
+    } else {
+      parts.push(`<span class="bc-crumb" data-bc-index="${i}" style="cursor:pointer;color:#7aa2f7">${escapeHtml(crumb.label)}</span>`);
+    }
+  });
+  breadcrumbEl.innerHTML = parts.join("");
+  breadcrumbEl.querySelectorAll(".bc-crumb").forEach((el) => {
+    el.addEventListener("click", () => {
+      const idx = parseInt(el.dataset.bcIndex, 10);
+      vscode.postMessage({ type: "flowchartBreadcrumbNavigate", breadcrumbIndex: idx });
+    });
+  });
+}
 
 // ── Toolbar buttons ──
 execBtn.addEventListener("click", () => {
@@ -946,13 +1038,14 @@ function cssEscape(s) {
   return String(s).replace(/(["\\])/g, "\\$1");
 }
 
-function buildLayoutStorageKey(graph) {
+function buildLayoutStorageKey(graph, layoutMode = "lanes") {
   const meta = graph.metadata || {};
   const nodeIds = Array.isArray(graph.nodes)
     ? graph.nodes.map((node) => node.id).sort()
     : [];
   return LAYOUT_STORAGE_PREFIX + JSON.stringify([
     graph.graphType || "graph",
+    layoutMode,
     graph.title || "",
     meta.module || "",
     Array.isArray(graph.rootNodeIds) ? graph.rootNodeIds : [],

@@ -266,59 +266,308 @@ def _extract_function_calls_from_expr(text: str, line_number: int, calls: List[C
 def detect_control_flow(body_lines: List[SourceLine]) -> List[Dict[str, object]]:
     nodes: List[Dict[str, object]] = []
     node_id = 0
+    case_depth = 0
+
+    def append_node(
+        kind: str,
+        label: str,
+        line: int,
+        structure: Optional[str] = None,
+        indent_column: int = 0,
+        indent_offset: int = 0,
+        display_lines: Optional[List[str]] = None,
+    ) -> None:
+        nonlocal node_id
+        node_id += 1
+        node: Dict[str, object] = {
+            "id": f"n{node_id}",
+            "kind": kind,
+            "label": label,
+            "line": line,
+            "indentColumn": indent_column,
+            "indentOffset": indent_offset,
+            "displayLines": display_lines or [label],
+        }
+        if structure:
+            node["structure"] = structure
+        nodes.append(node)
+
     for sl in body_lines:
         if sl.is_blank or sl.is_comment:
             continue
-        upper = sl.text.upper().strip()
-        node_id += 1
-        nid = f"n{node_id}"
+        text = sl.text.strip()
+        upper = text.upper()
+        indent_column = _count_indent_columns(sl.raw_text)
+        source_lines = _source_display_lines(sl.raw_text)
+
+        inline_if = _parse_inline_if(text)
+        if inline_if and not _is_begin_clause(inline_if["then_clause"]):
+            append_node(
+                "decision",
+                f"IF {inline_if['condition']}",
+                sl.line_number,
+                "inline_if",
+                indent_column=indent_column,
+                display_lines=[f"if {inline_if['condition']}"]
+            )
+            then_kind, then_label = _classify_statement_node(inline_if["then_clause"])
+            append_node(
+                then_kind,
+                then_label,
+                sl.line_number,
+                "if_then",
+                indent_column=indent_column,
+                indent_offset=1,
+                display_lines=[inline_if["then_clause"]],
+            )
+            else_clause = inline_if.get("else_clause")
+            if else_clause and not _is_begin_clause(else_clause):
+                else_kind, else_label = _classify_statement_node(else_clause)
+                append_node(
+                    else_kind,
+                    else_label,
+                    sl.line_number,
+                    "if_else",
+                    indent_column=indent_column,
+                    indent_offset=1,
+                    display_lines=[else_clause],
+                )
+            continue
 
         if _IF_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "decision", "label": sl.text.strip(), "line": sl.line_number, "structure": "if"})
+            append_node("decision", text, sl.line_number, "if", indent_column=indent_column, display_lines=source_lines)
             continue
         if _FOR_PATTERN.match(upper) or _FOREACH_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "loop", "label": sl.text.strip(), "line": sl.line_number, "structure": "loop"})
+            append_node("loop", text, sl.line_number, "loop", indent_column=indent_column, display_lines=source_lines)
             continue
         if _WHILE_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "loop", "label": sl.text.strip(), "line": sl.line_number, "structure": "loop"})
+            append_node("loop", text, sl.line_number, "loop", indent_column=indent_column, display_lines=source_lines)
             continue
         if _REPEAT_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "loop", "label": sl.text.strip(), "line": sl.line_number, "structure": "repeat"})
+            append_node("loop", text, sl.line_number, "repeat", indent_column=indent_column, display_lines=source_lines)
             continue
         if _CASE_PATTERN.match(upper) or _SWITCH_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "decision", "label": sl.text.strip(), "line": sl.line_number, "structure": "case"})
+            append_node("decision", text, sl.line_number, "case", indent_column=indent_column, display_lines=source_lines)
+            case_depth += 1
             continue
+        if case_depth > 0:
+            case_branch = _parse_case_branch(text)
+            if case_branch:
+                branch_kind = "case_else" if case_branch["is_else"] else "case_branch"
+                append_node(
+                    "decision",
+                    case_branch["label"],
+                    sl.line_number,
+                    branch_kind,
+                    indent_column=indent_column,
+                    display_lines=[case_branch["displayLabel"]],
+                )
+                action = case_branch.get("action", "")
+                if action and not _is_begin_clause(action):
+                    action_kind, action_label = _classify_statement_node(action)
+                    append_node(
+                        action_kind,
+                        action_label,
+                        sl.line_number,
+                        "case_action",
+                        indent_column=indent_column,
+                        indent_offset=1,
+                        display_lines=[action],
+                    )
+                continue
         if _ENDIF_ELSE_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "decision", "label": "ELSE", "line": sl.line_number, "structure": "else"})
+            append_node("decision", "ELSE", sl.line_number, "else", indent_column=indent_column, display_lines=["else"])
             continue
         if _ELSE_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "decision", "label": "ELSE", "line": sl.line_number, "structure": "else"})
+            append_node("decision", "ELSE", sl.line_number, "else", indent_column=indent_column, display_lines=source_lines)
             continue
         if _ENDIF_PATTERN.match(upper) or _ENDELSE_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "process", "label": upper.split(";")[0].strip(), "line": sl.line_number, "structure": "end_if"})
+            append_node("process", upper.split(";")[0].strip(), sl.line_number, "end_if", indent_column=indent_column, display_lines=[upper.split(";")[0].strip()])
             continue
         if _ENDFOR_PATTERN.match(upper) or _ENDFOREACH_PATTERN.match(upper) or _ENDWHILE_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "process", "label": upper.split(";")[0].strip(), "line": sl.line_number, "structure": "end_loop"})
+            append_node("process", upper.split(";")[0].strip(), sl.line_number, "end_loop", indent_column=indent_column, display_lines=[upper.split(";")[0].strip()])
             continue
         if _ENDREP_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "process", "label": upper.split(";")[0].strip(), "line": sl.line_number, "structure": "end_repeat"})
+            append_node("process", upper.split(";")[0].strip(), sl.line_number, "end_repeat", indent_column=indent_column, display_lines=[upper.split(";")[0].strip()])
             continue
         if _ENDCASE_PATTERN.match(upper) or _ENDSWITCH_PATTERN.match(upper):
-            nodes.append({"id": nid, "kind": "process", "label": upper.split(";")[0].strip(), "line": sl.line_number, "structure": "end_case"})
+            case_depth = max(0, case_depth - 1)
+            append_node("process", upper.split(";")[0].strip(), sl.line_number, "end_case", indent_column=indent_column, display_lines=[upper.split(";")[0].strip()])
             continue
         if upper.startswith("RETURN"):
-            nodes.append({"id": nid, "kind": "return", "label": sl.text.strip(), "line": sl.line_number})
+            append_node("return", text, sl.line_number, indent_column=indent_column, display_lines=source_lines)
             continue
         if upper.startswith("BREAK"):
-            nodes.append({"id": nid, "kind": "break", "label": "BREAK", "line": sl.line_number})
+            append_node("break", "BREAK", sl.line_number, indent_column=indent_column, display_lines=["break"])
             continue
         if upper.startswith("CONTINUE"):
-            nodes.append({"id": nid, "kind": "continue", "label": "CONTINUE", "line": sl.line_number})
+            append_node("continue", "CONTINUE", sl.line_number, indent_column=indent_column, display_lines=["continue"])
+            continue
+        if upper.startswith("GOTO"):
+            target_label = text[4:].strip().lstrip(",").strip()
+            append_node("process", f"GOTO {target_label}", sl.line_number, "goto", indent_column=indent_column, display_lines=[f"goto {target_label}"])
             continue
 
-        kind = "compute" if _looks_like_assignment(sl.text) else "process"
-        nodes.append({"id": nid, "kind": kind, "label": sl.text.strip(), "line": sl.line_number})
+        kind, label = _classify_statement_node(text)
+        append_node(kind, label, sl.line_number, indent_column=indent_column, display_lines=source_lines)
     return nodes
+
+
+def _parse_inline_if(text: str) -> Optional[Dict[str, str]]:
+    """Parse inline IF statements: IF cond THEN body [ELSE body].
+
+    Uses token-aware splitting to handle function calls, parenthesised
+    expressions and string literals in the condition and clauses.
+    """
+    upper = text.upper()
+    if not upper.startswith("IF "):
+        return None
+
+    # Locate THEN at the top level (not inside parens/quotes).
+    then_pos = _find_keyword(text, "THEN", 2)
+    if then_pos == -1:
+        return None
+
+    condition = text[3:then_pos].strip()
+    rest = text[then_pos + 4:].strip()
+    if not rest:
+        return None
+
+    # Locate ELSE at the top level in the rest.
+    else_pos = _find_keyword(rest, "ELSE", 0)
+    if else_pos == -1:
+        then_clause = rest
+        else_clause = ""
+    else:
+        then_clause = rest[:else_pos].strip()
+        else_clause = rest[else_pos + 4:].strip()
+
+    return {
+        "condition": condition,
+        "then_clause": then_clause,
+        "else_clause": else_clause,
+    }
+
+
+def _find_keyword(text: str, keyword: str, start: int) -> int:
+    """Find *keyword* at word boundaries in *text*, skipping quoted/nested regions."""
+    klen = len(keyword)
+    in_single = False
+    in_double = False
+    depth = 0
+    i = start
+    while i <= len(text) - klen:
+        ch = text[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif in_single or in_double:
+            i += 1
+            continue
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text[i:i + klen].upper() == keyword:
+            # Check word boundaries.
+            before_ok = i == 0 or not text[i - 1].isalnum()
+            after_ok = (i + klen >= len(text)) or not text[i + klen].isalnum()
+            if before_ok and after_ok:
+                return i
+        i += 1
+    return -1
+
+
+def _parse_case_branch(text: str) -> Optional[Dict[str, str]]:
+    if ":" not in text:
+        return None
+
+    # Find the first colon that isn't inside quotes or parentheses/brackets.
+    depth_paren = 0
+    depth_bracket = 0
+    in_single = False
+    in_double = False
+    colon_pos = -1
+    for idx, ch in enumerate(text):
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif in_single or in_double:
+            continue
+        elif ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren = max(0, depth_paren - 1)
+        elif ch == "[":
+            depth_bracket += 1
+        elif ch == "]":
+            depth_bracket = max(0, depth_bracket - 1)
+        elif ch == ":" and depth_paren == 0 and depth_bracket == 0:
+            colon_pos = idx
+            break
+
+    if colon_pos < 1:
+        return None
+
+    label = text[:colon_pos].strip()
+    tail = text[colon_pos + 1:].strip()
+
+    if not label:
+        return None
+
+    # Reject lines that look like assignments (key = value) before the colon
+    if "=" in label:
+        upper_label = label.upper()
+        # Allow relational operators used in case expressions
+        if not any(op in upper_label for op in [" EQ ", " NE ", " GE ", " LE ", " GT ", " LT "]):
+            return None
+
+    return {
+        "label": "ELSE" if label.upper() == "ELSE" else label,
+        "displayLabel": "else:" if label.upper() == "ELSE" else label + ":",
+        "action": tail,
+        "is_else": "true" if label.upper() == "ELSE" else "false",
+    }
+
+
+def _is_begin_clause(text: str) -> bool:
+    return text.upper().strip().endswith("BEGIN")
+
+
+def _classify_statement_node(text: str) -> Tuple[str, str]:
+    upper = text.upper().strip()
+    if upper.startswith("RETURN"):
+        return "return", text.strip()
+    if upper.startswith("BREAK"):
+        return "break", "BREAK"
+    if upper.startswith("CONTINUE"):
+        return "continue", "CONTINUE"
+    if _looks_like_assignment(text):
+        return "compute", text.strip()
+    return "process", text.strip()
+
+
+def _count_indent_columns(raw_text: str) -> int:
+    for raw_line in raw_text.splitlines():
+        if not raw_line.strip():
+            continue
+        indent = 0
+        for char in raw_line:
+            if char == " ":
+                indent += 1
+            elif char == "\t":
+                indent += 2
+            else:
+                return indent
+        return indent
+    return 0
+
+
+def _source_display_lines(raw_text: str) -> List[str]:
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    return lines or [raw_text.strip()]
 
 
 def _looks_like_assignment(text: str) -> bool:

@@ -270,6 +270,14 @@ class FlowBuilder:
                 continues.extend(try_result.continues)
                 if last is None:
                     return BuildResult(None, breaks=breaks, continues=continues)
+            elif hasattr(ast, "Match") and isinstance(stmt, getattr(ast, "Match")):
+                flush_run()
+                match_result = self._build_match(stmt, last)
+                last = match_result.fallthrough
+                breaks.extend(match_result.breaks)
+                continues.extend(match_result.continues)
+                if last is None:
+                    return BuildResult(None, breaks=breaks, continues=continues)
             elif isinstance(stmt, ast.With) or isinstance(stmt, ast.AsyncWith):
                 flush_run()
                 label = "with " + ", ".join(_with_text(i) for i in stmt.items)
@@ -333,27 +341,34 @@ class FlowBuilder:
         return BuildResult(last, breaks=breaks, continues=continues)
 
     def _build_if(self, stmt: ast.If, prev: Optional[str]) -> BuildResult:
-        group = self._begin_group("branch", "if " + _short(stmt.test), stmt.lineno)
-        start_index = len(self.nodes)
-        cond = "if " + _short(stmt.test) + "?"
+        test_text = _short(stmt.test)
+        cond = "if " + test_text + "?"
         dec = self._add_node("decision", cond, stmt.lineno)
         if prev is not None:
             self._add_edge(prev, dec)
+
+        then_group = self._begin_group("branch", _branch_group_label(test_text, "then"), stmt.body[0].lineno if stmt.body else stmt.lineno)
+        then_start = len(self.nodes)
         then_result = self._build_block(stmt.body, dec)
+        self._end_group(then_group, then_start)
         self._relabel_first_edge(dec, "yes")
+
         else_result = BuildResult(dec)
         if stmt.orelse:
-            # If single elif, recurse to keep chain readable.
+            else_group = self._begin_group("branch", _branch_group_label(test_text, "else"), stmt.orelse[0].lineno if stmt.orelse else stmt.lineno)
+            else_start = len(self.nodes)
+            # If single elif, recurse so the else block drills down into the nested branch alphabet.
             if len(stmt.orelse) == 1 and isinstance(stmt.orelse[0], ast.If):
                 else_result = self._build_if(stmt.orelse[0], dec)
             else:
                 else_result = self._build_block(stmt.orelse, dec)
+            self._end_group(else_group, else_start)
             self._relabel_first_edge(dec, "no")
+
         # Connect both branches into a join node if both fall through.
         breaks = then_result.breaks + else_result.breaks
         continues = then_result.continues + else_result.continues
         if then_result.fallthrough is None and else_result.fallthrough is None:
-            self._end_group(group, start_index)
             return BuildResult(None, breaks=breaks, continues=continues)
         join = self._add_node("process", "•", stmt.lineno)
         if then_result.fallthrough is not None:
@@ -363,12 +378,9 @@ class FlowBuilder:
                 self._add_edge(dec, join, "no")
             else:
                 self._add_edge(else_result.fallthrough, join)
-        self._end_group(group, start_index)
         return BuildResult(join, breaks=breaks, continues=continues)
 
     def _build_loop(self, stmt: LoopNode, prev: Optional[str]) -> BuildResult:
-        group = self._begin_group("loop", _loop_group_label(stmt), stmt.lineno)
-        start_index = len(self.nodes)
         if isinstance(stmt, ast.While):
             label = "while " + _short(stmt.test)
             type_label = ""
@@ -400,7 +412,12 @@ class FlowBuilder:
         if prev is not None:
             self._add_edge(prev, header)
         after_loop = self._add_node("process", "after loop", getattr(stmt, "end_lineno", stmt.lineno))
+
+        body_group = self._begin_group("loop_body", _loop_block_group_label(label, "body"), stmt.body[0].lineno if stmt.body else stmt.lineno)
+        body_start = len(self.nodes)
         body_result = self._build_block(stmt.body, header)
+        self._end_group(body_group, body_start)
+
         if body_result.fallthrough is not None:
             self._add_edge(body_result.fallthrough, header, "repeat")
         for continue_node in body_result.continues:
@@ -415,14 +432,26 @@ class FlowBuilder:
                 metadata={"displayLines": ["loop", "else"]},
             )
             self._add_edge(header, loop_else, "done")
+
+            else_group = self._begin_group("branch", _loop_block_group_label(label, "else"), stmt.orelse[0].lineno)
+            else_start = len(self.nodes)
             else_result = self._build_block(stmt.orelse, loop_else)
+            self._end_group(else_group, else_start)
+
+            for continue_node in else_result.continues:
+                self._add_edge(continue_node, header, "continue")
+            for break_node in else_result.breaks:
+                self._add_edge(break_node, after_loop, "break")
+
             if else_result.fallthrough is not None:
                 self._add_edge(else_result.fallthrough, after_loop)
-            has_fallthrough = else_result.fallthrough is not None or bool(body_result.breaks)
-            self._end_group(group, start_index, exclude_ids=[after_loop])
+            has_fallthrough = (
+                else_result.fallthrough is not None
+                or bool(body_result.breaks)
+                or bool(else_result.breaks)
+            )
             return BuildResult(after_loop if has_fallthrough else None)
         self._add_edge(header, after_loop, "done")
-        self._end_group(group, start_index, exclude_ids=[after_loop])
         return BuildResult(after_loop)
 
     def _build_try(self, stmt: ast.Try, prev: Optional[str]) -> BuildResult:
@@ -459,6 +488,43 @@ class FlowBuilder:
             breaks.extend(fin_result.breaks)
             continues.extend(fin_result.continues)
             return BuildResult(fin_result.fallthrough, breaks=breaks, continues=continues)
+        return BuildResult(join, breaks=breaks, continues=continues)
+
+    def _build_match(self, stmt: Any, prev: Optional[str]) -> BuildResult:
+        """Handle Python 3.10+ match/case statements."""
+        subject_text = _short(stmt.subject)
+        group = self._begin_group("branch", f"match {subject_text}", stmt.lineno)
+        start_index = len(self.nodes)
+        dec = self._add_node("decision", f"match {subject_text}", stmt.lineno, metadata={
+            "displayLines": [f"match {subject_text}"],
+        })
+        if prev is not None:
+            self._add_edge(prev, dec)
+        breaks: List[str] = []
+        continues: List[str] = []
+        case_results: List[BuildResult] = []
+        for case_node in stmt.cases:
+            pattern_text = _short(case_node.pattern) if hasattr(case_node, "pattern") else "case"
+            guard_text = ""
+            if hasattr(case_node, "guard") and case_node.guard:
+                guard_text = f" if {_short(case_node.guard)}"
+            case_label = f"case {pattern_text}{guard_text}"
+            case_id = self._add_node("decision", case_label, case_node.lineno, metadata={
+                "displayLines": [case_label],
+            })
+            self._add_edge(dec, case_id, "")
+            body_result = self._build_block(case_node.body, case_id)
+            case_results.append(body_result)
+            breaks.extend(body_result.breaks)
+            continues.extend(body_result.continues)
+        fallthroughs = [r.fallthrough for r in case_results if r.fallthrough is not None]
+        if not fallthroughs:
+            self._end_group(group, start_index)
+            return BuildResult(None, breaks=breaks, continues=continues)
+        join = self._add_node("process", "•", stmt.lineno)
+        for ft in fallthroughs:
+            self._add_edge(ft, join)
+        self._end_group(group, start_index)
         return BuildResult(join, breaks=breaks, continues=continues)
 
     def _relabel_first_edge(self, src: str, label: str) -> None:
@@ -596,12 +662,12 @@ def _split_loop_label(label: str) -> List[str]:
     return [label]
 
 
-def _loop_group_label(stmt: LoopNode) -> str:
-    if isinstance(stmt, ast.While):
-        return "while block"
-    if isinstance(stmt, ast.AsyncFor):
-        return "async for block"
-    return "for block"
+def _branch_group_label(test_text: str, branch: str) -> str:
+    return f"{branch}: {test_text}"
+
+
+def _loop_block_group_label(loop_label: str, block_kind: str) -> str:
+    return f"{block_kind}: {loop_label}"
 
 
 class _LocalTypeCollector(ast.NodeVisitor):

@@ -18,6 +18,7 @@ import unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SAMPLES = os.path.join(ROOT, "samples", "python_demo")
+IDL_SAMPLES = os.path.join(ROOT, "samples", "idl_complex_demo")
 
 
 def run_helper(script: str, payload: dict) -> dict:
@@ -215,6 +216,61 @@ class FlowchartTests(unittest.TestCase):
         self.assertEqual(branch_group["parentGroupId"], loop_group["id"])
         self.assertTrue(loop_group["nodeIds"])
         self.assertTrue(branch_group["nodeIds"])
+
+
+class IdlFlowchartTests(unittest.TestCase):
+    def test_idl_case_branches_are_emitted_as_distinct_nodes(self):
+        doc = run_helper("idl_flowchart.py", {
+            "file": os.path.join(IDL_SAMPLES, "codemap_demo_anomaly.pro"),
+            "line": 38,
+        })
+        labels = [node["label"] for node in doc["nodes"]]
+        self.assertIn("case alert.status of", labels)
+        self.assertIn("'critical'", labels)
+        self.assertIn("summary.critical = summary.critical + 1L", labels)
+        self.assertIn("ELSE", labels)
+        self.assertIn("summary.stable = summary.stable + 1L", labels)
+
+    def test_idl_inline_if_emits_body_and_fallthrough_edges(self):
+        doc = run_helper("idl_flowchart.py", {
+            "file": os.path.join(IDL_SAMPLES, "codemap_demo_anomaly.pro"),
+            "line": 38,
+        })
+        labels = [node["label"] for node in doc["nodes"]]
+        self.assertIn("IF alert.score gt summary.max_score", labels)
+        self.assertIn("summary.max_score = alert.score", labels)
+
+        edges = {(edge["from"], edge["to"], edge.get("label")) for edge in doc["edges"]}
+        decision_id = next(node["id"] for node in doc["nodes"] if node["label"] == "IF alert.score gt summary.max_score")
+        body_id = next(node["id"] for node in doc["nodes"] if node["label"] == "summary.max_score = alert.score")
+        end_loop_id = next(node["id"] for node in doc["nodes"] if node["label"] == "ENDFOREACH")
+
+        self.assertIn((decision_id, body_id, "yes"), edges)
+        self.assertIn((decision_id, end_loop_id, "no"), edges)
+
+    def test_idl_flowchart_emits_groups_and_indent_metadata(self):
+        doc = run_helper("idl_flowchart.py", {
+            "file": os.path.join(IDL_SAMPLES, "codemap_demo_anomaly.pro"),
+            "line": 38,
+        })
+        groups = doc.get("metadata", {}).get("groups", [])
+        self.assertTrue(groups)
+        kinds = {group["kind"] for group in groups}
+        self.assertIn("function_body", kinds)
+        self.assertIn("loop", kinds)
+        self.assertIn("branch", kinds)
+
+        nodes_by_label = {node["label"]: node for node in doc["nodes"]}
+        loop_meta = nodes_by_label["foreach alert, alerts do begin"]["metadata"]
+        case_meta = nodes_by_label["case alert.status of"]["metadata"]
+        action_meta = nodes_by_label["summary.critical = summary.critical + 1L"]["metadata"]
+
+        self.assertLess(loop_meta["indentLevel"], case_meta["indentLevel"])
+        self.assertLess(case_meta["indentLevel"], action_meta["indentLevel"])
+
+        # Verify statement-run collapsing produced at least one node with multiple display lines
+        multi = [node for node in doc["nodes"] if len(node.get("metadata", {}).get("displayLines", [])) > 1]
+        self.assertTrue(multi, "Expected at least one collapsed statement run")
 
 
 if __name__ == "__main__":

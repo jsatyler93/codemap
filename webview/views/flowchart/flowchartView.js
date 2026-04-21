@@ -5,25 +5,139 @@ import { NS, mkArrow } from "../../shared/panZoom.js";
 import { theme } from "../../shared/theme.js";
 import { cubicPt } from "../../shared/geometry.js";
 
-const NODE_W = 240;
-const NODE_MIN_H = 36;
+const NODE_W = 32;
+const NODE_MIN_H = 32;
 const LINE_H = 12;
-const ROW_GAP = 30;
-const BRANCH_GAP = 240;
-const GROUP_PAD_X = 18;
-const GROUP_PAD_Y = 22;
-const GROUP_SUMMARY_W = 220;
-const GROUP_SUMMARY_MIN_H = 52;
-const GROUP_TOGGLE_R = 8;
-const NODE_CIRCLE_D = 36;
-const TREE_INDENT_X = 104;
-const TREE_BASE_X = 176;
+const ROW_GAP = 28;
+const BRANCH_GAP = 40;
+const GROUP_PAD_X = 24;
+const GROUP_PAD_Y = 32;
+const GROUP_SUMMARY_W = 32;
+const GROUP_SUMMARY_MIN_H = 32;
+const GROUP_TOGGLE_R = 7;
+const NODE_CIRCLE_D = 32;
+const TREE_INDENT_X = 40;
+const TREE_BASE_X = 60;
+
+const STROKE = "#111";
+const BG = "#efefef";
+const LABEL = "#111";
+const NODE_R = 16;
+
+
+function unitVector(x, y) {
+  const len = Math.hypot(x, y) || 1;
+  return { x: x / len, y: y / len };
+}
+
+function pointFromCircleToward(cx, cy, tx, ty, r = 0) {
+  const u = unitVector(tx - cx, ty - cy);
+  return { x: cx + u.x * r, y: cy + u.y * r };
+}
+
+function buildArrowGeometry(x1, y1, x2, y2, bendX = 0, bendY = 0, r1 = 0, r2 = 0) {
+  if (bendX === 0 && bendY === 0) {
+    const start = pointFromCircleToward(x1, y1, x2, y2, r1);
+    const end = pointFromCircleToward(x2, y2, x1, y1, r2);
+    const angle = Math.atan2(end.y - start.y, end.x - start.x);
+    return {
+      d: `M ${start.x} ${start.y} L ${end.x} ${end.y}`,
+      end,
+      angle,
+    };
+  }
+
+  const cx = (x1 + x2) / 2 + bendX;
+  const cy = (y1 + y2) / 2 + bendY;
+
+  const start = pointFromCircleToward(x1, y1, cx, cy, r1);
+  const end = pointFromCircleToward(x2, y2, cx, cy, r2);
+
+  const angle = Math.atan2(end.y - cy, end.x - cx);
+
+  return {
+    d: `M ${start.x} ${start.y} Q ${cx} ${cy} ${end.x} ${end.y}`,
+    end,
+    angle,
+  };
+}
+
+function pointOnArrowGeometry(x1, y1, x2, y2, bendX = 0, bendY = 0, r1 = 0, r2 = 0, t = 0.5) {
+  if (bendX === 0 && bendY === 0) {
+    const start = pointFromCircleToward(x1, y1, x2, y2, r1);
+    const end = pointFromCircleToward(x2, y2, x1, y1, r2);
+    return {
+      x: start.x + (end.x - start.x) * t,
+      y: start.y + (end.y - start.y) * t,
+    };
+  }
+
+  const cx = (x1 + x2) / 2 + bendX;
+  const cy = (y1 + y2) / 2 + bendY;
+  const start = pointFromCircleToward(x1, y1, cx, cy, r1);
+  const end = pointFromCircleToward(x2, y2, cx, cy, r2);
+  const omt = 1 - t;
+  return {
+    x: omt * omt * start.x + 2 * omt * t * cx + t * t * end.x,
+    y: omt * omt * start.y + 2 * omt * t * cy + t * t * end.y,
+  };
+}
+
+function routeGeometry(route) {
+  if (route?.d && Number.isFinite(route.tx) && Number.isFinite(route.ty)) {
+    return {
+      d: route.d,
+      end: { x: route.tx, y: route.ty },
+      angle: Math.atan2(route.ty - route.c2y, route.tx - route.c2x),
+    };
+  }
+  return buildArrowGeometry(route.sx, route.sy, route.tx, route.ty, route.bendX || 0, route.bendY || 0, 0, 0);
+}
+
+function pointOnRoute(route, t = 0.5) {
+  if (route?.d && Number.isFinite(route.tx) && Number.isFinite(route.ty)) {
+    return cubicPt(route.sx, route.sy, route.c1x, route.c1y, route.c2x, route.c2y, route.tx, route.ty, t);
+  }
+  return pointOnArrowGeometry(route.sx, route.sy, route.tx, route.ty, route.bendX || 0, route.bendY || 0, 0, 0, t);
+}
+
+function projectControlOutward(anchor, control, minDistance) {
+  if (!Number.isFinite(anchor?.dx) || !Number.isFinite(anchor?.dy)) return control;
+  const projection = (control.x - anchor.x) * anchor.dx + (control.y - anchor.y) * anchor.dy;
+  if (projection >= minDistance) return control;
+  const adjust = minDistance - projection;
+  return {
+    x: control.x + anchor.dx * adjust,
+    y: control.y + anchor.dy * adjust,
+  };
+}
+
+function outwardHandleDistance(start, end, minDistance = 10, maxDistance = 28, scale = 0.2) {
+  return Math.max(minDistance, Math.min(maxDistance, Math.hypot(end.x - start.x, end.y - start.y) * scale));
+}
+
+function circleAnchorToward(rect, tx, ty) {
+  const cx = rect.x + NODE_R;
+  const cy = rect.y + NODE_R;
+  const point = pointFromCircleToward(cx, cy, tx, ty, NODE_R);
+  const direction = unitVector(point.x - cx, point.y - cy);
+  return { x: point.x, y: point.y, dx: direction.x, dy: direction.y };
+}
+
 const TREE_ROW_GAP = 26;
+const FLOW_LANE_BASE_X = 188;
+const FLOW_LANE_STEP_X = 182;
+const FLOW_LANE_BASE_Y = 30;
+const EDGE_HIT_W = 16;
+const NODE_TEXT_PAD_X = 14;
 
 export function renderFlowchart(graph, ctx) {
+  const simplifiedGraph = simplifyAlphabetFlowGraph(graph);
   const { root, defs } = ctx;
   const canvasState = ctx.canvas?.state;
-  const treeView = !!ctx.uiState?.treeView;
+  const layoutMode = ctx.uiState?.layoutMode || (ctx.uiState?.treeView ? "tree" : "lanes");
+  const treeView = layoutMode === "tree";
+  const freeformView = layoutMode === "freeform";
   const forceOptions = {
     overlapRepel: clamp01(ctx.uiState?.repelStrength ?? 0.35),
     linkAttract: clamp01(ctx.uiState?.attractStrength ?? 0.28),
@@ -38,14 +152,15 @@ export function renderFlowchart(graph, ctx) {
   Object.entries(theme.nodeColor).forEach(([key, color]) => mkArrow(defs, `a-${key}`, color));
   mkArrow(defs, "a-default", "#454a60");
 
-  const nodes = graph.nodes.map((node) => ({ ...node }));
-  const edges = graph.edges || [];
+  const nodes = simplifiedGraph.nodes.map((node) => ({ ...node }));
+  const edges = simplifiedGraph.edges || [];
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const hasPersistedNodeCircleState = nodes.some((node) => typeof savedNodes[node.id]?.circleCollapsed === "boolean");
-  const groups = normalizeGroups(graph.metadata?.groups || []);
+  const groups = normalizeGroups(simplifiedGraph.metadata?.groups || []);
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const nodeGroupChains = buildNodeGroupChains(groups);
   const groupDepth = buildGroupDepthMap(groups);
+  const nodeMetaById = new Map(nodes.map((node) => [node.id, node.metadata || {}]));
   const nodeState = new Map(nodes.map((node) => [node.id, {
     circleCollapsed: hasPersistedNodeCircleState ? !!savedNodes[node.id]?.circleCollapsed : true,
     treeDx: typeof savedNodes[node.id]?.treeDx === "number" ? savedNodes[node.id].treeDx : 0,
@@ -76,36 +191,13 @@ export function renderFlowchart(graph, ctx) {
 
   const positions = new Map();
   const visited = new Set();
-  const entry = (graph.rootNodeIds && graph.rootNodeIds[0])
+  const entry = (simplifiedGraph.rootNodeIds && simplifiedGraph.rootNodeIds[0])
     || (nodes.find((node) => node.kind === "entry") || nodes[0])?.id;
   if (!entry) {
     return { edgeRecords: [], nodeRect: new Map(), nodes, initialView: { scale: 1, panX: 0, panY: 0 } };
   }
 
-  let cursorY = 30;
-  function place(nodeId, centerX) {
-    if (visited.has(nodeId)) return;
-    visited.add(nodeId);
-    const preparedNode = prepared.get(nodeId);
-    if (!preparedNode) return;
-    positions.set(nodeId, { x: centerX - NODE_W / 2, y: cursorY, h: preparedNode.h });
-    cursorY += preparedNode.h + ROW_GAP;
-    const outs = outgoing.get(nodeId) || [];
-    if (outs.length === 0) return;
-    if (outs.length === 1) {
-      place(outs[0].to, centerX);
-      return;
-    }
-    const yes = outs.find((edge) => /yes|true|ok/i.test(edge.label || ""));
-    const no = outs.find((edge) => /no|false|invalid|raise/i.test(edge.label || ""));
-    const ordered = [yes, no, ...outs.filter((edge) => edge !== yes && edge !== no)].filter(Boolean);
-    const span = (ordered.length - 1) * BRANCH_GAP;
-    ordered.forEach((edge, index) => {
-      place(edge.to, centerX - span / 2 + index * BRANCH_GAP);
-    });
-  }
-
-  place(entry, 480);
+  applyFlowAlphabetLayout(positions, nodes, edges, prepared, entry);
   for (const node of nodes) {
     if (!positions.has(node.id)) {
       const preparedNode = prepared.get(node.id);
@@ -113,8 +205,14 @@ export function renderFlowchart(graph, ctx) {
       cursorY += (preparedNode ? preparedNode.h : NODE_MIN_H) + ROW_GAP;
     }
   }
+  const progressiveMode = ctx.progressiveMode || "none"; 
+  const hasPersistedGroupState = groups.some((g) => typeof savedGroups[g.id]?.collapsed === "boolean");
   const groupState = new Map(groups.map((group) => [group.id, {
-    collapsed: !!savedGroups[group.id]?.collapsed,
+    collapsed: (groupDepth.get(group.id) || 0) > 0 || isLoopGroupKind(group.kind)
+      ? true
+      : hasPersistedGroupState
+        ? !!savedGroups[group.id]?.collapsed
+        : false,
     x: typeof savedGroups[group.id]?.x === "number" ? savedGroups[group.id].x : undefined,
     y: typeof savedGroups[group.id]?.y === "number" ? savedGroups[group.id].y : undefined,
     treeDx: typeof savedGroups[group.id]?.treeDx === "number" ? savedGroups[group.id].treeDx : 0,
@@ -130,6 +228,7 @@ export function renderFlowchart(graph, ctx) {
       nodeGroupChains,
       groupById,
       groupDepth,
+      nodeMetaById,
       isNodeCircleCollapsed,
       visibility,
       groupState,
@@ -138,7 +237,7 @@ export function renderFlowchart(graph, ctx) {
       treeBaseGroupPos,
       forceOptions,
     );
-  } else {
+  } else if (freeformView) {
     for (const [nodeId, saved] of Object.entries(savedNodes)) {
       const pos = positions.get(nodeId);
       if (!pos || typeof saved?.x !== "number" || typeof saved?.y !== "number") continue;
@@ -146,6 +245,8 @@ export function renderFlowchart(graph, ctx) {
       pos.y = saved.y;
     }
     applyFlowForceLayout(positions, prepared, outgoing, incoming, forceOptions);
+  } else {
+    applyFlowAlphabetLayout(positions, nodes, edges, prepared, entry, visibility.visibleNodeIds);
   }
 
   const nodeRectAll = new Map();
@@ -163,7 +264,7 @@ export function renderFlowchart(graph, ctx) {
     });
   }
   const collisionAnchors = new Map(Array.from(nodeRectAll.entries()).map(([nodeId, rect]) => [nodeId, { x: rect.x, y: rect.y }]));
-  if (!treeView) resolveFlowNodeSeparation(new Set(), visibility.visibleNodeIds);
+  if (freeformView) resolveFlowNodeSeparation(new Set(), visibility.visibleNodeIds);
   const allNodesCircleCollapsed = nodes.every((node) => isNodeCircleCollapsed(node.id));
   let loopLaneRanks = buildLoopLaneRanks(nodes, positions, visibility.visibleNodeIds, groupDepth);
 
@@ -174,6 +275,21 @@ export function renderFlowchart(graph, ctx) {
   const nodeLayer = document.createElementNS(NS, "g"); root.appendChild(nodeLayer);
 
   let collapsedGroupRects = computeCollapsedGroupRects(visibility.visibleCollapsedGroupIds, groupById, groupState, nodeRectAll);
+  // For loop body groups at any depth, position the chip to the right of the loop condition node (alphabet layout rule)
+  for (const groupId of visibility.visibleCollapsedGroupIds) {
+    const group = groupById.get(groupId);
+    if (!group || !isLoopGroupKind(group.kind)) continue;
+    const state = groupState.get(groupId);
+    if (state && typeof state.x === "number") continue; // user has manually moved it
+    const loopCondNode = nodes.find((n) =>
+      n.kind === "loop" &&
+      simplifiedGraph.edges.some((e) => e.from === n.id && group.nodeSet.has(e.to))
+    );
+    if (!loopCondNode) continue;
+    const loopRect = nodeRectAll.get(loopCondNode.id);
+    if (!loopRect) continue;
+    collapsedGroupRects.set(groupId, { x: loopRect.x + 90, y: loopRect.y, w: NODE_CIRCLE_D, h: NODE_CIRCLE_D });
+  }
   let expandedGroupBounds = computeExpandedGroupBounds(
     visibility.visibleExpandedGroupIds,
     visibility.visibleNodeIds,
@@ -205,8 +321,8 @@ export function renderFlowchart(graph, ctx) {
     region.setAttribute("height", String(bounds.h));
     region.setAttribute("rx", "14");
     region.setAttribute("ry", "14");
-    region.setAttribute("fill", color + "05");
-    region.setAttribute("stroke", color + "44");
+    region.setAttribute("fill", "transparent");
+    region.setAttribute("stroke", "transparent");
     region.setAttribute("stroke-width", "1.2");
     region.setAttribute("stroke-dasharray", "7 5");
     wrapper.appendChild(region);
@@ -219,14 +335,14 @@ export function renderFlowchart(graph, ctx) {
     chip.setAttribute("height", "18");
     chip.setAttribute("rx", "9");
     chip.setAttribute("ry", "9");
-    chip.setAttribute("fill", color + "15");
-    chip.setAttribute("stroke", color + "40");
+    chip.setAttribute("fill", "transparent");
+    chip.setAttribute("stroke", "transparent");
     wrapper.appendChild(chip);
 
     const title = document.createElementNS(NS, "text");
     title.setAttribute("x", String(bounds.x + 34));
     title.setAttribute("y", String(bounds.y + 2));
-    title.setAttribute("fill", color + "dd");
+    title.setAttribute("fill", "transparent");
     title.setAttribute("font-size", "9.5");
     title.setAttribute("font-weight", "600");
     title.textContent = group.label;
@@ -328,33 +444,50 @@ export function renderFlowchart(graph, ctx) {
     wrapper.dataset.collapsedGroupId = group.id;
     wrapper.style.cursor = "grab";
 
-    const box = document.createElementNS(NS, "rect");
-    box.setAttribute("x", String(rect.x));
-    box.setAttribute("y", String(rect.y));
-    box.setAttribute("width", String(rect.w));
-    box.setAttribute("height", String(rect.h));
-    box.setAttribute("rx", "12");
-    box.setAttribute("ry", "12");
-    box.setAttribute("fill", color + "14");
-    box.setAttribute("stroke", color + "70");
+    // Render collapsed group as an alphabet circle
+    const cx = rect.x + NODE_R;
+    const cy = rect.y + NODE_R;
+    const box = document.createElementNS(NS, "circle");
+    box.setAttribute("cx", String(cx));
+    box.setAttribute("cy", String(cy));
+    box.setAttribute("r", String(NODE_R));
+    box.setAttribute("fill", color + "1b");
+    box.setAttribute("stroke", color + "86");
     box.setAttribute("stroke-width", "1.4");
-    box.setAttribute("stroke-dasharray", "8 5");
     wrapper.appendChild(box);
 
-    const lines = summarizeGroup(group);
-    lines.forEach((line, index) => {
-      const text = document.createElementNS(NS, "text");
-      text.setAttribute("x", String(rect.x + 29));
-      text.setAttribute("y", String(rect.y + 18 + index * LINE_H));
-      text.setAttribute("text-anchor", "start");
-      text.setAttribute("fill", index === 0 ? color + "ee" : color + "aa");
-      text.setAttribute("font-size", index === 0 ? "10" : "8.5");
-      text.setAttribute("font-weight", index === 0 ? "600" : "400");
-      text.textContent = line;
-      wrapper.appendChild(text);
-    });
+    // Top label: abbreviated kind
+    let gTop = "S"; let gBot = "body";
+    ({ top: gTop, bottom: gBot } = groupChipText(group));
+    const topText = document.createElementNS(NS, "text");
+    topText.setAttribute("x", String(cx));
+    topText.setAttribute("y", String(cy - 1.5));
+    topText.setAttribute("text-anchor", "middle");
+    topText.setAttribute("fill", color + "dd");
+    topText.setAttribute("font-size", "6.1");
+    topText.style.fontFamily = "serif";
+    topText.textContent = gTop;
+    wrapper.appendChild(topText);
+    const botText = document.createElementNS(NS, "text");
+    botText.setAttribute("x", String(cx));
+    botText.setAttribute("y", String(cy + 6.6));
+    botText.setAttribute("text-anchor", "middle");
+    botText.setAttribute("fill", color + "88");
+    botText.setAttribute("font-size", "5.4");
+    botText.style.fontFamily = "serif";
+    botText.style.letterSpacing = "0.2px";
+    botText.textContent = gBot;
+    wrapper.appendChild(botText);
 
-    const toggle = makeGroupToggle(wrapper, color, true, () => toggleGroup(group.id));
+    const toggle = makeGroupToggle(wrapper, color, true, () => {
+      // Always drilldown into the group when the toggle is clicked — alphabet rule:
+      // collapsed chips are nodes, clicking reveals the next layer as its own alphabet view.
+      if (ctx.onDrilldownGroup) {
+        ctx.onDrilldownGroup(group.id, group.label || group.kind);
+      } else {
+        toggleGroup(group.id);
+      }
+    });
     positionGroupToggle(toggle, rect, { headerChip: false });
 
     attachGroupInteractions(wrapper, group);
@@ -380,22 +513,62 @@ export function renderFlowchart(graph, ctx) {
     const route = computeEdgeRoute({ label: edge.label || "", src: srcEndpoint, tgt: tgtEndpoint }, fromRect, toRect, fromKind, toKind, loopLaneRanks);
     const color = theme.nodeColor[fromKind] || "#454a60";
 
+    const geom = routeGeometry(route);
+    const d = geom.d;
+    const end = geom.end;
+    const angle = geom.angle;
+
+    const ah = 6.3;
+    const aw = 3.3;
+    const back = 0.6;
+    const tipX = end.x;
+    const tipY = end.y;
+    const baseX = tipX - (ah + back) * Math.cos(angle);
+    const baseY = tipY - (ah + back) * Math.sin(angle);
+    const ax1 = baseX + aw * Math.sin(angle);
+    const ay1 = baseY - aw * Math.cos(angle);
+    const ax2 = baseX - aw * Math.sin(angle);
+    const ay2 = baseY + aw * Math.cos(angle);
+
+    const pathGroup = document.createElementNS(NS, "g");
+
     const path = document.createElementNS(NS, "path");
-    path.setAttribute("d", route.d);
+    path.setAttribute("d", d);
     path.setAttribute("fill", "none");
-    path.setAttribute("stroke", color + "33");
-    path.setAttribute("stroke-width", "1");
-    path.setAttribute("marker-end", `url(#a-${fromKind})`);
-    edgeLayer.appendChild(path);
+    path.setAttribute("stroke", color + "4f");
+    path.setAttribute("stroke-width", "1.4");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    pathGroup.appendChild(path);
+
+    const arrowHead = document.createElementNS(NS, "path");
+    arrowHead.setAttribute("d", `M ${ax1} ${ay1} L ${tipX} ${tipY} L ${ax2} ${ay2}`);
+    arrowHead.setAttribute("fill", "none");
+    arrowHead.setAttribute("stroke", color + "4f");
+    arrowHead.setAttribute("stroke-width", "1.4");
+    arrowHead.setAttribute("stroke-linecap", "round");
+    arrowHead.setAttribute("stroke-linejoin", "round");
+    pathGroup.appendChild(arrowHead);
+    
+    edgeLayer.appendChild(pathGroup);
+
+    const hitPath = document.createElementNS(NS, "path");
+    hitPath.setAttribute("d", d);
+    hitPath.setAttribute("fill", "none");
+    hitPath.setAttribute("stroke", "transparent");
+    hitPath.setAttribute("stroke-width", String(EDGE_HIT_W));
+    hitPath.setAttribute("pointer-events", "stroke");
+    edgeLayer.appendChild(hitPath);
 
     let labelEl = null;
     if (edge.label) {
-      const mid = cubicPt(route.sx, route.sy, route.c1x, route.c1y, route.c2x, route.c2y, route.tx, route.ty, route.labelT || 0.35);
+      const mid = pointOnRoute(route, route.labelT ?? 0.5);
       labelEl = document.createElementNS(NS, "text");
-      labelEl.setAttribute("x", String(mid.x + (route.labelDx || 6)));
-      labelEl.setAttribute("y", String(mid.y + (route.labelDy || -4)));
-      labelEl.setAttribute("fill", color + "88");
+      labelEl.setAttribute("x", String(mid.x + (route.labelDx || 0)));
+      labelEl.setAttribute("y", String(mid.y + (route.labelDy || 0)));
+      labelEl.setAttribute("fill", color + "a2");
       labelEl.setAttribute("font-size", "8.5");
+      labelEl.style.fontFamily = "serif";
       labelEl.textContent = edge.label;
       edgeLayer.appendChild(labelEl);
     }
@@ -406,13 +579,16 @@ export function renderFlowchart(graph, ctx) {
     dot.setAttribute("opacity", "0");
     dotLayer.appendChild(dot);
     edgeMap[`${edge.from}->${edge.to}`] = edgeRecords.length;
-    edgeRecords.push({
+    const edgeRecord = {
       el: path,
+      arrowHeadEl: arrowHead,
+      hitEl: hitPath,
       src: srcEndpoint,
       tgt: tgtEndpoint,
       fromKind,
       toKind,
       label: edge.label || "",
+      rawEdge: edge,
       labelEl,
       sx: route.sx,
       sy: route.sy,
@@ -422,13 +598,31 @@ export function renderFlowchart(graph, ctx) {
       c2y: route.c2y,
       tx: route.tx,
       ty: route.ty,
-      labelT: route.labelT,
-      labelDx: route.labelDx,
-      labelDy: route.labelDy,
+      labelT: route.labelT ?? 0.5,
+      labelDx: route.labelDx ?? 0,
+      labelDy: route.labelDy ?? 0,
       dot,
       offset: Math.random(),
       speed: 0.0006 + Math.random() * 0.0004,
+    };
+    const edgeTooltip = buildEdgeTooltipPayload(edgeRecord, nodesById, groupById, simplifiedGraph.metadata?.language || "");
+    const setEdgeHover = (active) => {
+      path.setAttribute("stroke", color + (active ? "88" : "33"));
+      arrowHead.setAttribute("stroke", color + (active ? "88" : "33"));
+      path.setAttribute("stroke-width", active ? "1.8" : "1.4");
+      arrowHead.setAttribute("stroke-width", active ? "1.8" : "1.4");
+      if (labelEl) labelEl.setAttribute("fill", color + (active ? "dd" : "88"));
+    };
+    hitPath.addEventListener("mouseenter", (event) => {
+      setEdgeHover(true);
+      ctx.showTooltip(event, edgeTooltip);
     });
+    hitPath.addEventListener("mousemove", (event) => ctx.moveTooltip(event));
+    hitPath.addEventListener("mouseleave", () => {
+      setEdgeHover(false);
+      ctx.hideTooltip();
+    });
+    edgeRecords.push(edgeRecord);
   }
   assignFlowEdgeSpread(edgeRecords);
 
@@ -451,7 +645,7 @@ export function renderFlowchart(graph, ctx) {
       if (!state) return;
       state.circleCollapsed = false;
     });
-    if (!treeView) resolveFlowNodeSeparation(new Set(), new Set(nodes.map((node) => node.id)));
+    if (freeformView) resolveFlowNodeSeparation(new Set(), new Set(nodes.map((node) => node.id)));
     persistLayout();
     ctx.requestRender?.();
   };
@@ -642,6 +836,7 @@ export function renderFlowchart(graph, ctx) {
         nodeGroupChains,
         groupById,
         groupDepth,
+        nodeMetaById,
         isNodeCircleCollapsed,
         visibility,
         groupState,
@@ -658,7 +853,7 @@ export function renderFlowchart(graph, ctx) {
         nextRect.w = isNodeCircleCollapsed(id) ? NODE_CIRCLE_D : NODE_W;
         nextRect.h = isNodeCircleCollapsed(id) ? NODE_CIRCLE_D : (prepared.get(id)?.h || NODE_MIN_H);
       }
-    } else {
+    } else if (freeformView) {
       resolveFlowNodeSeparation(new Set([nodeId]), visibility.visibleNodeIds);
     }
     persistLayout();
@@ -674,7 +869,7 @@ export function renderFlowchart(graph, ctx) {
   }
 
   function resolveFlowNodeSeparation(fixedIds = new Set(), activeNodeIds = visibility.visibleNodeIds) {
-    if (treeView) return;
+    if (!freeformView) return;
     const ids = Array.from(activeNodeIds || []).filter((nodeId) => nodeRectAll.has(nodeId));
     if (ids.length < 2) return;
     for (let pass = 0; pass < 4; pass++) {
@@ -750,6 +945,7 @@ export function renderFlowchart(graph, ctx) {
         nodeGroupChains,
         groupById,
         groupDepth,
+        nodeMetaById,
         isNodeCircleCollapsed,
         visibility,
         groupState,
@@ -764,10 +960,25 @@ export function renderFlowchart(graph, ctx) {
         rect.x = pos.x;
         rect.y = pos.y;
       }
-    } else {
+    } else if (freeformView) {
       resolveFlowNodeSeparation(fixedIds, activeNodeIds);
     }
     collapsedGroupRects = computeCollapsedGroupRects(visibility.visibleCollapsedGroupIds, groupById, groupState, nodeRectAll);
+    // Re-apply loop body chip positioning after recalc (same as initial render pass)
+    for (const groupId of visibility.visibleCollapsedGroupIds) {
+      const group = groupById.get(groupId);
+      if (!group || !isLoopGroupKind(group.kind)) continue;
+      const state = groupState.get(groupId);
+      if (state && typeof state.x === "number") continue;
+      const loopCondNode = nodes.find((n) =>
+        n.kind === "loop" &&
+        simplifiedGraph.edges.some((e) => e.from === n.id && group.nodeSet.has(e.to))
+      );
+      if (!loopCondNode) continue;
+      const loopRect = nodeRectAll.get(loopCondNode.id);
+      if (!loopRect) continue;
+      collapsedGroupRects.set(groupId, { x: loopRect.x + 90, y: loopRect.y, w: NODE_CIRCLE_D, h: NODE_CIRCLE_D });
+    }
     expandedGroupBounds = computeExpandedGroupBounds(
       visibility.visibleExpandedGroupIds,
       visibility.visibleNodeIds,
@@ -798,17 +1009,15 @@ export function renderFlowchart(graph, ctx) {
     for (const [groupId, elements] of collapsedGroupEls.entries()) {
       const rect = collapsedGroupRects.get(groupId);
       if (!rect) continue;
-      elements.box.setAttribute("x", String(rect.x));
-      elements.box.setAttribute("y", String(rect.y));
-      elements.box.setAttribute("width", String(rect.w));
-      elements.box.setAttribute("height", String(rect.h));
-      let index = 0;
-      Array.from(elements.wrapper.querySelectorAll("text")).forEach((textNode) => {
-        textNode.setAttribute("x", String(rect.x + 29));
-        textNode.setAttribute("y", String(rect.y + 18 + index * LINE_H));
-        textNode.setAttribute("text-anchor", "start");
-        index += 1;
-      });
+      // box is a <circle>: update cx/cy
+      const circleCx = rect.x + NODE_R;
+      const circleCy = rect.y + NODE_R;
+      elements.box.setAttribute("cx", String(circleCx));
+      elements.box.setAttribute("cy", String(circleCy));
+      // Update text positions
+      const texts = Array.from(elements.wrapper.querySelectorAll("text"));
+      if (texts[0]) { texts[0].setAttribute("x", String(circleCx)); texts[0].setAttribute("y", String(circleCy - 1.5)); }
+      if (texts[1]) { texts[1].setAttribute("x", String(circleCx)); texts[1].setAttribute("y", String(circleCy + 6.6)); }
       positionGroupToggle(elements.toggle, rect, { headerChip: false });
     }
     edgeRecords.forEach((edge) => updateEdgeGeometry(edge));
@@ -833,6 +1042,15 @@ export function renderFlowchart(graph, ctx) {
       }
     }
     state.collapsed = !state.collapsed;
+    if (expanding) {
+      // Reopen just this group. Keep nested groups collapsed so the user can
+      // drill down one level at a time and preserve hierarchy.
+      for (const descendantId of groupDescendants.get(groupId) || []) {
+        const descendantState = groupState.get(descendantId);
+        if (!descendantState) continue;
+        descendantState.collapsed = true;
+      }
+    }
     if (treeView && expanding) {
       for (const nodeId of group.nodeIds) {
         const nodeEntry = nodeState.get(nodeId);
@@ -842,7 +1060,7 @@ export function renderFlowchart(graph, ctx) {
       }
       state.treeDx = 0;
       state.treeDy = 0;
-    } else if (!treeView && expanding) {
+    } else if (freeformView && expanding) {
       const nextVisibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
       resolveFlowNodeSeparation(new Set(group?.nodeIds || []), nextVisibility.visibleNodeIds);
     }
@@ -860,6 +1078,24 @@ export function renderFlowchart(graph, ctx) {
     const toRect = endpointRect(edge.tgt);
     if (!fromRect || !toRect) return;
     const route = computeEdgeRoute(edge, fromRect, toRect, edge.fromKind, edge.toKind, loopLaneRanks);
+
+    const geom = routeGeometry(route);
+    const d = geom.d;
+    const end = geom.end;
+    const angle = geom.angle;
+
+    const ah = 6.3;
+    const aw = 3.3;
+    const back = 0.6;
+    const tipX = end.x;
+    const tipY = end.y;
+    const baseX = tipX - (ah + back) * Math.cos(angle);
+    const baseY = tipY - (ah + back) * Math.sin(angle);
+    const ax1 = baseX + aw * Math.sin(angle);
+    const ay1 = baseY - aw * Math.cos(angle);
+    const ax2 = baseX - aw * Math.sin(angle);
+    const ay2 = baseY + aw * Math.cos(angle);
+    
     edge.sx = route.sx;
     edge.sy = route.sy;
     edge.tx = route.tx;
@@ -868,15 +1104,17 @@ export function renderFlowchart(graph, ctx) {
     edge.c1y = route.c1y;
     edge.c2x = route.c2x;
     edge.c2y = route.c2y;
-    edge.labelT = route.labelT;
-    edge.labelDx = route.labelDx;
-    edge.labelDy = route.labelDy;
-    edge.el.setAttribute("d", route.d);
-    edge.el.setAttribute("marker-end", `url(#a-${edge.fromKind || "default"})`);
+    edge.labelT = route.labelT ?? 0.5;
+    edge.labelDx = route.labelDx ?? 0;
+    edge.labelDy = route.labelDy ?? -6;
+
+    edge.el.setAttribute("d", d);
+    edge.arrowHeadEl.setAttribute("d", `M ${ax1} ${ay1} L ${tipX} ${tipY} L ${ax2} ${ay2}`);
+    if (edge.hitEl) edge.hitEl.setAttribute("d", d);
     if (edge.labelEl) {
-      const mid = cubicPt(route.sx, route.sy, route.c1x, route.c1y, route.c2x, route.c2y, route.tx, route.ty, route.labelT || 0.35);
-      edge.labelEl.setAttribute("x", String(mid.x + (route.labelDx || 6)));
-      edge.labelEl.setAttribute("y", String(mid.y + (route.labelDy || -4)));
+      const mid = pointOnRoute(route, edge.labelT);
+      edge.labelEl.setAttribute("x", String(mid.x + edge.labelDx));
+      edge.labelEl.setAttribute("y", String(mid.y + edge.labelDy));
     }
   }
 
@@ -917,102 +1155,40 @@ function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil, 
   group.dataset.id = node.id;
   group.style.cursor = "pointer";
 
-  let shape;
-  if (collapsedNode) {
-    shape = document.createElementNS(NS, "circle");
-    shape.setAttribute("cx", String(rect.w / 2));
-    shape.setAttribute("cy", String(rect.h / 2));
-    shape.setAttribute("r", String(Math.min(rect.w, rect.h) / 2 - 1.5));
-    shape.setAttribute("fill", color + "14");
-    shape.setAttribute("stroke", color + "68");
-  } else if (node.kind === "decision") {
-    shape = document.createElementNS(NS, "polygon");
-    shape.setAttribute("points", `${rect.w / 2},0 ${rect.w},${rect.h / 2} ${rect.w / 2},${rect.h} 0,${rect.h / 2}`);
-    shape.setAttribute("fill", color + "12");
-    shape.setAttribute("stroke", color + "55");
-  } else if (node.kind === "loop") {
-    shape = document.createElementNS(NS, "polygon");
-    shape.setAttribute("points", `18,0 ${rect.w - 18},0 ${rect.w},${rect.h / 2} ${rect.w - 18},${rect.h} 18,${rect.h} 0,${rect.h / 2}`);
-    shape.setAttribute("fill", color + "14");
-    shape.setAttribute("stroke", color + "65");
-  } else if (node.kind === "break") {
-    shape = document.createElementNS(NS, "polygon");
-    shape.setAttribute("points", `0,0 ${rect.w - 24},0 ${rect.w},${rect.h / 2} ${rect.w - 24},${rect.h} 0,${rect.h}`);
-    shape.setAttribute("fill", color + "16");
-    shape.setAttribute("stroke", color + "70");
-  } else if (node.kind === "continue") {
-    shape = document.createElementNS(NS, "polygon");
-    shape.setAttribute("points", `20,0 ${rect.w},0 ${rect.w - 20},${rect.h / 2} ${rect.w},${rect.h} 20,${rect.h} 0,${rect.h / 2}`);
-    shape.setAttribute("fill", color + "16");
-    shape.setAttribute("stroke", color + "70");
-  } else if (node.kind === "loop_else") {
-    shape = document.createElementNS(NS, "rect");
-    shape.setAttribute("width", String(rect.w));
-    shape.setAttribute("height", String(rect.h));
-    shape.setAttribute("rx", "10");
-    shape.setAttribute("ry", "10");
-    shape.setAttribute("fill", color + "12");
-    shape.setAttribute("stroke", color + "65");
-    shape.setAttribute("stroke-dasharray", "6 4");
-  } else if (node.kind === "entry" || node.kind === "return") {
-    shape = document.createElementNS(NS, "rect");
-    shape.setAttribute("width", String(rect.w));
-    shape.setAttribute("height", String(rect.h));
-    shape.setAttribute("rx", "16");
-    shape.setAttribute("ry", "16");
-    shape.setAttribute("fill", color + "1c");
-    shape.setAttribute("stroke", color + "55");
-  } else {
-    shape = document.createElementNS(NS, "rect");
-    shape.setAttribute("width", String(rect.w));
-    shape.setAttribute("height", String(rect.h));
-    shape.setAttribute("rx", "5");
-    shape.setAttribute("ry", "5");
-    shape.setAttribute("fill", color + "10");
-    shape.setAttribute("stroke", color + "35");
-  }
-  shape.setAttribute("stroke-width", "1.2");
+  let { top: t, bottom: b } = nodeChipText(node);
+
+  const cx = 16;
+  const cy = 16;
+
+  const shape = document.createElementNS(NS, "circle");
+  shape.setAttribute("cx", String(cx));
+  shape.setAttribute("cy", String(cy));
+  shape.setAttribute("r", "16");
+  shape.setAttribute("fill", color + "1b");
+  shape.setAttribute("stroke", color + "86");
+  shape.setAttribute("stroke-width", "1.4");
   group.appendChild(shape);
 
-  if (collapsedNode) {
-    const monogram = document.createElementNS(NS, "text");
-    monogram.setAttribute("x", String(rect.w / 2));
-    monogram.setAttribute("y", String(rect.h / 2 + 4));
-    monogram.setAttribute("text-anchor", "middle");
-    monogram.setAttribute("fill", color + "e8");
-    monogram.setAttribute("font-size", "12");
-    monogram.setAttribute("font-weight", "700");
-    monogram.textContent = flowNodeMonogram(node, preparedNode);
-    group.appendChild(monogram);
-    const toggle = makeFlowNodeCircleToggle(group, color, true, onToggleCircle);
-    positionFlowNodeCircleToggle(toggle, rect, true);
-  } else {
-    const totalLineCount = preparedNode.lines.length + (preparedNode.typeLine ? 1 : 0);
-    const totalHeight = totalLineCount * LINE_H;
-    preparedNode.lines.forEach((line, index) => {
-      const text = document.createElementNS(NS, "text");
-      text.setAttribute("x", String(rect.w / 2));
-      text.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + index * LINE_H + 9));
-      text.setAttribute("text-anchor", "middle");
-      text.setAttribute("fill", color + "dd");
-      text.setAttribute("font-size", "10");
-      text.textContent = line;
-      group.appendChild(text);
-    });
-    if (preparedNode.typeLine) {
-      const typeText = document.createElementNS(NS, "text");
-      typeText.setAttribute("x", String(rect.w / 2));
-      typeText.setAttribute("y", String(rect.h / 2 - totalHeight / 2 + preparedNode.lines.length * LINE_H + 9));
-      typeText.setAttribute("text-anchor", "middle");
-      typeText.setAttribute("fill", color + "88");
-      typeText.setAttribute("font-size", "8");
-      typeText.setAttribute("font-style", "italic");
-      typeText.textContent = preparedNode.typeLine;
-      group.appendChild(typeText);
-    }
-    const toggle = makeFlowNodeCircleToggle(group, color, false, onToggleCircle);
-    positionFlowNodeCircleToggle(toggle, rect, false);
-  }
+  const topT = document.createElementNS(NS, "text");
+  topT.setAttribute("x", String(cx));
+  topT.setAttribute("y", String(cy - 1.5));
+  topT.setAttribute("text-anchor", "middle");
+  topT.setAttribute("fill", color + "dd");
+  topT.setAttribute("font-size", "6.1");
+  topT.style.fontFamily = "serif";
+  topT.textContent = t;
+  group.appendChild(topT);
+
+  const botT = document.createElementNS(NS, "text");
+  botT.setAttribute("x", String(cx));
+  botT.setAttribute("y", String(cy + 6.6));
+  botT.setAttribute("text-anchor", "middle");
+  botT.setAttribute("fill", color + "88");
+  botT.setAttribute("font-size", "5.4");
+  botT.style.fontFamily = "serif";
+  botT.style.letterSpacing = "0.2px";
+  botT.textContent = b;
+  group.appendChild(botT);
 
   group.addEventListener("mouseenter", (event) => ctx.showTooltip(event, node));
   group.addEventListener("mousemove", (event) => ctx.moveTooltip(event));
@@ -1034,6 +1210,234 @@ function renderNode(node, rect, preparedNode, ctx, nodeLayer, getSuppressUntil, 
 
   nodeLayer.appendChild(group);
   return group;
+}
+
+function simplifyAlphabetFlowGraph(graph) {
+  const originalNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const originalEdges = Array.isArray(graph?.edges) ? graph.edges : [];
+  const groups = Array.isArray(graph?.metadata?.groups) ? graph.metadata.groups : [];
+  const removedNodeIds = new Set();
+  let edges = originalEdges.map((edge) => ({ ...edge }));
+
+  const shouldContractNode = (node) => {
+    if (!node) return false;
+    if (node.metadata?.boundaryProxy) return false;
+    if (node.kind === "loop_else") return true;
+    if (node.kind !== "process") return false;
+    const label = String(node.label || "").trim().toLowerCase();
+    return label === "•" || label === "after loop";
+  };
+
+  const buildAdjacency = () => {
+    const incoming = new Map();
+    const outgoing = new Map();
+    originalNodes.forEach((node) => {
+      incoming.set(node.id, []);
+      outgoing.set(node.id, []);
+    });
+    edges.forEach((edge) => {
+      if (!incoming.has(edge.to)) incoming.set(edge.to, []);
+      if (!outgoing.has(edge.from)) outgoing.set(edge.from, []);
+      incoming.get(edge.to).push(edge);
+      outgoing.get(edge.from).push(edge);
+    });
+    return { incoming, outgoing };
+  };
+
+  const combineLabels = (incomingLabel, outgoingLabel) => {
+    const inLabel = String(incomingLabel || "").trim();
+    const outLabel = String(outgoingLabel || "").trim();
+    const inLower = inLabel.toLowerCase();
+    const outLower = outLabel.toLowerCase();
+    if (outLower === "repeat") return "repeat";
+    if (outLower === "continue") return "continue";
+    if (!outLabel && inLower === "repeat") return "repeat";
+    if (!outLabel && inLower === "continue") return "continue";
+    if (inLabel && outLabel) return `${inLabel}/${outLabel}`;
+    return inLabel || outLabel || "";
+  };
+
+  const nodeKindMap = new Map(originalNodes.map((n) => [n.id, n.kind]));
+
+  const normalizeAlphabetLoopEdge = (edge) => {
+    const targetKind = nodeKindMap.get(edge.to);
+    const label = String(edge.label || "").trim();
+    const lower = label.toLowerCase();
+    if (targetKind === "loop") {
+      if (lower === "continue" || lower.endsWith("/continue")) return { ...edge, label: "continue" };
+      if (lower === "repeat" || lower.endsWith("/repeat")) return { ...edge, label: "repeat" };
+    }
+    return edge;
+  };
+
+  originalNodes.forEach((node) => {
+    if (!shouldContractNode(node)) return;
+    const { incoming, outgoing } = buildAdjacency();
+    const inEdges = incoming.get(node.id) || [];
+    const outEdges = outgoing.get(node.id) || [];
+    const label = String(node.label || "").trim().toLowerCase();
+    if (label === "after loop" && inEdges.length && !outEdges.length) {
+      edges = edges.filter((edge) => edge.from !== node.id && edge.to !== node.id);
+      removedNodeIds.add(node.id);
+      return;
+    }
+    if (!inEdges.length || !outEdges.length) return;
+
+    const rewired = [];
+    inEdges.forEach((inEdge) => {
+      outEdges.forEach((outEdge) => {
+        if (inEdge.from === outEdge.to) return;
+        rewired.push({
+          id: `e_${inEdge.from}_${outEdge.to}_${edges.length + rewired.length}`,
+          from: inEdge.from,
+          to: outEdge.to,
+          kind: inEdge.kind || outEdge.kind || "control_flow",
+          label: combineLabels(inEdge.label, outEdge.label),
+        });
+      });
+    });
+
+    edges = edges.filter((edge) => edge.from !== node.id && edge.to !== node.id);
+    edges.push(...rewired);
+    removedNodeIds.add(node.id);
+  });
+
+  const dedupedEdges = [];
+  const seen = new Set();
+  edges.forEach((edge) => {
+    if (removedNodeIds.has(edge.from) || removedNodeIds.has(edge.to)) return;
+    const normalizedEdge = normalizeAlphabetLoopEdge(edge);
+    const key = `${normalizedEdge.from}->${normalizedEdge.to}::${normalizedEdge.label || ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    dedupedEdges.push(normalizedEdge);
+  });
+
+  const nodes = originalNodes.filter((node) => !removedNodeIds.has(node.id));
+  const baseGroups = groups
+    .map((group) => ({
+      ...group,
+      nodeIds: (group.nodeIds || []).filter((nodeId) => !removedNodeIds.has(nodeId)),
+    }))
+    .filter((group) => group.nodeIds.length > 0);
+
+  // Strip the loop-condition header node from its own loop group so it remains
+  // visible at the parent scope when the loop group is collapsed. The header is
+  // identified as the loop-kind node with at least one incoming edge from outside
+  // the group (i.e. it is the entry point, not a nested inner loop inside).
+  // Also promote one concrete body-entry node so the alphabet view keeps an
+  // explicit loop cycle: header -> body statement -> repeat/continue -> header.
+  const incomingEdgeMap = new Map(nodes.map((n) => [n.id, []]));
+  const outgoingEdgeMap = new Map(nodes.map((n) => [n.id, []]));
+  dedupedEdges.forEach((e) => { if (incomingEdgeMap.has(e.to)) incomingEdgeMap.get(e.to).push(e.from); });
+  dedupedEdges.forEach((e) => { if (outgoingEdgeMap.has(e.from)) outgoingEdgeMap.get(e.from).push(e); });
+  const mutableGroups = new Map(baseGroups.map((group) => [group.id, { ...group, nodeIds: [...group.nodeIds] }]));
+  const representativeLoopEdges = [];
+
+  function removePromotedNodes(groupId, promotedNodeIds) {
+    let currentId = groupId;
+    while (currentId) {
+      const currentGroup = mutableGroups.get(currentId);
+      if (!currentGroup) break;
+      currentGroup.nodeIds = currentGroup.nodeIds.filter((id) => !promotedNodeIds.has(id));
+      const parentId = currentGroup.parentGroupId || null;
+      if (!parentId) break;
+      const parentGroup = mutableGroups.get(parentId);
+      if (!parentGroup || isLoopGroupKind(parentGroup.kind)) break;
+      currentId = parentId;
+    }
+  }
+
+  baseGroups.forEach((group) => {
+      if (!isLoopGroupKind(group.kind)) return;
+      const mutableGroup = mutableGroups.get(group.id);
+      if (!mutableGroup) return;
+      const nodeSet = new Set(mutableGroup.nodeIds);
+      const headerIds = new Set(
+        mutableGroup.nodeIds.filter((id) => {
+          if (nodeKindMap.get(id) !== "loop") return false;
+          return (incomingEdgeMap.get(id) || []).some((fromId) => !nodeSet.has(fromId));
+        }),
+      );
+      const bodyEntryIds = new Set(
+        mutableGroup.nodeIds.filter((id) => {
+          if (headerIds.has(id)) return false;
+          const kind = nodeKindMap.get(id);
+          if (kind === "break" || kind === "continue" || kind === "return") return false;
+          return (incomingEdgeMap.get(id) || []).some((fromId) => headerIds.has(fromId));
+        }),
+      );
+      let promotedBodyId = null;
+      if (bodyEntryIds.size) {
+        promotedBodyId = mutableGroup.nodeIds.find((id) => bodyEntryIds.has(id)) || null;
+        if (promotedBodyId) {
+          const preferred = mutableGroup.nodeIds.find((id) => {
+            if (!bodyEntryIds.has(id)) return false;
+            const outgoing = outgoingEdgeMap.get(id) || [];
+            return outgoing.some((edge) => edge.to !== id && headerIds.has(edge.to) && (edge.label === "repeat" || edge.label === "continue"));
+          });
+          if (preferred) promotedBodyId = preferred;
+        }
+      }
+      if (!headerIds.size && !promotedBodyId) return group;
+      const headerId = headerIds.size ? Array.from(headerIds)[0] : null;
+      if (headerId && promotedBodyId) {
+        const existingDirectLoopBack = dedupedEdges.some(
+          (edge) =>
+            edge.from === promotedBodyId &&
+            edge.to === headerId &&
+            (edge.label === "repeat" || edge.label === "continue"),
+        );
+        if (!existingDirectLoopBack) {
+          const hiddenLoopBack = dedupedEdges.find(
+            (edge) =>
+              edge.to === headerId &&
+              edge.from !== promotedBodyId &&
+              nodeSet.has(edge.from) &&
+              (edge.label === "repeat" || edge.label === "continue"),
+          );
+          if (hiddenLoopBack) {
+            const loopBackLabel = String(hiddenLoopBack.label || "").trim().toLowerCase() === "continue"
+              ? "continue"
+              : "repeat";
+            representativeLoopEdges.push({
+              ...hiddenLoopBack,
+              id: `rep_${promotedBodyId}_${headerId}_${loopBackLabel}`,
+              from: promotedBodyId,
+              to: headerId,
+              label: loopBackLabel,
+              synthetic: true,
+            });
+          }
+        }
+      }
+      const promotedNodeIds = new Set(headerIds);
+      if (promotedBodyId) promotedNodeIds.add(promotedBodyId);
+      removePromotedNodes(group.id, promotedNodeIds);
+    });
+
+  const visibleEdges = dedupedEdges.slice();
+  const visibleEdgeKeys = new Set(visibleEdges.map((edge) => `${edge.from}->${edge.to}::${edge.label || ""}`));
+  representativeLoopEdges.forEach((edge) => {
+    const key = `${edge.from}->${edge.to}::${edge.label || ""}`;
+    if (visibleEdgeKeys.has(key)) return;
+    visibleEdgeKeys.add(key);
+    visibleEdges.push(edge);
+  });
+
+  const nextGroups = Array.from(mutableGroups.values())
+    .map((group) => ({ ...group, nodeSet: new Set(group.nodeIds) }))
+    .filter((group) => group.nodeIds.length > 0);
+
+  return {
+    ...graph,
+    nodes,
+    edges: visibleEdges,
+    metadata: {
+      ...(graph.metadata || {}),
+      groups: nextGroups,
+    },
+  };
 }
 
 function normalizeGroups(rawGroups) {
@@ -1109,8 +1513,14 @@ function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState
   const visibleCollapsedGroupIds = [];
   const visibleExpandedGroupIds = [];
   for (const group of groups) {
-    const nearestCollapsedAncestor = nearestCollapsedGroup(group.id, groupById, groupState);
-    if (nearestCollapsedAncestor && nearestCollapsedAncestor !== group.id) continue;
+    // Skip this group if any ancestor group is currently collapsed – it is hidden inside that chip
+    let hasCollapsedAncestor = false;
+    let parentId = group.parentGroupId;
+    while (parentId) {
+      if (groupState.get(parentId)?.collapsed) { hasCollapsedAncestor = true; break; }
+      parentId = groupById.get(parentId)?.parentGroupId ?? null;
+    }
+    if (hasCollapsedAncestor) continue;
     if (groupState.get(group.id)?.collapsed) visibleCollapsedGroupIds.push(group.id);
     else visibleExpandedGroupIds.push(group.id);
   }
@@ -1132,11 +1542,13 @@ function nearestCollapsedGroup(groupId, groupById, groupState) {
 }
 
 function resolveVisibleEndpoint(nodeId, nodeGroupChains, groupState) {
+  // chain is sorted deepest-first; we want the outermost (shallowest) collapsed ancestor
   const chain = nodeGroupChains.get(nodeId) || [];
+  let outermost = null;
   for (const groupId of chain) {
-    if (groupState.get(groupId)?.collapsed) return groupKey(groupId);
+    if (groupState.get(groupId)?.collapsed) outermost = groupKey(groupId);
   }
-  return nodeId;
+  return outermost || nodeId;
 }
 
 function computeCollapsedGroupRects(groupIds, groupById, groupState, nodeRectAll) {
@@ -1207,17 +1619,72 @@ function endpointKind(endpointId, nodesById, groupById) {
     if (!group) return "process";
     if (group.kind === "branch") return "decision";
     if (group.kind === "function_body") return "compute";
-    if (group.kind === "loop") return "loop";
+    if (isLoopGroupKind(group.kind)) return "loop";
     return "process";
   }
   return nodesById.get(endpointId)?.kind || "process";
 }
 
+function isLoopGroupKind(kind) {
+  return kind === "loop" || kind === "loop_body";
+}
+
 function groupColor(kind) {
   if (kind === "branch") return theme.nodeColor.decision;
-  if (kind === "loop") return theme.nodeColor.loop;
+  if (isLoopGroupKind(kind)) return theme.nodeColor.loop;
   if (kind === "function_body") return theme.nodeColor.compute;
   return theme.accent;
+}
+
+function groupChipText(group) {
+  const label = String(group.label || "").toLowerCase();
+  if (isLoopGroupKind(group.kind)) return { top: "for", bottom: "body" };
+  if (group.kind === "branch") {
+    if (label.startsWith("then:")) return { top: "then", bottom: "block" };
+    if (label.startsWith("else:")) return { top: "else", bottom: "block" };
+    return { top: "if", bottom: "block" };
+  }
+  if (group.kind === "function_body") return { top: "fn", bottom: "body" };
+  return { top: "S", bottom: "body" };
+}
+
+function nodeChipText(node) {
+  const primary = primaryNodeLine(node);
+  if (node.kind === "entry") return { top: "fn", bottom: abbreviateChipText(primary || "enter") };
+  if (node.kind === "return") return { top: "ret", bottom: abbreviateChipText(primary.replace(/^return\s+/i, "") || "value") };
+  if (node.kind === "decision") return { top: "if", bottom: abbreviateChipText(primary.replace(/^if\s+/i, "").replace(/\?$/, "") || "cond") };
+  if (node.kind === "loop") {
+    if (/^for each\s+/i.test(primary)) {
+      const tail = primary.replace(/^for each\s+/i, "");
+      const target = tail.split(/\s+in\s+/i)[0] || "iter";
+      return { top: "for", bottom: abbreviateChipText(target) };
+    }
+    return { top: "loop", bottom: abbreviateChipText(primary.replace(/^while\s+/i, "") || "cond") };
+  }
+  if (node.kind === "break") return { top: "break", bottom: "exit" };
+  if (node.kind === "continue") return { top: "cont", bottom: "next" };
+  if (node.kind === "error") return { top: "exc", bottom: abbreviateChipText(primary.replace(/^raise\s+/i, "") || "throw") };
+  return { top: "S", bottom: abbreviateChipText(primary || "stmt") };
+}
+
+function primaryNodeLine(node) {
+  const displayLines = Array.isArray(node?.metadata?.displayLines)
+    ? node.metadata.displayLines.map((line) => String(line || "").trim()).filter(Boolean)
+    : [];
+  if (displayLines.length) return displayLines[0];
+  return String(node?.label || "").split("\n").map((line) => line.trim()).find(Boolean) || "";
+}
+
+function abbreviateChipText(text) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source) return "stmt";
+  const cleaned = source
+    .replace(/^for each\s+/i, "")
+    .replace(/^implicit\s+/i, "")
+    .replace(/^loop\s+/i, "")
+    .replace(/^total\s*=\s*/i, "total=")
+    .replace(/^matches\s*=\s*/i, "matches=");
+  return cleaned.length > 12 ? `${cleaned.slice(0, 11)}.` : cleaned;
 }
 
 function summarizeGroup(group) {
@@ -1269,96 +1736,224 @@ function buildLoopLaneRanks(nodes, positions, visibleNodeIds, groupDepth) {
 }
 
 function computeEdgeRoute(edge, fromRect, toRect, fromKind, toKind, loopLaneRanks) {
-  if (edge.src?.startsWith("group:") || edge.tgt?.startsWith("group:")) {
-    return makeDefaultRoute(edge, fromRect, toRect);
-  }
   const label = String(edge.label || "").toLowerCase();
-  if ((label === "repeat" || label === "continue") && toKind === "loop") {
-    return makeLoopBackRoute(edge, fromRect, toRect, label === "continue", loopLaneRanks);
-  }
-  if (fromKind === "loop" && (label === "done" || toKind === "loop_else")) {
-    return makeLoopExitRoute(edge, fromRect, toRect, toKind === "loop_else", loopLaneRanks);
-  }
+
+  if (label === "repeat" && toKind === "loop") return makeRepeatLoopBackRoute(edge, fromRect, toRect, loopLaneRanks);
+  if (label === "continue" && toKind === "loop") return makeContinueLoopBackRoute(edge, fromRect, toRect, loopLaneRanks);
   if (fromKind === "loop") {
-    return makeLoopForwardRoute(fromRect, toRect, label);
+    if (label === "done" || label === "else" || toKind === "loop_else") return makeLoopExitRoute(edge, fromRect, toRect, toKind === "loop_else", loopLaneRanks);
+    return makeLoopBodyRoute(fromRect, toRect, label);
   }
+
+  if (fromKind === "decision") return makeDecisionBranchRoute(fromRect, toRect, label);
+
   return makeDefaultRoute(edge, fromRect, toRect);
 }
 
 function makeDefaultRoute(edge, fromRect, toRect) {
-  const sourceLane = (edge.sourceLaneOffset || 0) + (edge.bundleLaneOffset || 0);
-  const targetLane = (edge.targetLaneOffset || 0) - (edge.bundleLaneOffset || 0);
-  const sourceAnchor = pickAnchor(fromRect, toRect, sourceLane);
-  const targetAnchor = pickAnchor(toRect, fromRect, targetLane);
-  const bend = Math.max(24, Math.min(120, Math.hypot(targetAnchor.x - sourceAnchor.x, targetAnchor.y - sourceAnchor.y) * 0.35));
-  const sx = sourceAnchor.x;
-  const sy = sourceAnchor.y;
-  const tx = targetAnchor.x;
-  const ty = targetAnchor.y;
-  const c1x = sx + sourceAnchor.dx * bend;
-  const c1y = sy + sourceAnchor.dy * bend;
-  const c2x = tx + targetAnchor.dx * bend;
-  const c2y = ty + targetAnchor.dy * bend;
-  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: 0.35, labelDx: 6, labelDy: -4 };
+  const fromCx = fromRect.x + fromRect.w / 2;
+  const fromCy = fromRect.y + fromRect.h / 2;
+  const toCx = toRect.x + toRect.w / 2;
+  const toCy = toRect.y + toRect.h / 2;
+  const start = circleAnchorToward(fromRect, toCx, toCy);
+  const end = circleAnchorToward(toRect, fromCx, fromCy);
+
+  return buildLineRoute(start, end, { labelT: 0.5, labelDx: 8, labelDy: -6 });
 }
 
-function makeLoopForwardRoute(fromRect, toRect, label) {
-  const sx = fromRect.x + fromRect.w / 2;
-  const sy = fromRect.y + fromRect.h;
-  const tx = toRect.x + toRect.w / 2;
-  const ty = toRect.y;
-  const spread = Math.max(18, Math.min(64, Math.abs(tx - sx) * 0.25));
-  const c1x = sx;
-  const c1y = sy + 42;
-  const c2x = tx + Math.sign(tx - sx || 1) * spread;
-  const c2y = ty - 34;
-  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: label === "done" ? 0.45 : 0.42, labelDx: 8, labelDy: -6 };
+function makeLoopBodyRoute(fromRect, toRect, label) {
+  const toRight = toRect.x + toRect.w / 2 >= fromRect.x + fromRect.w / 2;
+  const start = anchorOnRect(fromRect, toRight ? "right" : "left", 0.52);
+  const end = anchorOnRect(toRect, toRight ? "left" : "right", 0.52);
+  const control = {
+    x: (start.x + end.x) / 2,
+    y: Math.min(start.y, end.y) - Math.max(46, Math.abs(end.x - start.x) * 0.42),
+  };
+  return buildQuadraticRoute(start, control, end, { labelT: 0.42, labelDx: 10, labelDy: -8 });
 }
 
-function makeLoopBackRoute(edge, fromRect, toRect, isContinue, loopLaneRanks) {
+function makeDecisionBranchRoute(fromRect, toRect, label) {
+  const fromCx = fromRect.x + fromRect.w / 2;
+  const toCx = toRect.x + toRect.w / 2;
+  const positive = /^(yes|true|ok|then|body|do)$/i.test(label);
+  const negative = /^(no|false|else|done|exit)$/i.test(label);
+  const branchRight = positive ? true : negative ? false : toCx >= fromCx;
+  const targetBelow = toRect.y >= fromRect.y;
+  if (targetBelow && Math.abs(toCx - fromCx) < fromRect.w * 0.45) {
+    const start = anchorOnRect(fromRect, branchRight ? "bottom" : "bottom", branchRight ? 0.74 : 0.26);
+    const end = anchorOnRect(toRect, "top", 0.5);
+    const control = {
+      x: branchRight ? Math.min(start.x, end.x) - 54 : Math.max(start.x, end.x) + 54,
+      y: (start.y + end.y) / 2,
+    };
+    return buildQuadraticRoute(start, control, end, {
+      labelT: branchRight ? 0.42 : 0.48,
+      labelDx: branchRight ? -16 : 14,
+      labelDy: -6,
+    });
+  }
+
+  const start = anchorOnRect(fromRect, branchRight ? "right" : "left", 0.62);
+  const end = targetBelow
+    ? anchorOnRect(toRect, "top", branchRight ? 0.28 : 0.72)
+    : anchorOnRect(toRect, branchRight ? "left" : "right", 0.52);
+  return buildLineRoute(start, end, {
+    labelT: branchRight ? 0.42 : 0.46,
+    labelDx: branchRight ? 10 : -14,
+    labelDy: -6,
+  });
+}
+
+function makeRepeatLoopBackRoute(edge, fromRect, toRect, loopLaneRanks) {
   const loopId = edge.tgt.replace(/^group:/, "");
   const loopRank = loopLaneRanks.get(loopId) || 0;
-  const sx = fromRect.x;
-  const sy = fromRect.y + fromRect.h / 2;
-  const tx = toRect.x + toRect.w * 0.22;
-  const ty = toRect.y + toRect.h * 0.22;
-  const laneX = Math.min(fromRect.x, toRect.x) - (isContinue ? 58 : 74) - loopRank * 26;
-  const topY = Math.min(fromRect.y, toRect.y) - (isContinue ? 16 : 26) - Math.min(24, loopRank * 7);
-  const c1x = laneX;
-  const c1y = sy;
-  const c2x = laneX;
-  const c2y = topY;
-  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: 0.48, labelDx: -26, labelDy: -8 };
+  const start = anchorOnRect(fromRect, "right", 0.5);
+  const end = anchorOnRect(toRect, "left", 0.5);
+  const control = {
+    x: (start.x + end.x) / 2,
+    y: Math.max(start.y, end.y) + 54 + loopRank * 10,
+  };
+  return buildQuadraticRoute(start, control, end, { labelT: 0.58, labelDx: 14, labelDy: -8 });
+}
+
+function makeContinueLoopBackRoute(edge, fromRect, toRect, loopLaneRanks) {
+  const loopId = edge.tgt.replace(/^group:/, "");
+  const loopRank = loopLaneRanks.get(loopId) || 0;
+  const start = anchorOnRect(fromRect, "right", 0.5);
+  const end = anchorOnRect(toRect, "left", 0.5);
+  const control = {
+    x: (start.x + end.x) / 2,
+    y: Math.max(start.y, end.y) + 34 + loopRank * 8,
+  };
+  return buildQuadraticRoute(start, control, end, { labelT: 0.54, labelDx: 12, labelDy: -8 });
 }
 
 function makeLoopExitRoute(edge, fromRect, toRect, isLoopElse, loopLaneRanks) {
   const loopId = edge.src.replace(/^group:/, "");
-  const loopRank = loopLaneRanks.get(loopId) || 0;
-  const sx = fromRect.x + fromRect.w;
-  const sy = fromRect.y + fromRect.h / 2;
-  const tx = isLoopElse ? toRect.x + toRect.w / 2 : toRect.x;
-  const ty = isLoopElse ? toRect.y : toRect.y + toRect.h / 2;
-  const laneX = Math.max(fromRect.x + fromRect.w, toRect.x + toRect.w) + (isLoopElse ? 26 : 42) + loopRank * 24;
-  const c1x = laneX;
-  const c1y = sy;
-  const c2x = laneX;
-  const c2y = ty - (isLoopElse ? 10 : 0);
-  return { sx, sy, c1x, c1y, c2x, c2y, tx, ty, d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`, labelT: 0.42, labelDx: 12, labelDy: -6 };
+  if (!isLoopElse && toRect.y > fromRect.y && Math.abs((toRect.x + toRect.w / 2) - (fromRect.x + fromRect.w / 2)) < fromRect.w * 0.45) {
+    const start = anchorOnRect(fromRect, "bottom", 0.5);
+    const end = anchorOnRect(toRect, "top", 0.5);
+    return buildLineRoute(start, end, { labelT: 0.5, labelDx: 10, labelDy: -6 });
+  }
+  const start = anchorOnRect(fromRect, "bottom", 0.62);
+  const end = isLoopElse ? anchorOnRect(toRect, "top", 0.5) : anchorOnRect(toRect, "left", 0.34);
+  const control = {
+    x: (start.x + end.x) / 2 + Math.max(24, Math.abs(end.x - start.x) * 0.12),
+    y: (start.y + end.y) / 2,
+  };
+  return buildQuadraticRoute(start, control, end, { labelT: 0.42, labelDx: 12, labelDy: -6 });
 }
 
-function pickAnchor(source, target, laneOffset = 0) {
-  const sourceCenterX = source.x + source.w / 2;
-  const sourceCenterY = source.y + source.h / 2;
-  const targetCenterX = target.x + target.w / 2;
-  const targetCenterY = target.y + target.h / 2;
-  const dx = targetCenterX - sourceCenterX;
-  const dy = targetCenterY - sourceCenterY;
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    if (dx >= 0) return { x: source.x + source.w, y: sourceCenterY + laneOffset, dx: 1, dy: 0 };
-    return { x: source.x, y: sourceCenterY + laneOffset, dx: -1, dy: 0 };
+function buildLineRoute(start, end, options = {}) {
+  const minHandle = outwardHandleDistance(start, end, 9, 26, 0.18);
+  const c1 = projectControlOutward(start, {
+    x: start.x + (end.x - start.x) / 3,
+    y: start.y + (end.y - start.y) / 3,
+  }, minHandle);
+  const c2 = projectControlOutward(end, {
+    x: start.x + ((end.x - start.x) * 2) / 3,
+    y: start.y + ((end.y - start.y) * 2) / 3,
+  }, minHandle);
+  return {
+    sx: start.x,
+    sy: start.y,
+    c1x: c1.x,
+    c1y: c1.y,
+    c2x: c2.x,
+    c2y: c2.y,
+    tx: end.x,
+    ty: end.y,
+    d: `M${start.x},${start.y} C${c1.x},${c1.y} ${c2.x},${c2.y} ${end.x},${end.y}`,
+    labelT: options.labelT ?? 0.5,
+    labelDx: options.labelDx ?? 6,
+    labelDy: options.labelDy ?? -4,
+  };
+}
+
+function buildQuadraticRoute(start, control, end, options = {}) {
+  const minHandle = outwardHandleDistance(start, end, 10, 30, 0.2);
+  const c1 = projectControlOutward(start, {
+    x: start.x + ((control.x - start.x) * 2) / 3,
+    y: start.y + ((control.y - start.y) * 2) / 3,
+  }, minHandle);
+  const c2 = projectControlOutward(end, {
+    x: end.x + ((control.x - end.x) * 2) / 3,
+    y: end.y + ((control.y - end.y) * 2) / 3,
+  }, minHandle);
+  return {
+    sx: start.x,
+    sy: start.y,
+    c1x: c1.x,
+    c1y: c1.y,
+    c2x: c2.x,
+    c2y: c2.y,
+    tx: end.x,
+    ty: end.y,
+    d: `M${start.x},${start.y} C${c1.x},${c1.y} ${c2.x},${c2.y} ${end.x},${end.y}`,
+    labelT: options.labelT ?? 0.45,
+    labelDx: options.labelDx ?? 6,
+    labelDy: options.labelDy ?? -4,
+  };
+}
+
+function buildAnchorRoute(sourceAnchor, targetAnchor, options = {}) {
+  const sx = sourceAnchor.x;
+  const sy = sourceAnchor.y;
+  const tx = targetAnchor.x;
+  const ty = targetAnchor.y;
+  const bend = typeof options.bend === "number"
+    ? options.bend
+    : Math.max(
+      options.bendMin ?? 24,
+      Math.min(options.bendMax ?? 120, Math.hypot(tx - sx, ty - sy) * (options.bendScale ?? 0.35)),
+    );
+  const c1x = sx + sourceAnchor.dx * bend + (options.c1xOffset || 0);
+  const c1y = sy + sourceAnchor.dy * bend + (options.c1yOffset || 0);
+  const c2x = tx + targetAnchor.dx * bend + (options.c2xOffset || 0);
+  const c2y = ty + targetAnchor.dy * bend + (options.c2yOffset || 0);
+  return {
+    sx,
+    sy,
+    c1x,
+    c1y,
+    c2x,
+    c2y,
+    tx,
+    ty,
+    d: `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`,
+    labelT: options.labelT ?? 0.35,
+    labelDx: options.labelDx ?? 6,
+    labelDy: options.labelDy ?? -4,
+  };
+}
+
+function buildLoopArcRoute(sourceAnchor, targetAnchor, excursion, options = {}) {
+  return buildAnchorRoute(sourceAnchor, targetAnchor, {
+    bend: excursion,
+    labelT: options.labelT ?? 0.55,
+    labelDx: options.labelDx ?? 12,
+    labelDy: options.labelDy ?? -8,
+  });
+}
+
+function anchorOnRect(rect, side, bias = 0.5, offset = 0) {
+  const clampedBias = clamp(Number.isFinite(bias) ? bias : 0.5, 0.18, 0.82);
+  let targetX = rect.x + rect.w / 2;
+  let targetY = rect.y + rect.h / 2;
+  if (side === "left") {
+    targetX = rect.x - NODE_R;
+    targetY = rect.y + rect.h * clampedBias + offset;
+  } else if (side === "right") {
+    targetX = rect.x + rect.w + NODE_R;
+    targetY = rect.y + rect.h * clampedBias + offset;
+  } else if (side === "top") {
+    targetX = rect.x + rect.w * clampedBias + offset;
+    targetY = rect.y - NODE_R;
+  } else {
+    targetX = rect.x + rect.w * clampedBias + offset;
+    targetY = rect.y + rect.h + NODE_R;
   }
-  if (dy >= 0) return { x: sourceCenterX + laneOffset, y: source.y + source.h, dx: 0, dy: 1 };
-  return { x: sourceCenterX + laneOffset, y: source.y, dx: 0, dy: -1 };
+  return circleAnchorToward(rect, targetX, targetY);
 }
 
 function assignFlowEdgeSpread(edgeRecords) {
@@ -1426,8 +2021,11 @@ function makeGroupToggle(wrapper, color, collapsed, onToggle) {
 }
 
 function positionGroupToggle(toggle, bounds, options = {}) {
-  const cx = bounds.x + GROUP_TOGGLE_R + 8;
-  const cy = options.headerChip ? bounds.y - 1 : bounds.y + GROUP_TOGGLE_R + 6;
+  // For collapsed alphabet circles: place toggle at top-right of the circle
+  const circleCx = bounds.x + NODE_R;
+  const circleCy = bounds.y + NODE_R;
+  const cx = options.headerChip ? bounds.x + GROUP_TOGGLE_R + 8 : circleCx + NODE_R - GROUP_TOGGLE_R;
+  const cy = options.headerChip ? bounds.y - 1 : circleCy - NODE_R + GROUP_TOGGLE_R;
   toggle.hit.setAttribute("cx", String(cx));
   toggle.hit.setAttribute("cy", String(cy));
   toggle.glyph.setAttribute("x", String(cx));
@@ -1436,13 +2034,168 @@ function positionGroupToggle(toggle, bounds, options = {}) {
 
 function prepareNode(node) {
   const meta = node.metadata || {};
-  const lines = Array.isArray(meta.displayLines) && meta.displayLines.length
+  return {
+    lines: [],
+    typeLines: [],
+    h: 32,
+    align: "center",
+  };
+}
+
+function wrapNodeLines(lines, kind, isTypeLine) {
+  const maxChars = maxCharsForNode(kind, isTypeLine);
+  const wrapped = [];
+  lines.forEach((line) => {
+    wrapCodeLikeLine(String(line || ""), maxChars).forEach((part) => wrapped.push(part));
+  });
+  if (wrapped.length > 8) return [...wrapped.slice(0, 7), "..."];
+  return wrapped;
+}
+
+function maxCharsForNode(kind, isTypeLine) {
+  const base = kind === "decision"
+    ? 22
+    : kind === "loop"
+      ? 24
+      : kind === "entry" || kind === "return"
+        ? 26
+        : kind === "error"
+          ? 28
+          : 30;
+  return Math.max(12, base - (isTypeLine ? 4 : 0));
+}
+
+function textAlignForNode(kind, lineCount) {
+  if (kind === "decision" || kind === "loop" || kind === "entry" || kind === "return") return "center";
+  return lineCount > 1 ? "start" : "center";
+}
+
+function wrapCodeLikeLine(text, maxChars) {
+  const source = String(text || "").trim();
+  if (!source) return [""];
+  if (source.length <= maxChars) return [source];
+  const tokens = source.split(/(\s+|[(){}\[\],.:;+\-*/%<>=!?|&]+)/).filter((token) => token.length);
+  const lines = [];
+  let current = "";
+  const pushCurrent = () => {
+    if (current.trim()) lines.push(current.trim());
+    current = "";
+  };
+  tokens.forEach((token) => {
+    if (token.length > maxChars) {
+      if (current.trim()) pushCurrent();
+      for (let index = 0; index < token.length; index += maxChars) {
+        lines.push(token.slice(index, index + maxChars));
+      }
+      return;
+    }
+    const candidate = current ? `${current}${token}` : token;
+    if (candidate.trim().length > maxChars && current.trim()) {
+      pushCurrent();
+      current = token.trimStart();
+      return;
+    }
+    current = candidate;
+  });
+  if (current.trim()) pushCurrent();
+  return lines.length ? lines : [source];
+}
+
+function buildEdgeTooltipPayload(edge, nodesById, groupById, language) {
+  const sourceNode = edge.src.startsWith("group:") ? null : nodesById.get(edge.src);
+  const targetNode = edge.tgt.startsWith("group:") ? null : nodesById.get(edge.tgt);
+  const sourceTypeBits = collectNodeTypeBits(sourceNode, language);
+  const targetTypeBits = collectNodeTypeBits(targetNode, language);
+  return {
+    tooltipKind: "edge",
+    label: edge.label || "control flow",
+    metadata: {
+      edgeLabel: edge.label || "control flow",
+      fromLabel: formatFlowEndpoint(edge.src, nodesById, groupById),
+      toLabel: formatFlowEndpoint(edge.tgt, nodesById, groupById),
+      sourceTypeBits,
+      targetTypeBits,
+      language,
+    },
+  };
+}
+
+function formatFlowEndpoint(endpointId, nodesById, groupById) {
+  if (endpointId.startsWith("group:")) {
+    const group = groupById.get(endpointId.slice(6));
+    return group?.label || endpointId;
+  }
+  const node = nodesById.get(endpointId);
+  return node?.label || endpointId;
+}
+
+function collectNodeTypeBits(node, language) {
+  if (!node) return [];
+  const meta = node.metadata || {};
+  const bits = [];
+  if (Array.isArray(meta.flowTypeBits)) bits.push(...meta.flowTypeBits.map(String));
+  if (meta.typeLabel) bits.push(...splitTypeBits(String(meta.typeLabel)));
+  if (Array.isArray(meta.params)) {
+    meta.params.forEach((param) => {
+      if (param && param.name && param.type) bits.push(`${param.name}: ${param.type}`);
+    });
+  }
+  if (meta.returnType) bits.push(`returns ${String(meta.returnType)}`);
+  const displayLines = Array.isArray(meta.displayLines) && meta.displayLines.length
     ? meta.displayLines.map(String)
     : String(node.label || "").split("\n");
-  const typeLine = meta.typeLabel ? String(meta.typeLabel) : "";
-  const totalLineCount = lines.length + (typeLine ? 1 : 0);
-  const h = Math.max(NODE_MIN_H, 16 + totalLineCount * LINE_H + 8);
-  return { lines, typeLine, h };
+  bits.push(...inferTypeBitsFromLines(displayLines, language, node.kind));
+  return Array.from(new Set(bits.filter(Boolean))).slice(0, 6);
+}
+
+function splitTypeBits(label) {
+  return String(label)
+    .split(/;\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function inferTypeBitsFromLines(lines, language, kind) {
+  const bits = [];
+  lines.forEach((line) => {
+    const text = String(line || "").trim();
+    if (!text || text === "•") return;
+    if (/^return\b/i.test(text)) {
+      const expr = text.replace(/^return\b\s*,?\s*/i, "").trim();
+      const inferred = inferExprTypeFromText(expr, language);
+      if (inferred) bits.push(`returns ${inferred}`);
+      return;
+    }
+    const assignment = text.match(/^(?:const|let|var\s+)?([A-Za-z_][\w.$]*)\s*=\s*(.+)$/);
+    if (assignment) {
+      const inferred = inferExprTypeFromText(assignment[2], language);
+      if (inferred) bits.push(`${assignment[1]}: ${inferred}`);
+      return;
+    }
+    if (kind === "decision") bits.push("condition: boolean");
+  });
+  return bits;
+}
+
+function inferExprTypeFromText(expr, language) {
+  const text = String(expr || "").trim();
+  if (!text) return "";
+  if (/^['"`].*['"`]$/.test(text)) return language === "idl" ? "string" : "str";
+  if (/^(true|false)$/i.test(text)) return language === "python" ? "bool" : "boolean";
+  if (/^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(text)) return text.includes(".") ? "float" : "int";
+  if (/^\d+[lusb]?$/i.test(text)) return "int";
+  if (/^\[.*\]$/.test(text)) return language === "python" ? "list" : "array";
+  if (/^\{.*\}$/.test(text)) return language === "idl" ? "struct" : "object";
+  if (/^(new\s+)?[A-Z][A-Za-z0-9_]*(?:\.|::[A-Za-z0-9_]+)?/.test(text)) {
+    const match = text.match(/^(?:new\s+)?([A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)?)/);
+    return match ? match[1] : "object";
+  }
+  if (/\b(len|n_elements|count|size)\s*\(/i.test(text)) return "int";
+  if (/\b(mean|float|double|sqrt|sin|cos|max|min)\s*\(/i.test(text)) return "float";
+  if (/\bstring\s*\(/i.test(text)) return language === "python" ? "str" : "string";
+  if (/\b(Array\.isArray|map|filter|reduce|slice)\b/.test(text)) return "array";
+  if (/[<>!=]=|\b(in|not in|and|or|eq|ne|gt|lt|ge|le)\b/i.test(text)) return language === "python" ? "bool" : "boolean";
+  return "";
 }
 
 function groupKey(groupId) {
@@ -1456,6 +2209,7 @@ function applyFlowTreeLayout(
   nodeGroupChains,
   groupById,
   groupDepth,
+  nodeMetaById,
   isNodeCircleCollapsed,
   visibility,
   groupState,
@@ -1481,7 +2235,7 @@ function applyFlowTreeLayout(
       id: node.id,
       index,
       line: Number(node.source?.line || Number.MAX_SAFE_INTEGER),
-      depth: treeIndentDepth(node.id, nodeGroupChains, groupById, groupDepth),
+      depth: treeIndentDepth(node.id, nodeGroupChains, groupById, groupDepth, nodeMetaById),
       h: isNodeCircleCollapsed?.(node.id) ? NODE_CIRCLE_D : preparedNode.h,
     });
   });
@@ -1529,7 +2283,247 @@ function applyFlowTreeLayout(
   });
 }
 
-function treeIndentDepth(nodeId, nodeGroupChains, groupById, groupDepth) {
+function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, visibleNodeIds = null) {
+  const visible = visibleNodeIds instanceof Set ? visibleNodeIds : new Set(nodes.map((node) => node.id));
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const outgoing = new Map();
+  const incoming = new Map();
+  nodes.forEach((node) => {
+    outgoing.set(node.id, []);
+    incoming.set(node.id, []);
+  });
+  edges.forEach((edge) => {
+    if (!visible.has(edge.from) || !visible.has(edge.to)) return;
+    outgoing.get(edge.from)?.push(edge);
+    incoming.get(edge.to)?.push(edge);
+  });
+
+  const V_STEP = 60;
+  const BRANCH_X = 50;
+  const LOOP_X = 90;
+  const CASE_X = 50;
+  const START_X = 220;
+  const START_Y = 30;
+
+  const centerById = new Map();
+  const processed = new Set();
+  const queue = [];
+
+  function setCenter(nodeId, centerX, centerY) {
+    const preparedNode = prepared.get(nodeId);
+    if (!preparedNode) return false;
+    const existing = centerById.get(nodeId);
+    if (!existing) {
+      centerById.set(nodeId, { x: centerX, y: centerY });
+      positions.set(nodeId, { x: centerX - NODE_R, y: centerY - NODE_R, h: preparedNode.h });
+      return true;
+    }
+    const placedPreds = (incoming.get(nodeId) || [])
+      .map((edge) => centerById.get(edge.from))
+      .filter(Boolean);
+    const nextX = placedPreds.length > 1
+      ? placedPreds.reduce((sum, pos) => sum + pos.x, 0) / placedPreds.length
+      : existing.x;
+    const nextY = Math.max(existing.y, centerY);
+    centerById.set(nodeId, { x: nextX, y: nextY });
+    positions.set(nodeId, { x: nextX - NODE_R, y: nextY - NODE_R, h: preparedNode.h });
+    return false;
+  }
+
+  function classifyDecisionEdges(fromNode, outs) {
+    const scored = outs.map((edge) => {
+      const target = nodesById.get(edge.to);
+      const label = String(edge.label || "").toLowerCase();
+      let side = 0;
+      if (/false|else|done|exit/.test(label)) side = -1;
+      else if (/true|then|ok|body/.test(label)) side = 1;
+      else if (target?.kind === "return" || target?.kind === "break" || target?.kind === "error") side = -1;
+      else if (target?.kind === "continue" || target?.kind === "loop") side = 1;
+      else side = edge.to < fromNode.id ? -1 : 1;
+      return { edge, side };
+    });
+    scored.sort((left, right) => left.side - right.side || String(left.edge.to).localeCompare(String(right.edge.to)));
+    return scored.map((entry) => entry.edge);
+  }
+
+  function layoutSuccessors(nodeId) {
+    const fromNode = nodesById.get(nodeId);
+    const center = centerById.get(nodeId);
+    if (!fromNode || !center) return;
+    let outs = (outgoing.get(nodeId) || []).filter((edge) => visible.has(edge.to));
+    if (!outs.length) return;
+
+    if (fromNode.kind === "decision") {
+      const ordered = classifyDecisionEdges(fromNode, outs);
+      if (ordered.length === 1) {
+        setCenter(ordered[0].to, center.x + BRANCH_X, center.y + V_STEP);
+        return;
+      }
+      const span = (ordered.length - 1) * CASE_X;
+      ordered.forEach((edge, index) => {
+        const offset = index * CASE_X - span / 2;
+        setCenter(edge.to, center.x + offset, center.y + V_STEP);
+      });
+      return;
+    }
+
+    if (fromNode.kind === "loop") {
+      const ordered = outs.slice().sort((left, right) => String(left.label || "").localeCompare(String(right.label || "")));
+      let bodyEdge = ordered.find((edge) => !/done|else|exit/i.test(String(edge.label || "")) && nodesById.get(edge.to)?.kind !== "loop_else");
+      let exitEdge = ordered.find((edge) => edge !== bodyEdge);
+      if (!bodyEdge) {
+        bodyEdge = ordered[0];
+        exitEdge = ordered[1];
+      }
+      if (bodyEdge) setCenter(bodyEdge.to, center.x + LOOP_X, center.y);
+      if (exitEdge) setCenter(exitEdge.to, center.x, center.y + V_STEP + 20);
+      ordered.forEach((edge) => {
+        if (edge !== bodyEdge && edge !== exitEdge) setCenter(edge.to, center.x, center.y + V_STEP + 20);
+      });
+      return;
+    }
+
+    const forward = outs
+      .slice()
+      .sort((left, right) => (Number(nodesById.get(left.to)?.source?.line || Number.MAX_SAFE_INTEGER) - Number(nodesById.get(right.to)?.source?.line || Number.MAX_SAFE_INTEGER)) || String(left.to).localeCompare(String(right.to)));
+    if (forward.length === 1) {
+      const targetId = forward[0].to;
+      const mergePreds = (incoming.get(targetId) || []).filter((edge) => centerById.has(edge.from));
+      if (mergePreds.length > 1) {
+        const mergedX = mergePreds.reduce((sum, edge) => sum + centerById.get(edge.from).x, 0) / mergePreds.length;
+        const mergedY = Math.max(...mergePreds.map((edge) => centerById.get(edge.from).y)) + V_STEP;
+        setCenter(targetId, mergedX, mergedY);
+        return;
+      }
+      setCenter(targetId, center.x, center.y + V_STEP);
+      return;
+    }
+
+    const span = (forward.length - 1) * CASE_X;
+    forward.forEach((edge, index) => {
+      const offset = index * CASE_X - span / 2;
+      setCenter(edge.to, center.x + offset, center.y + V_STEP);
+    });
+  }
+
+  if (entryId && visible.has(entryId)) {
+    setCenter(entryId, START_X, START_Y);
+    queue.push(entryId);
+  }
+
+  while (queue.length) {
+    const nodeId = queue.shift();
+    if (!nodeId || processed.has(nodeId)) continue;
+    processed.add(nodeId);
+    layoutSuccessors(nodeId);
+    (outgoing.get(nodeId) || []).forEach((edge) => {
+      if (!visible.has(edge.to) || processed.has(edge.to)) return;
+      if (centerById.has(edge.to)) queue.push(edge.to);
+    });
+  }
+
+  let cursorY = Math.max(START_Y + V_STEP, ...Array.from(centerById.values()).map((pos) => pos.y + V_STEP));
+  nodes
+    .filter((node) => visible.has(node.id))
+    .sort((left, right) => (Number(left.source?.line || Number.MAX_SAFE_INTEGER) - Number(right.source?.line || Number.MAX_SAFE_INTEGER)) || String(left.id).localeCompare(String(right.id)))
+    .forEach((node) => {
+      if (centerById.has(node.id)) return;
+      setCenter(node.id, START_X, cursorY);
+      cursorY += V_STEP;
+    });
+}
+
+function applyFlowLaneLayout(
+  positions,
+  nodes,
+  prepared,
+  nodeGroupChains,
+  groupById,
+  groupDepth,
+  nodeMetaById,
+  isNodeCircleCollapsed,
+  visibility,
+  forceOptions,
+) {
+  const overlapRepel = clamp01(forceOptions?.overlapRepel ?? 0.35);
+  const ambientRepel = clamp01(forceOptions?.ambientRepel ?? 0.18);
+  const cohesion = clamp01(forceOptions?.cohesion ?? 0.34);
+  const laneStep = FLOW_LANE_STEP_X + overlapRepel * 56 + ambientRepel * 14;
+  const laneRowGap = 8 + overlapRepel * 8 + cohesion * 5;
+  const units = [];
+
+  nodes.forEach((node, index) => {
+    if (!visibility.visibleNodeIds.has(node.id)) return;
+    const preparedNode = prepared.get(node.id);
+    if (!preparedNode) return;
+    const depth = treeIndentDepth(node.id, nodeGroupChains, groupById, groupDepth, nodeMetaById);
+    const line = Number(node.source?.line || Number.MAX_SAFE_INTEGER);
+    const height = isNodeCircleCollapsed?.(node.id) ? NODE_CIRCLE_D : preparedNode.h;
+    units.push({
+      id: node.id,
+      depth,
+      line,
+      index,
+      h: height,
+      kind: node.kind,
+      ...flowLaneScopeKeys(node.id, depth, nodeGroupChains, groupById, groupDepth),
+    });
+  });
+
+  units.sort((left, right) => {
+    if (left.line !== right.line) return left.line - right.line;
+    if (left.depth !== right.depth) return left.depth - right.depth;
+    return left.index - right.index;
+  });
+
+  const laneCursorY = new Map();
+  units.forEach((unit) => {
+    const pos = positions.get(unit.id);
+    if (!pos) return;
+    const initialY = laneCursorY.get(unit.parentLaneKey) ?? FLOW_LANE_BASE_Y;
+    const laneY = laneCursorY.get(unit.laneKey) ?? initialY;
+    const y = laneY;
+    const centerX = FLOW_LANE_BASE_X + unit.depth * laneStep + flowLaneKindOffset(unit.kind);
+    pos.x = centerX - NODE_W / 2;
+    pos.y = y;
+    pos.h = unit.h;
+    laneCursorY.set(unit.laneKey, y + unit.h + laneRowGap);
+  });
+}
+
+function flowLaneKindOffset(kind) {
+  if (kind === "decision") return 8;
+  if (kind === "loop") return 16;
+  if (kind === "error") return 12;
+  return 0;
+}
+
+function flowLaneScopeKeys(nodeId, depth, nodeGroupChains, groupById, groupDepth) {
+  if (depth <= 0) {
+    const rootGroupId = flowLaneGroupAtDepth(nodeId, 0, nodeGroupChains, groupById, groupDepth);
+    return {
+      laneKey: rootGroupId ? `0:${rootGroupId}` : "root",
+      parentLaneKey: "root",
+    };
+  }
+  const ownerGroupId = flowLaneGroupAtDepth(nodeId, depth, nodeGroupChains, groupById, groupDepth);
+  const parentGroupId = flowLaneGroupAtDepth(nodeId, depth - 1, nodeGroupChains, groupById, groupDepth);
+  const parentLaneKey = parentGroupId ? `${depth - 1}:${parentGroupId}` : "root";
+  return {
+    laneKey: ownerGroupId ? `${depth}:${ownerGroupId}` : `${depth}:indent:${parentLaneKey}`,
+    parentLaneKey,
+  };
+}
+
+function flowLaneGroupAtDepth(nodeId, depth, nodeGroupChains, groupById, groupDepth) {
+  const chain = nodeGroupChains.get(nodeId) || [];
+  for (const groupId of chain) {
+    if (treeGroupIndentDepth(groupId, groupById, groupDepth) === depth) return groupId;
+  }
+  return null;
+}
+
+function treeIndentDepth(nodeId, nodeGroupChains, groupById, groupDepth, nodeMetaById) {
   const chain = nodeGroupChains.get(nodeId) || [];
   let maxDepth = 0;
   chain.forEach((groupId) => {
@@ -1538,7 +2532,9 @@ function treeIndentDepth(nodeId, nodeGroupChains, groupById, groupDepth) {
     const baseDepth = group.kind === "function_body" ? 0 : 1;
     maxDepth = Math.max(maxDepth, (groupDepth.get(groupId) || 0) + baseDepth);
   });
-  return maxDepth;
+  const meta = nodeMetaById?.get(nodeId) || {};
+  const sourceDepth = Number.isFinite(Number(meta.indentLevel)) ? Math.max(0, Number(meta.indentLevel)) : 0;
+  return Math.max(maxDepth, sourceDepth);
 }
 
 function treeGroupIndentDepth(groupId, groupById, groupDepth) {

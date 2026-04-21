@@ -6,6 +6,7 @@ const ATTRACT_STRENGTH_KEY = "codemap.attractStrength";
 const AMBIENT_REPEL_STRENGTH_KEY = "codemap.ambientRepelStrength";
 const COHESION_STRENGTH_KEY = "codemap.cohesionStrength";
 const TREE_VIEW_KEY = "codemap.treeView";
+const FLOWCHART_LAYOUT_MODE_KEY = "codemap.flowchartLayoutMode";
 
 interface ExecuteCommandMessage {
   type: "executeCommand";
@@ -42,11 +43,16 @@ interface ToggleTreeViewMessage {
   enabled: boolean;
 }
 
+interface SetLayoutModeMessage {
+  type: "setLayoutMode";
+  mode: "tree" | "lanes" | "freeform";
+}
+
 interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | SetLayoutModeMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -64,10 +70,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private ambientRepelStrength: number;
   private cohesionStrength: number;
   private treeView: boolean;
+  private layoutMode: "tree" | "lanes" | "freeform";
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; treeView: boolean }) => void,
+    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean }) => void,
   ) {
     this.showEvidence = context.workspaceState.get<boolean>(SHOW_EVIDENCE_KEY, false);
     this.repelStrength = clamp01(context.workspaceState.get<number>(REPEL_STRENGTH_KEY, 0.45));
@@ -75,6 +82,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     this.ambientRepelStrength = clamp01(context.workspaceState.get<number>(AMBIENT_REPEL_STRENGTH_KEY, 0.18));
     this.cohesionStrength = clamp01(context.workspaceState.get<number>(COHESION_STRENGTH_KEY, 0.34));
     this.treeView = context.workspaceState.get<boolean>(TREE_VIEW_KEY, false);
+    this.layoutMode = context.workspaceState.get<"tree" | "lanes" | "freeform">(
+      FLOWCHART_LAYOUT_MODE_KEY,
+      this.treeView ? "tree" : "lanes",
+    );
+    this.treeView = this.layoutMode === "tree";
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -112,6 +124,15 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "toggleTreeView") {
         this.treeView = !!msg.enabled;
+        this.layoutMode = this.treeView ? "tree" : "lanes";
+        void this.context.workspaceState.update(TREE_VIEW_KEY, this.treeView);
+        void this.context.workspaceState.update(FLOWCHART_LAYOUT_MODE_KEY, this.layoutMode);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "setLayoutMode") {
+        this.layoutMode = msg.mode;
+        this.treeView = this.layoutMode === "tree";
+        void this.context.workspaceState.update(FLOWCHART_LAYOUT_MODE_KEY, this.layoutMode);
         void this.context.workspaceState.update(TREE_VIEW_KEY, this.treeView);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
@@ -144,13 +165,14 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.showEvidence;
   }
 
-  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; treeView: boolean } {
+  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean } {
     return {
       showEvidence: this.showEvidence,
       repelStrength: this.repelStrength,
       attractStrength: this.attractStrength,
       ambientRepelStrength: this.ambientRepelStrength,
       cohesionStrength: this.cohesionStrength,
+      layoutMode: this.layoutMode,
       treeView: this.treeView,
     };
   }
@@ -163,6 +185,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       attractStrength: this.attractStrength,
       ambientRepelStrength: this.ambientRepelStrength,
       cohesionStrength: this.cohesionStrength,
+      layoutMode: this.layoutMode,
       treeView: this.treeView,
     });
   }
@@ -320,7 +343,14 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     <summary>Display Settings</summary>
     <div class="dropdown-content">
       <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
-      <label class="toggle"><input id="toggle-tree-view" type="checkbox" /> Tree View (flowchart)</label>
+      <div class="slider-block">
+        <div class="slider-row"><span>Flowchart Layout</span></div>
+        <select id="layout-mode" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--vscode-panel-border);background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground);">
+          <option value="tree">Tree</option>
+          <option value="lanes">Structured Lanes</option>
+          <option value="freeform">Freeform</option>
+        </select>
+      </div>
       <div class="preset-row">
         <button class="preset" data-preset="tidy">Tidy</button>
         <button class="preset" data-preset="balanced">Balanced</button>
@@ -348,7 +378,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const evidenceToggle = document.getElementById('toggle-evidence');
-  const treeViewToggle = document.getElementById('toggle-tree-view');
+  const layoutModeSelect = document.getElementById('layout-mode');
   const repelSlider = document.getElementById('repel-slider');
   const repelValue = document.getElementById('repel-value');
   const attractSlider = document.getElementById('attract-slider');
@@ -384,8 +414,8 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   evidenceToggle.addEventListener('change', () => {
     vscode.postMessage({ type: 'toggleEvidence', enabled: evidenceToggle.checked });
   });
-  treeViewToggle.addEventListener('change', () => {
-    vscode.postMessage({ type: 'toggleTreeView', enabled: treeViewToggle.checked });
+  layoutModeSelect.addEventListener('change', () => {
+    vscode.postMessage({ type: 'setLayoutMode', mode: layoutModeSelect.value });
   });
 
   function updateSliderLabels() {
@@ -432,7 +462,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         msg.checked + ' / ' + msg.total + ' files selected';
     } else if (msg.type === 'uiState') {
       evidenceToggle.checked = !!msg.showEvidence;
-      treeViewToggle.checked = !!msg.treeView;
+      layoutModeSelect.value = msg.layoutMode || (msg.treeView ? 'tree' : 'lanes');
       repelSlider.value = String(typeof msg.repelStrength === 'number' ? msg.repelStrength : 0.35);
       attractSlider.value = String(typeof msg.attractStrength === 'number' ? msg.attractStrength : 0.28);
       ambientRepelSlider.value = String(typeof msg.ambientRepelStrength === 'number' ? msg.ambientRepelStrength : 0.18);
