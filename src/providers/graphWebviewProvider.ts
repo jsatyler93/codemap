@@ -184,6 +184,7 @@ export class GraphWebviewProvider {
       webview.asWebviewUri(vscode.Uri.joinPath(root, ...rel.split("/")));
 
     const cssUri = asUri(webviewRoot, "styles.css");
+    const flowCssUri = asUri(distRoot, "main.css");
     const mainUri = asUri(distRoot, "main.js");
     const nonce = makeNonce();
     const csp = [
@@ -200,6 +201,7 @@ export class GraphWebviewProvider {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <link rel="stylesheet" href="${cssUri}" />
+  <link rel="stylesheet" href="${flowCssUri}" />
   <title>CodeMap</title>
 </head>
 <body>

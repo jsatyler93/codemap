@@ -71,6 +71,130 @@ body {
   position: absolute; top: 44px; left: 0; right: 0; bottom: 0;
   overflow: hidden; cursor: grab;
 }
+.react-flow-host {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+}
+.codemap-rf-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+.codemap-rf-canvas {
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at 20% 20%, #0f1424 0%, #0a0c12 48%, #080a10 100%);
+}
+.codemap-rf-node {
+  width: 56px;
+  height: 56px;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 0;
+  font-family: Consolas, monospace;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.codemap-rf-node-top {
+  font-size: 8.6px;
+  line-height: 1.05;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  max-width: 44px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.codemap-rf-node-bottom {
+  margin-top: 1px;
+  color: #94a3d8;
+  font-size: 7.2px;
+  line-height: 1.05;
+  opacity: 0.8;
+  max-width: 44px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.react-flow__edge-path {
+  stroke-linecap: round;
+}
+.codemap-rf-edge .react-flow__edge-path,
+.codemap-rf-edge path {
+  filter: drop-shadow(0 0 2px rgba(93, 122, 187, 0.24));
+}
+.codemap-rf-edge-loop .react-flow__edge-path,
+.codemap-rf-edge-loop path {
+  filter: drop-shadow(0 0 3px rgba(122, 162, 247, 0.4));
+}
+.codemap-rf-edge-particles circle {
+  pointer-events: none;
+}
+.codemap-rf-groups {
+  position: absolute;
+  top: 58px;
+  right: 14px;
+  z-index: 40;
+  width: 220px;
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid #1f2842;
+  border-radius: 10px;
+  background: rgba(10, 12, 18, 0.9);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  padding: 8px;
+}
+.codemap-rf-groups-title {
+  color: #8ea3d8;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  margin: 2px 0 6px;
+  font-family: Consolas, monospace;
+}
+.codemap-rf-group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+.codemap-rf-group-label {
+  flex: 1;
+  color: #c0caf5;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, monospace;
+}
+.codemap-rf-group-plus {
+  width: 19px;
+  height: 19px;
+  border-radius: 999px;
+  border: 1px solid #2e426f;
+  background: #111a2e;
+  color: #7aa2f7;
+  line-height: 1;
+  cursor: pointer;
+  font-weight: 700;
+}
+.codemap-rf-group-plus:hover {
+  border-color: #7aa2f7;
+  color: #d3e0ff;
+}
+.react-flow__edge-text {
+  font-family: Consolas, monospace;
+}
+.react-flow__minimap {
+  border-radius: 8px;
+  overflow: hidden;
+}
 #canvas-controls {
   position: fixed;
   top: 58px;
@@ -279,6 +403,10 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
 .runtime-active {
   animation: runtime-pulse 1.4s ease-in-out infinite;
 }
+.react-flow__node.runtime-active .codemap-rf-node {
+  border-color: #f7768e !important;
+  box-shadow: 0 0 0 2px rgba(247, 118, 142, 0.32), 0 0 20px rgba(247, 118, 142, 0.44);
+}
 @keyframes runtime-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.78; }
@@ -293,6 +421,10 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   stroke-width: 2 !important;
   filter: drop-shadow(0 0 6px rgba(247, 231, 109, 0.55));
 }
+.react-flow__node.runtime-ancestor .codemap-rf-node {
+  border-color: #f7e76d !important;
+  box-shadow: 0 0 0 1px rgba(247, 231, 109, 0.3), 0 0 12px rgba(247, 231, 109, 0.24);
+}
 
 /* One-shot bright pulse when execution lands on a node with no traceable edge */
 .runtime-step-pulse rect,
@@ -303,6 +435,10 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   stroke-width: 3 !important;
   filter: drop-shadow(0 0 14px rgba(247, 231, 109, 0.95));
   animation: runtime-step-flash 0.7s ease-out;
+}
+.react-flow__node.runtime-step-pulse .codemap-rf-node {
+  border-color: #f7e76d !important;
+  box-shadow: 0 0 0 2px rgba(247, 231, 109, 0.42), 0 0 22px rgba(247, 231, 109, 0.56);
 }
 @keyframes runtime-step-flash {
   0%   { filter: drop-shadow(0 0 18px rgba(247, 231, 109, 1)); }
@@ -329,6 +465,10 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   stroke-width: 2 !important;
   filter: drop-shadow(0 0 8px rgba(247, 231, 109, 0.7));
   animation: runtime-var-flash-anim 0.8s ease-out;
+}
+.react-flow__node.runtime-var-flash .codemap-rf-node {
+  border-color: #f7e76d !important;
+  box-shadow: 0 0 0 1px rgba(247, 231, 109, 0.34), 0 0 16px rgba(247, 231, 109, 0.35);
 }
 @keyframes runtime-var-flash-anim {
   0%   { filter: drop-shadow(0 0 14px rgba(247, 231, 109, 1)); }

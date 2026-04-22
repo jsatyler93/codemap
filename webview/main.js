@@ -3,7 +3,8 @@
 
 import { NS, makeSvgCanvas } from "./shared/panZoom.js";
 import { cubicPt } from "./shared/geometry.js";
-import { renderFlowchart } from "./views/flowchart/flowchartView.js";
+import { animate as motionAnimate } from "motion";
+import { clearFlowchartReactFlow, renderFlowchartReactFlow, resetFlowchartReactView } from "./views/flowchart/reactFlowView.js";
 import { renderCallGraph } from "./views/callgraph/callGraphView.js";
 import { renderDataflowView, removeDataflowOverlay } from "./views/dataflow/dataflowView.js";
 import { clearSuperimposedDataflow, renderSuperimposedDataflow } from "./views/dataflow/superimposedOverlay.js";
@@ -39,10 +40,7 @@ let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
 const LAYOUT_STORAGE_PREFIX = "codemap.layout.v3:";
 const STEP_PARTICLE_INTERVAL_MS = 1150;
-const FLOWCHART_LAYER_EXIT_MS = 220;
-const FLOWCHART_LAYER_ENTER_MS = 360;
-const FLOWCHART_LAYER_TRANSITION_MS = FLOWCHART_LAYER_EXIT_MS + FLOWCHART_LAYER_ENTER_MS;
-const FLOWCHART_LAYER_EDGE_DELAY_MS = 90;
+const USE_REACT_FLOW_FLOWCHART = true;
 
 /** Current breadcrumb trail for progressive flowchart reading. */
 let previousFlowchartBreadcrumb = [];
@@ -156,7 +154,7 @@ function onNodeDblClick(n) {
 
 // Click on empty canvas → reset selection
 canvasEl.addEventListener("click", (e) => {
-  if (e.target.closest("g[data-id]")) return;
+  if (e.target.closest("[data-id]")) return;
   if (renderCtx._resetSelection) renderCtx._resetSelection();
 });
 
@@ -330,32 +328,72 @@ function computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene) {
   return { oldAnchor: { x: 0, y: 0 }, newAnchor: { x: 0, y: 0 }, hasCommon: false, semanticZoom: "none" };
 }
 
-function offsetTowardAnchor(center, anchor, distance) {
-  const dx = anchor.x - center.x;
-  const dy = anchor.y - center.y;
-  const len = Math.hypot(dx, dy) || 1;
-  return {
-    x: (dx / len) * distance,
-    y: (dy / len) * distance,
-  };
-}
+const activeSceneAnimations = new WeakMap();
 
 function animateSceneElement(element, keyframes, options) {
   element.style.transformBox = "fill-box";
   element.style.transformOrigin = "center";
-  if (typeof element.animate === "function") {
-    const animation = element.animate(keyframes, { fill: "both", easing: "cubic-bezier(0.22, 1, 0.36, 1)", ...options });
-    animation.onfinish = () => {
-      const last = keyframes[keyframes.length - 1] || {};
-      if (last.opacity !== undefined) element.style.opacity = String(last.opacity);
-      if (last.transform !== undefined) element.style.transform = String(last.transform);
-    };
-    return animation;
+  const previousAnimation = activeSceneAnimations.get(element);
+  if (previousAnimation) {
+    if (typeof previousAnimation.stop === "function") previousAnimation.stop();
+    else if (typeof previousAnimation.cancel === "function") previousAnimation.cancel();
   }
+
   const last = keyframes[keyframes.length - 1] || {};
-  if (last.opacity !== undefined) element.style.opacity = String(last.opacity);
-  if (last.transform !== undefined) element.style.transform = String(last.transform);
-  return null;
+  const finish = () => {
+    if (last.opacity !== undefined) element.style.opacity = String(last.opacity);
+    if (last.transform !== undefined) element.style.transform = String(last.transform);
+    if (activeSceneAnimations.get(element) === animation) {
+      activeSceneAnimations.delete(element);
+    }
+  };
+
+  let animation = null;
+  try {
+    const properties = {};
+    const trackedProps = new Set();
+    keyframes.forEach((frame) => {
+      Object.keys(frame || {}).forEach((prop) => trackedProps.add(prop));
+    });
+    trackedProps.forEach((prop) => {
+      let previousValue;
+      properties[prop] = keyframes.map((frame, index) => {
+        if (frame && frame[prop] !== undefined) {
+          previousValue = frame[prop];
+          return frame[prop];
+        }
+        if (previousValue !== undefined) return previousValue;
+        if (prop === "opacity") return getComputedStyle(element).opacity;
+        if (prop === "transform") return element.style.transform || "none";
+        return "";
+      });
+    });
+
+    animation = motionAnimate(element, properties, {
+      duration: ((options?.duration ?? 0) / 1000) || 0,
+      delay: ((options?.delay ?? 0) / 1000) || 0,
+      easing: options?.easing || "cubic-bezier(0.22, 1, 0.36, 1)",
+    });
+    activeSceneAnimations.set(element, animation);
+    if (animation?.finished && typeof animation.finished.then === "function") {
+      animation.finished.then(finish, finish);
+    } else {
+      finish();
+    }
+    return animation;
+  } catch {
+    finish();
+    return null;
+  }
+}
+
+function finishWhenAnimationsSettle(animations, onDone) {
+  const pending = animations
+    .filter(Boolean)
+    .map((animation) => animation?.finished && typeof animation.finished.then === "function"
+      ? animation.finished.catch(() => undefined)
+      : Promise.resolve());
+  Promise.allSettled(pending).then(onDone);
 }
 
 function animateFlowchartSceneTransition(previousRender, nextRender) {
@@ -371,11 +409,14 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
   const newNodes = collectSceneTransitionElements(newScene, "[data-transition-key]", "transitionKey");
   const oldEdges = collectSceneTransitionElements(oldScene, "[data-edge-key]", "edgeKey");
   const newEdges = collectSceneTransitionElements(newScene, "[data-edge-key]", "edgeKey");
-  const { focalKey, semanticZoom } = computeTransitionAnchors(oldNodes, newNodes, oldScene, newScene);
-
-  // Slow, continuous morph
-  const dur = 850;
-  const easeMorph = "cubic-bezier(0.4, 0.0, 0.2, 1)";
+  const phaseFadeOutMs = 340;
+  const phaseMoveMs = 560;
+  const phaseFadeInMs = 320;
+  const fadeEase = "ease-out";
+  const moveEase = "cubic-bezier(0.22, 1, 0.36, 1)";
+  const enterEase = "ease-in-out";
+  const motionThreshold = 6;
+  const animations = [];
 
   function bbox(element) {
     try { return element.getBBox(); } catch { return null; }
@@ -387,18 +428,6 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
     return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
   }
 
-  // Determine focal anchors for entering / exiting elements.
-  // Drilldown: new contents bloom OUT from where the old focal group sat.
-  // Collapse: old contents converge INTO where the new focal group will sit.
-  let bloomFrom = null;   // entering elements appear from here
-  let convergeTo = null;  // exiting elements collapse toward here
-  if (semanticZoom === "in" && focalKey && oldNodes.has(focalKey)) {
-    bloomFrom = centerOf(oldNodes.get(focalKey));
-  }
-  if (semanticZoom === "out" && focalKey && newNodes.has(focalKey)) {
-    convergeTo = centerOf(newNodes.get(focalKey));
-  }
-
   // Make sure scene containers have NO transforms — every motion is per-element.
   oldScene.style.transform = "none";
   oldScene.style.opacity = "1";
@@ -407,119 +436,115 @@ function animateFlowchartSceneTransition(previousRender, nextRender) {
 
   const sharedNodeKeys = new Set([...newNodes.keys()].filter((k) => oldNodes.has(k)));
   const sharedEdgeKeys = new Set([...newEdges.keys()].filter((k) => oldEdges.has(k)));
+  const exitingNodeKeys = [...oldNodes.keys()].filter((key) => !sharedNodeKeys.has(key));
+  const enteringNodeKeys = [...newNodes.keys()].filter((key) => !sharedNodeKeys.has(key));
 
-  // ── SHARED NODES: hide the old copy, animate the new copy from old → new pos ──
-  sharedNodeKeys.forEach((key) => {
-    oldNodes.get(key).forEach((el) => { el.style.opacity = "0"; });
-    const oldC = centerOf(oldNodes.get(key));
-    const newC = centerOf(newNodes.get(key));
-    if (!oldC || !newC) return;
-    const dx = oldC.x - newC.x;
-    const dy = oldC.y - newC.y;
+  function phaseDelay(startMs, durationMs) {
+    return { delay: startMs, duration: durationMs };
+  }
+
+  // Start with only the old frame visible. New-only content stays hidden until phase 3.
+  enteringNodeKeys.forEach((key) => {
     newNodes.get(key).forEach((el) => {
-      el.style.opacity = "1";
-      animateSceneElement(el, [
-        { opacity: 1, transform: `translate(${dx}px, ${dy}px)` },
-        { opacity: 1, transform: "translate(0px, 0px)" },
-      ], { duration: dur, easing: easeMorph });
+      el.style.opacity = "0";
+      el.style.transform = "translate(0px, 8px) scale(0.985)";
     });
   });
-
-  // ── SHARED EDGES: same idea — keep visible at all times, just move ──
-  sharedEdgeKeys.forEach((key) => {
-    oldEdges.get(key).forEach((el) => { el.style.opacity = "0"; });
-    const oldC = centerOf(oldEdges.get(key));
-    const newC = centerOf(newEdges.get(key));
-    if (!oldC || !newC) {
-      newEdges.get(key).forEach((el) => { el.style.opacity = "1"; });
-      return;
-    }
-    const dx = oldC.x - newC.x;
-    const dy = oldC.y - newC.y;
-    newEdges.get(key).forEach((el) => {
-      el.style.opacity = "1";
-      animateSceneElement(el, [
-        { opacity: 1, transform: `translate(${dx}px, ${dy}px)` },
-        { opacity: 1, transform: "translate(0px, 0px)" },
-      ], { duration: dur, easing: easeMorph });
-    });
-  });
-
-  // ── EXITING NODES (in old but not new): fade out, optionally converge toward the focal collapse target ──
-  oldNodes.forEach((elements, key) => {
-    if (sharedNodeKeys.has(key)) return;
+  newEdges.forEach((elements) => {
     elements.forEach((el) => {
-      const c = centerOf([el]);
-      if (convergeTo && c) {
-        const dx = convergeTo.x - c.x;
-        const dy = convergeTo.y - c.y;
-        animateSceneElement(el, [
-          { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-          { opacity: 0, transform: `translate(${dx}px, ${dy}px) scale(0.12)` },
-        ], { duration: dur, easing: easeMorph });
-      } else {
-        animateSceneElement(el, [
-          { opacity: 1 },
-          { opacity: 0 },
-        ], { duration: Math.round(dur * 0.45), easing: "ease-out" });
-      }
+      el.style.opacity = "0";
+    });
+  });
+  sharedNodeKeys.forEach((key) => {
+    newNodes.get(key).forEach((el) => {
+      el.style.opacity = "0";
+      el.style.transform = "translate(0px, 0px)";
     });
   });
 
-  // ── EXITING EDGES: fade out (faster) ──
-  oldEdges.forEach((elements, key) => {
-    if (sharedEdgeKeys.has(key)) return;
+  // Phase 1: old-only fade. Nothing moves yet.
+  exitingNodeKeys.forEach((key) => {
+    oldNodes.get(key).forEach((el) => {
+      animations.push(animateSceneElement(el, [
+        { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+        { opacity: 0, transform: "translate(0px, -4px) scale(0.985)" },
+      ], { ...phaseDelay(0, phaseFadeOutMs), easing: fadeEase }));
+    });
+  });
+  oldEdges.forEach((elements) => {
     elements.forEach((el) => {
-      animateSceneElement(el, [
+      animations.push(animateSceneElement(el, [
         { opacity: 1 },
         { opacity: 0 },
-      ], { duration: Math.round(dur * 0.4), easing: "ease-out" });
+      ], { ...phaseDelay(Math.round(phaseFadeOutMs * 0.2), Math.round(phaseFadeOutMs * 0.9)), easing: fadeEase }));
     });
   });
 
-  // ── ENTERING NODES (in new but not old): fade in, optionally bloom from the focal drilldown source ──
-  newNodes.forEach((elements, key) => {
-    if (sharedNodeKeys.has(key)) return;
-    elements.forEach((el) => {
-      const c = centerOf([el]);
-      if (bloomFrom && c) {
-        const dx = bloomFrom.x - c.x;
-        const dy = bloomFrom.y - c.y;
-        el.style.opacity = "1";
-        animateSceneElement(el, [
-          { opacity: 0, transform: `translate(${dx}px, ${dy}px) scale(0.12)` },
-          { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
-        ], { duration: dur, easing: easeMorph });
-      } else {
-        el.style.opacity = "1";
-        animateSceneElement(el, [
-          { opacity: 0 },
-          { opacity: 1 },
-        ], { duration: Math.round(dur * 0.5), delay: Math.round(dur * 0.4), easing: "ease-in" });
-      }
+  // Phase 2: only the shared nodes glide from the old frame to the new frame.
+  sharedNodeKeys.forEach((key) => {
+    const oldC = centerOf(oldNodes.get(key));
+    const newC = centerOf(newNodes.get(key));
+    const dx = oldC && newC ? oldC.x - newC.x : 0;
+    const dy = oldC && newC ? oldC.y - newC.y : 0;
+    const distance = Math.hypot(dx, dy);
+    const shouldMove = distance > motionThreshold;
+
+    oldNodes.get(key).forEach((el) => {
+      animations.push(animateSceneElement(el, [
+        { opacity: 1 },
+        { opacity: 0 },
+      ], { ...phaseDelay(phaseFadeOutMs, 20), easing: "linear" }));
+    });
+
+    newNodes.get(key).forEach((el) => {
+      el.style.opacity = "1";
+      el.style.transform = shouldMove ? `translate(${dx}px, ${dy}px)` : "translate(0px, 0px)";
+      animations.push(animateSceneElement(el, [
+        { opacity: 1, transform: shouldMove ? `translate(${dx}px, ${dy}px)` : "translate(0px, 0px)" },
+        { opacity: 1, transform: "translate(0px, 0px)" },
+      ], { ...phaseDelay(phaseFadeOutMs, shouldMove ? phaseMoveMs : 40), easing: moveEase }));
     });
   });
 
-  // ── ENTERING EDGES: fade in late so they trail the node arrival ──
+  // Phase 3: new structure fades in after the shared nodes have settled.
+  const phase3Start = phaseFadeOutMs + phaseMoveMs;
+  enteringNodeKeys.forEach((key) => {
+    newNodes.get(key).forEach((el) => {
+      el.style.opacity = "1";
+      animations.push(animateSceneElement(el, [
+        { opacity: 0, transform: "translate(0px, 8px) scale(0.985)" },
+        { opacity: 1, transform: "translate(0px, 0px) scale(1)" },
+      ], { ...phaseDelay(phase3Start, phaseFadeInMs), easing: enterEase }));
+    });
+  });
+  sharedEdgeKeys.forEach((key) => {
+    newEdges.get(key).forEach((el) => {
+      el.style.opacity = "1";
+      animations.push(animateSceneElement(el, [
+        { opacity: 0 },
+        { opacity: 1 },
+      ], { ...phaseDelay(phase3Start + 40, Math.round(phaseFadeInMs * 0.85)), easing: enterEase }));
+    });
+  });
   newEdges.forEach((elements, key) => {
     if (sharedEdgeKeys.has(key)) return;
     elements.forEach((el) => {
       el.style.opacity = "1";
-      animateSceneElement(el, [
+      animations.push(animateSceneElement(el, [
         { opacity: 0 },
         { opacity: 1 },
-      ], { duration: Math.round(dur * 0.4), delay: Math.round(dur * 0.55), easing: "ease-in" });
+      ], { ...phaseDelay(phase3Start + 80, Math.round(phaseFadeInMs * 0.8)), easing: enterEase }));
     });
   });
 
-  window.setTimeout(() => {
+  finishWhenAnimationsSettle(animations, () => {
     if (token !== flowchartTransitionToken) return;
     if (oldScene.isConnected) oldScene.remove();
     newScene.style.pointerEvents = "auto";
     newScene.style.opacity = "1";
     newScene.style.transform = "none";
     retainOnlySceneLayer(newScene);
-  }, dur + 120);
+  });
 }
 
 function renderGraph(graph, options = {}) {
@@ -559,16 +584,25 @@ function renderGraph(graph, options = {}) {
   Object.keys(renderCtx).forEach((k) => delete renderCtx[k]);
 
   try {
+    const useReactFlowForFlowchart = USE_REACT_FLOW_FLOWCHART && graph.graphType === "flowchart";
     removeDataflowOverlay();
     clearSuperimposedDataflow(canvas.root);
+    if (!useReactFlowForFlowchart) {
+      clearFlowchartReactFlow();
+    }
     if (canvas.clearScaleListeners) canvas.clearScaleListeners();
     if (animateFlowchartTransition) {
       retainOnlySceneLayer(previousRender?.sceneEl || null);
       clearDefs();
     } else {
-      canvas.clear();
+      if (!useReactFlowForFlowchart) {
+        canvas.clear();
+      } else {
+        clearSceneLayers();
+        clearDefs();
+      }
     }
-    const sceneRoot = createSceneRoot(graph.graphType);
+    const sceneRoot = useReactFlowForFlowchart ? null : createSceneRoot(graph.graphType);
     const layoutKey = buildLayoutStorageKey(graph, uiState.layoutMode || (uiState.treeView ? "tree" : "lanes"));
     const ctx = {
       root: sceneRoot,
@@ -601,12 +635,33 @@ function renderGraph(graph, options = {}) {
     }
 
     if (graph.graphType === "flowchart") {
-      result = renderFlowchart(graph, ctx);
-      safeRenderSuperimposed(graph, result, ctx);
+      result = renderFlowchartReactFlow(graph, {
+        mount: canvasEl,
+        preserveView: !!options.preserveView,
+        layoutSnapshot: ctx.layoutSnapshot,
+        callbacks: {
+          onNodeClick,
+          onNodeDblClick,
+          showTooltip,
+          moveTooltip,
+          hideTooltip,
+          onLayoutChanged: ctx.onLayoutChanged,
+          onDrilldownGroup: ctx.onDrilldownGroup,
+          onPaneClick: () => {
+            if (renderCtx._resetSelection) renderCtx._resetSelection();
+          },
+        },
+      });
+      renderCtx._hasGroupControls = false;
+      renderCtx._resetView = () => resetFlowchartReactView();
     } else {
       result = renderCallGraph(graph, ctx);
     }
-    current = { ...(result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes }), sceneEl: sceneRoot };
+    current = {
+      ...(result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes }),
+      sceneEl: sceneRoot,
+      renderer: useReactFlowForFlowchart ? "reactflow" : "svg",
+    };
 
     // Copy renderer-attached helpers into shared renderCtx
     Object.keys(ctx).forEach((k) => { if (k.startsWith("_")) renderCtx[k] = ctx[k]; });
@@ -619,17 +674,19 @@ function renderGraph(graph, options = {}) {
       renderCtx._execTimeline = timeline;
     }
 
-    if (preservedView) {
-      canvas.reset(preservedView);
-    } else if (current.initialView) {
-      canvas.reset(current.initialView);
-    } else {
-      canvas.reset();
+    if (!useReactFlowForFlowchart) {
+      if (preservedView) {
+        canvas.reset(preservedView);
+      } else if (current.initialView) {
+        canvas.reset(current.initialView);
+      } else {
+        canvas.reset();
+      }
     }
 
-    if (animateFlowchartTransition) {
+    if (animateFlowchartTransition && !useReactFlowForFlowchart) {
       animateFlowchartSceneTransition(previousRender, current);
-    } else {
+    } else if (sceneRoot) {
       sceneRoot.style.pointerEvents = "auto";
     }
 
@@ -656,11 +713,12 @@ function safeRenderSuperimposed(graph, result, ctx) {
 
 function updateOverlayControls(graph) {
   const isFlowchart = !!graph && graph.graphType === "flowchart";
+  const showFlowchartOverlays = isFlowchart && !USE_REACT_FLOW_FLOWCHART;
   if (overlayLegacyLabel) {
-    overlayLegacyLabel.style.display = isFlowchart ? "inline-flex" : "none";
+    overlayLegacyLabel.style.display = showFlowchartOverlays ? "inline-flex" : "none";
   }
   if (overlayModernLabel) {
-    overlayModernLabel.style.display = isFlowchart ? "inline-flex" : "none";
+    overlayModernLabel.style.display = showFlowchartOverlays ? "inline-flex" : "none";
   }
 }
 
@@ -801,6 +859,10 @@ stepBtn.addEventListener("click", () => {
 });
 
 resetBtn.addEventListener("click", () => {
+  if (renderCtx._resetView) {
+    renderCtx._resetView();
+    return;
+  }
   canvas.reset(current?.initialView);
 });
 
@@ -839,7 +901,7 @@ expandGroupsBtn?.addEventListener("click", () => {
 searchBox.addEventListener("input", () => {
   if (!current) return;
   const q = searchBox.value.trim().toLowerCase();
-  const groups = canvasEl.querySelectorAll("g[data-id]");
+  const groups = canvasEl.querySelectorAll("[data-id]");
   if (!q) {
     groups.forEach((g) => g.classList.remove("search-dim", "search-hit"));
     return;
@@ -857,7 +919,7 @@ searchBox.addEventListener("input", () => {
 
 // Click on empty canvas → reset selection
 canvasEl.addEventListener("click", (e) => {
-  if (e.target.closest("g[data-id]")) return;
+  if (e.target.closest("[data-id]")) return;
   if (renderCtx._resetSelection) renderCtx._resetSelection();
 });
 
@@ -1109,7 +1171,7 @@ function renderRuntimeFrame(frame, highlightIds) {
   if (!panel) return;
   // Clear previous static highlights.
   for (const prevId of runtimeHighlightedIds) {
-    const g = canvasEl.querySelector('g[data-id="' + cssEscape(prevId) + '"]');
+    const g = canvasEl.querySelector('[data-id="' + cssEscape(prevId) + '"]');
     if (g) g.classList.remove("runtime-active");
   }
   runtimeHighlightedIds = [];
@@ -1190,7 +1252,7 @@ function renderRuntimeFrame(frame, highlightIds) {
   // ── Resolve current node + flash touched-var occurrences in graph ──
   const primaryNodeId = resolvePrimaryNodeId(frame, highlightIds);
   if (primaryNodeId) {
-    const g = canvasEl.querySelector('g[data-id="' + cssEscape(primaryNodeId) + '"]');
+    const g = canvasEl.querySelector('[data-id="' + cssEscape(primaryNodeId) + '"]');
     if (g) {
       g.classList.add("runtime-active");
       runtimeHighlightedIds.push(primaryNodeId);
@@ -1200,7 +1262,7 @@ function renderRuntimeFrame(frame, highlightIds) {
   if (Array.isArray(highlightIds)) {
     for (const id of highlightIds) {
       if (id === primaryNodeId) continue;
-      const g = canvasEl.querySelector('g[data-id="' + cssEscape(id) + '"]');
+      const g = canvasEl.querySelector('[data-id="' + cssEscape(id) + '"]');
       if (g) {
         g.classList.add("runtime-ancestor");
         runtimeHighlightedIds.push(id);
@@ -1296,7 +1358,7 @@ function spawnRuntimeParticle(fromId, toId) {
     }
   }
   // 3) No edge: pulse the destination node so user still sees a "step happened"
-  const g = canvasEl.querySelector('g[data-id="' + cssEscape(toId) + '"]');
+  const g = canvasEl.querySelector('[data-id="' + cssEscape(toId) + '"]');
   if (g) {
     g.classList.add("runtime-step-pulse");
     setTimeout(() => g.classList.remove("runtime-step-pulse"), 700);
@@ -1327,7 +1389,7 @@ function flashNodesMentioningVars(touchedNames) {
       if (re.test(haystack)) { hit = true; break; }
     }
     if (hit) {
-      const g = canvasEl.querySelector('g[data-id="' + cssEscape(n.id) + '"]');
+      const g = canvasEl.querySelector('[data-id="' + cssEscape(n.id) + '"]');
       if (g) {
         g.classList.add("runtime-var-flash");
         flashed.push(g);
