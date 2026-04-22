@@ -476,19 +476,28 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
     });
   }
 
-  // Seed ALL zero-in-degree nodes.
-  // For the common case (top-level or well-structured drilled sub-graph) there
-  // is exactly one root; behaviour is identical to seeding only the entry node.
-  // For drilled sub-graphs that have several independent entry points (multiple
-  // incoming boundary-proxy nodes from different external predecessors) every
-  // root gets a proper starting position.  The primary root (entryId, always
-  // first due to the sort above) takes the canonical START_X column.  Each
-  // additional root is shifted right by COMPONENT_W to give its sub-tree an
-  // independent column with no overlap with the primary flow.
-  const COMPONENT_W = BRANCH_X * 4; // ≈440 px per independent component
-  initialZeroInDeg.forEach((id, i) => {
-    if (visible.has(id)) place(id, START_X + COMPONENT_W * i, START_Y);
-  });
+  // Seed the primary entry node at the canonical top position.
+  if (entryId && visible.has(entryId)) place(entryId, START_X, START_Y);
+
+  // For drilldown sub-graphs the host injects boundary-proxy nodes — one per
+  // external predecessor of the group.  These have zero in-degree inside the
+  // sub-graph and represent callers from outside.  Seed them in a compact
+  // header row at START_Y, each shifted BRANCH_X (110 px) to the right of the
+  // previous, so they appear as a visible context strip at the top rather than
+  // being dumped at the fallbackY bottom stack.
+  //
+  // Top-level graphs (no boundary proxies) have exactly one root (the entry
+  // node), so the loop below is a no-op in that case and the layout is
+  // identical to before: only entryId is seeded.
+  const hasBoundaryProxies = nodes.some((n) => visible.has(n.id) && n.metadata?.boundaryProxy);
+  if (hasBoundaryProxies) {
+    let extraSlot = 1;
+    for (const id of initialZeroInDeg) {
+      if (id === entryId || !visible.has(id)) continue;
+      place(id, START_X + BRANCH_X * extraSlot, START_Y);
+      extraSlot++;
+    }
+  }
 
   // ── Process each node in topological order ────────────────────────────────
   let fallbackY = START_Y;
