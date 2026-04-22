@@ -606,23 +606,47 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   const entryId  = findGraphEntryId(nodes, edges, simplifiedGraph.rootNodeIds);
   const prepared = new Map(nodes.map((n) => [n.id, prepareNode()]));
 
-  // Layout ALL nodes so grouped mode uses the same coordinates as full mode —
-  // making the groups view a true spatial subset of the full view.
+  // Pass 1: layout ALL nodes so hidden descendants still have coordinates for
+  // drilldown and fallback anchoring.
   const allPositions = new Map();
   applyFlowAlphabetLayout(allPositions, nodes, edges, prepared, entryId);
 
+  // Pass 2: layout only the currently visible slice. This keeps the displayed
+  // graph faithful to the simple flow rules instead of inheriting offsets from
+  // hidden internals inside collapsed groups.
+  const positions = new Map();
+  applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, visibility.visibleNodeIds);
+
   // Collapsed group positions — loop body chips go to the right of the loop node (flowchartView.js rule).
-  // Use allPositions (all nodes) so chips for groups whose members are hidden still get a location.
+  // Use visible positions when possible so grouped mode follows the visible
+  // control-flow geometry; fall back to allPositions only when needed.
   const collapsedGroupPositions = new Map();
   for (const groupId of visibility.visibleCollapsedGroupIds) {
     const group = groupById.get(groupId);
     if (!group) continue;
+    if (group.kind === "branch") {
+      const parentDecision = nodes.find((n) =>
+        n.kind === "decision" &&
+        edges.some((e) => e.from === n.id && group.nodeSet.has(e.to)));
+      if (parentDecision) {
+        const parentPos = positions.get(parentDecision.id) || allPositions.get(parentDecision.id);
+        if (parentPos) {
+          const lowerLabel = String(group.label || "").toLowerCase();
+          const isElseBranch = lowerLabel.startsWith("else:");
+          collapsedGroupPositions.set(groupId, {
+            x: parentPos.x + (isElseBranch ? 0 : 110),
+            y: parentPos.y + 70,
+          });
+          continue;
+        }
+      }
+    }
     if (isLoopGroupKind(group.kind)) {
       const loopCondNode = nodes.find((n) =>
         n.kind === "loop" &&
         edges.some((e) => e.from === n.id && group.nodeSet.has(e.to)));
       if (loopCondNode) {
-        const loopPos = allPositions.get(loopCondNode.id);
+        const loopPos = positions.get(loopCondNode.id) || allPositions.get(loopCondNode.id);
         if (loopPos) {
           // Collapsed body chip sits to the RIGHT of the loop node at the same Y,
           // matching where applyFlowAlphabetLayout places the first body node (LOOP_X = 110).
@@ -631,8 +655,9 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
         }
       }
     }
-    // Use allPositions for contained nodes — they may be hidden but have positions from pass 1
-    const contained = group.nodeIds.map((id) => allPositions.get(id)).filter(Boolean);
+    const containedVisible = group.nodeIds.map((id) => positions.get(id)).filter(Boolean);
+    const containedAll = group.nodeIds.map((id) => allPositions.get(id)).filter(Boolean);
+    const contained = containedVisible.length ? containedVisible : containedAll;
     if (contained.length) {
       const cx = contained.reduce((s, p) => s + p.x, 0) / contained.length;
       const cy = contained.reduce((s, p) => s + p.y, 0) / contained.length;
@@ -644,7 +669,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   const rfNodes = [];
   for (const node of nodes) {
     if (!visibility.visibleNodeIds.has(node.id)) continue;
-    const pos = allPositions.get(node.id);
+    const pos = positions.get(node.id);
     if (!pos) continue;
     const color           = nodeKindColor(node.kind);
     const { top, bottom } = nodeChipText(node);
@@ -685,7 +710,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       // Gather positions of the group's own visible children (not grandchildren)
       const childPositions = group.nodeIds
         .filter((id) => visibility.visibleNodeIds.has(id))
-        .map((id) => allPositions.get(id))
+        .map((id) => positions.get(id))
         .filter(Boolean);
       if (!childPositions.length) continue;
       const minX = Math.min(...childPositions.map((p) => p.x));
