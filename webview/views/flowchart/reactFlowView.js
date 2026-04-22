@@ -593,6 +593,60 @@ function findGraphEntryId(nodes, edges, rootNodeIds) {
   return nodes.slice().sort((a, b) => (a.source?.line || 0) - (b.source?.line || 0))[0]?.id;
 }
 
+function buildVisibleEndpointLayoutGraph(nodes, edges, entryId, visibility, nodeGroupChains, groupState, groupById) {
+  const nodesById = new Map(nodes.map((n) => [n.id, n]));
+  const layoutNodesById = new Map();
+  const layoutEdges = [];
+  const seenEdgeKeys = new Set();
+
+  function addEndpointNode(endpointId) {
+    if (!endpointId || layoutNodesById.has(endpointId)) return;
+    if (!endpointId.startsWith("group:")) {
+      const node = nodesById.get(endpointId);
+      if (node) layoutNodesById.set(endpointId, node);
+      return;
+    }
+    const groupId = endpointId.slice(6);
+    const group = groupById.get(groupId);
+    if (!group) return;
+    const sourceLine = Math.min(
+      ...group.nodeIds
+        .map((id) => Number(nodesById.get(id)?.source?.line || Number.MAX_SAFE_INTEGER))
+        .filter((v) => Number.isFinite(v)),
+    );
+    layoutNodesById.set(endpointId, {
+      id: endpointId,
+      kind: "process",
+      label: group.label || groupId,
+      source: { line: Number.isFinite(sourceLine) ? sourceLine : 0 },
+      metadata: { layoutGroup: true, groupId },
+    });
+  }
+
+  visibility.visibleNodeIds.forEach((id) => addEndpointNode(id));
+  visibility.visibleCollapsedGroupIds.forEach((groupId) => addEndpointNode(`group:${groupId}`));
+
+  for (const edge of edges) {
+    const from = resolveVisibleEndpoint(edge.from, nodeGroupChains, groupState);
+    const to = resolveVisibleEndpoint(edge.to, nodeGroupChains, groupState);
+    if (!from || !to || from === to) continue;
+    addEndpointNode(from);
+    addEndpointNode(to);
+    const key = `${from}->${to}::${edge.label || ""}`;
+    if (seenEdgeKeys.has(key)) continue;
+    seenEdgeKeys.add(key);
+    layoutEdges.push({ ...edge, from, to });
+  }
+
+  const endpointEntryId = resolveVisibleEndpoint(entryId, nodeGroupChains, groupState);
+  const layoutNodes = Array.from(layoutNodesById.values());
+  return {
+    nodes: layoutNodes,
+    edges: layoutEdges,
+    entryId: findGraphEntryId(layoutNodes, layoutEdges, endpointEntryId ? [endpointEntryId] : []),
+  };
+}
+
 // ─── Build React Flow nodes + edges from simplifiedGraph + groupState ─────────
 function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode = "grouped") {
   const nodes     = simplifiedGraph.nodes || [];
@@ -611,11 +665,26 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   const allPositions = new Map();
   applyFlowAlphabetLayout(allPositions, nodes, edges, prepared, entryId);
 
-  // Pass 2: layout only the currently visible slice. This keeps the displayed
-  // graph faithful to the simple flow rules instead of inheriting offsets from
-  // hidden internals inside collapsed groups.
+  // Pass 2: layout the actually visible endpoint graph, including collapsed
+  // group chips. This keeps the visible main flow predominantly downward.
+  const visibleLayoutGraph = buildVisibleEndpointLayoutGraph(
+    nodes,
+    edges,
+    entryId,
+    visibility,
+    nodeGroupChains,
+    groupState,
+    groupById,
+  );
+  const visiblePrepared = new Map(visibleLayoutGraph.nodes.map((n) => [n.id, prepareNode()]));
   const positions = new Map();
-  applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, visibility.visibleNodeIds);
+  applyFlowAlphabetLayout(
+    positions,
+    visibleLayoutGraph.nodes,
+    visibleLayoutGraph.edges,
+    visiblePrepared,
+    visibleLayoutGraph.entryId,
+  );
 
   // Collapsed group positions — loop body chips go to the right of the loop node (flowchartView.js rule).
   // Use visible positions when possible so grouped mode follows the visible
@@ -624,6 +693,11 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   for (const groupId of visibility.visibleCollapsedGroupIds) {
     const group = groupById.get(groupId);
     if (!group) continue;
+    const directPos = positions.get(`group:${groupId}`);
+    if (directPos) {
+      collapsedGroupPositions.set(groupId, { x: directPos.x, y: directPos.y });
+      continue;
+    }
     if (group.kind === "branch") {
       const parentDecision = nodes.find((n) =>
         n.kind === "decision" &&
