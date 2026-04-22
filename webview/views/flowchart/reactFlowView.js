@@ -538,7 +538,7 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
       let falseSlot = 0, trueSlot = 0;
       scored.forEach(({ edge, side }) => {
         if (side < 0) { place(edge.to, c.x,                             c.y + V_STEP * (falseSlot + 1)); falseSlot++; }
-        else          { place(edge.to, c.x + BRANCH_X * (trueSlot + 1), c.y + V_STEP);                  trueSlot++;  }
+        else          { place(edge.to, c.x + BRANCH_X * (trueSlot + 1), c.y);                           trueSlot++;  }
       });
       continue;
     }
@@ -635,7 +635,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
           const isElseBranch = lowerLabel.startsWith("else:");
           collapsedGroupPositions.set(groupId, {
             x: parentPos.x + (isElseBranch ? 0 : 110),
-            y: parentPos.y + 70,
+            y: parentPos.y + (isElseBranch ? 70 : 0),
           });
           continue;
         }
