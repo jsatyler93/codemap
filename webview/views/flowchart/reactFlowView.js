@@ -678,7 +678,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       type: "codemapNode",
       data: { top, bottom, color, kind: node.kind, label: node.label || node.id, detail: node.detail || "", source: node.source },
       position:    { x: pos.x, y: pos.y },
-      draggable:   true,
+      draggable:   layoutMode === "full",
       selectable:  true,
       connectable: false,
     });
@@ -695,7 +695,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       type: "codemapGroupNode",
       data: { top, bottom, color, groupId, groupLabel: group.label || group.kind },
       position:    { x: pos.x, y: pos.y },
-      draggable:   true,
+      draggable:   layoutMode === "full",
       selectable:  true,
       connectable: false,
     });
@@ -1000,9 +1000,9 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
     const decisionNo  = fromKind === "decision" && /no|false|else|done|exit/.test(lower);
 
     if (decisionYes) {
-      const startX = sourceX + NODE_R;
+      const startX = sourceX;
       const startY = sourceY;
-      const endX   = targetX - NODE_R;
+      const endX   = targetX;
       const endY   = targetY;
       edgePath = `M ${startX},${startY} L ${endX},${endY}`;
       labelX  = (startX + endX) / 2;
@@ -1013,9 +1013,9 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
       arrowUy = 0;
     } else if (decisionNo) {
       const startX = sourceX;
-      const startY = sourceY + NODE_R;
+      const startY = sourceY;
       const endX   = targetX;
-      const endY   = targetY - NODE_R;
+      const endY   = targetY;
       edgePath = `M ${startX},${startY} L ${endX},${endY}`;
       labelX  = startX + 10;
       labelY  = (startY + endY) / 2 - 4;
@@ -1215,13 +1215,14 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
 
   // Apply saved positions from layoutSnapshot
   const computedNodes = useMemo(() => {
+    if (layoutMode !== "full") return rfNodes;
     const savedNodes = layoutSnapshot?.nodes || {};
     return rfNodes.map((node) => {
       const saved = savedNodes[node.id];
       if (!saved || typeof saved.x !== "number" || typeof saved.y !== "number") return node;
       return { ...node, position: { x: saved.x, y: saved.y } };
     });
-  }, [rfNodes, layoutSnapshot]);
+  }, [rfNodes, layoutSnapshot, layoutMode]);
 
   const [nodes, setNodes] = useNodesState(computedNodes);
   const [edges, setEdges] = useEdgesState(rfEdges);
@@ -1243,17 +1244,19 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
 
   const persistLayout = useCallback((nodeList) => {
     const snapshot = { nodes: {}, groups: {} };
-    nodeList.forEach((node) => {
-      if (!node?.id || !node?.position) return;
-      snapshot.nodes[node.id] = { x: node.position.x, y: node.position.y };
-    });
+    if (layoutMode === "full") {
+      nodeList.forEach((node) => {
+        if (!node?.id || !node?.position) return;
+        snapshot.nodes[node.id] = { x: node.position.x, y: node.position.y };
+      });
+    }
     groups.forEach((g) => {
       const state = groupState.get(g.id);
       if (!state) return;
       snapshot.groups[g.id] = { collapsed: !!state.collapsed };
     });
     callbacks.onLayoutChanged?.(snapshot);
-  }, [groups, groupState, callbacks]);
+  }, [groups, groupState, callbacks, layoutMode]);
 
   return React.createElement(
     "div", { className: "codemap-rf-shell" },
