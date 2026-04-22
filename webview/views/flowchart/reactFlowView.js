@@ -444,9 +444,18 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
   const center = new Map(); // id → {x, y}
   function place(id, x, y) {
     if (!prepared.has(id)) return;
+    const placedPreds = (fwdIn.get(id) || [])
+      .map((edge) => center.get(edge.from))
+      .filter(Boolean);
     const ex = center.get(id);
     let nx, ny;
-    if (!ex) {
+    if (placedPreds.length > 1) {
+      // Recompute reconvergence from the actual predecessor positions rather
+      // than compounding earlier provisional placements. This keeps shared
+      // targets one row below the deepest predecessor and prevents long tails.
+      nx = Math.min(x, ...placedPreds.map((p) => p.x));
+      ny = Math.max(y, Math.max(...placedPreds.map((p) => p.y)) + V_STEP);
+    } else if (!ex) {
       nx = x; ny = y;
     } else {
       // Merge point: leftmost column (converge back to main), deepest row
