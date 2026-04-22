@@ -24,6 +24,8 @@ export class GraphWebviewProvider {
     cohesionStrength: 0.34,
     layoutMode: "lanes",
     treeView: false,
+    canvasBrightness: 1.0,
+    canvasThemeMode: "codemap",
   };
 
   constructor(

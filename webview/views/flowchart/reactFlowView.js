@@ -781,20 +781,14 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     for (const groupId of visibility.visibleExpandedGroupIds) {
       const group = groupById.get(groupId);
       if (!group) continue;
-      // Gather positions of the group's own visible children (not grandchildren)
-      const childPositions = group.nodeIds
-        .filter((id) => visibility.visibleNodeIds.has(id))
-        .map((id) => positions.get(id))
-        .filter(Boolean);
-      if (!childPositions.length) continue;
-      const minX = Math.min(...childPositions.map((p) => p.x));
-      const minY = Math.min(...childPositions.map((p) => p.y));
+      const anchorPos = collapsedGroupPositions.get(groupId);
+      if (!anchorPos) continue;
       const color = groupKindColor(group.kind);
       rfNodes.push({
         id:          `groupheader:${groupId}`,
         type:        "codemapGroupHeaderNode",
         data:        { color, groupId, groupLabel: group.label || group.kind },
-        position:    { x: minX, y: minY - 24 },
+        position:    { x: anchorPos.x, y: anchorPos.y },
         draggable:   false,
         selectable:  false,
         connectable: false,
@@ -816,24 +810,32 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     if (!srcEndpoint || !tgtEndpoint || srcEndpoint === tgtEndpoint) continue;
     if (!renderedNodeIds.has(srcEndpoint) || !renderedNodeIds.has(tgtEndpoint)) continue;
 
-    const dedupeKey = `${srcEndpoint}->${tgtEndpoint}::${edge.label || ""}`;
-    if (seenEdgeKeys.has(dedupeKey)) continue;
-    seenEdgeKeys.add(dedupeKey);
+    const sourceIsGroup = srcEndpoint.startsWith("group:");
+    const targetIsGroup = tgtEndpoint.startsWith("group:");
 
     const getKind = (ep) => {
       if (!ep.startsWith("group:")) return nodesById.get(ep)?.kind || "process";
       const k = groupById.get(ep.slice(6))?.kind;
-      return k === "branch" ? "decision" : isLoopGroupKind(k) ? "loop" : "process";
+      return isLoopGroupKind(k) ? "loop" : "process";
     };
     const fromKind = getKind(srcEndpoint);
     const toKind   = getKind(tgtEndpoint);
-    const label    = edge.label || "";
+    const rawLabel = edge.label || "";
+    const rawLower = rawLabel.toLowerCase();
+    const hideCollapsedBranchControlLabel = sourceIsGroup && /yes|no|true|false|then|else|ok|done|exit|body/.test(rawLower);
+    const label    = hideCollapsedBranchControlLabel ? "" : rawLabel;
     const lower    = label.toLowerCase();
+
+    const dedupeKey = `${srcEndpoint}->${tgtEndpoint}::${label}`;
+    if (seenEdgeKeys.has(dedupeKey)) continue;
+    seenEdgeKeys.add(dedupeKey);
     const loopBack = (lower === "repeat" || lower === "continue") && toKind === "loop";
     const loopBody = fromKind === "loop" && !loopBack && !/done|else|exit/i.test(lower);
     const backArc  = !loopBack && !loopBody && fromKind === "break";
     const isArcEdge = loopBack || loopBody || backArc;
-    const color    = nodeKindColor(fromKind);
+    const color    = sourceIsGroup
+      ? groupKindColor(groupById.get(srcEndpoint.slice(6))?.kind)
+      : nodeKindColor(fromKind);
 
     const sourceHandle = "center-s";
     const targetHandle = "center-t";
@@ -846,7 +848,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       targetHandle,
       label:        label || undefined,
       type:         "codemapEdge",
-      data:         { label, loopBack, loopBody, backArc, color, fromKind },
+      data:         { label, loopBack, loopBody, backArc, color, fromKind, sourceIsGroup, targetIsGroup },
       style:        { stroke: color + (isArcEdge ? "9f" : "4f"), strokeWidth: 1.4 },
     });
   }
@@ -862,6 +864,8 @@ let flowApi      = null;
 const drilldownRef    = { current: null };
 const toggleGroupRef  = { current: null };
 const layoutModeRef   = { current: "grouped" };
+const expandAllGroupsRef   = { current: null };
+const collapseAllGroupsRef = { current: null };
 
 // Center handles — positioned at the node's geometric center so arc edges attach there.
 const CENTRE_HANDLE_STYLE = { opacity: 0, width: 1, height: 1, minWidth: 1, minHeight: 1, top: '50%', left: '50%', transform: 'translate(-50%,-50%)' };
@@ -889,7 +893,7 @@ function CodemapNode({ id, data }) {
         justifyContent: "center",
         gap: "1px",
         userSelect: "none",
-        cursor: "pointer",
+        cursor: "default",
         boxSizing: "border-box",
       },
     },
@@ -923,7 +927,7 @@ function CodemapGroupNode({ id, data }) {
         justifyContent: "center",
         gap: "1px",
         userSelect: "none",
-        cursor: "pointer",
+        cursor: "default",
         boxSizing: "border-box",
       },
     },
@@ -971,39 +975,35 @@ function CodemapGroupHeaderNode({ id, data }) {
   const { color, groupId, groupLabel } = data;
   return React.createElement("div", {
     style: {
-      display: "flex",
-      alignItems: "center",
-      gap: "4px",
-      padding: "1px 5px 1px 5px",
-      borderRadius: "4px",
-      border: `1px solid ${color}44`,
-      background: color + "0a",
+      position: "relative",
+      width: `${NODE_CIRCLE_D}px`,
+      height: `${NODE_CIRCLE_D}px`,
       userSelect: "none",
-      whiteSpace: "nowrap",
-      pointerEvents: "all",
+      pointerEvents: "none",
     },
   },
-    React.createElement("span", {
-      style: { fontSize: "7px", fontFamily: "serif", color: color + "bb", letterSpacing: "0.1px" },
-    }, groupLabel),
     React.createElement("button", {
       title: `Collapse ${groupLabel}`,
       style: {
+        position: "absolute",
+        top: "-5px",
+        right: "-5px",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        width: "11px",
-        height: "11px",
+        width: "14px",
+        height: "14px",
         borderRadius: "50%",
         border: `1px solid ${color}75`,
         background: color + "1e",
-        fontSize: "9px",
+        fontSize: "10px",
         fontWeight: "700",
         color: color + "ee",
         cursor: "pointer",
         lineHeight: 1,
         padding: 0,
         flexShrink: 0,
+        pointerEvents: "all",
       },
       onPointerDown: (e) => e.stopPropagation(),
       onClick: (e) => {
@@ -1145,29 +1145,52 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
   );
 }
 
-// ─── GroupHierarchyOverlay — side panel listing all groups with + buttons ─────
-function GroupHierarchyOverlay({ groups, onDrilldownGroup }) {
-  const ordered = useMemo(() => buildOrderedGroups(groups), [groups]);
-  if (!ordered.length) return null;
+// ─── GroupHierarchyOverlay — right-side overview rail for grouped mode ───────
+function GroupHierarchyOverlay({ groups, breadcrumb, onDrilldownGroup, onNavigateBreadcrumb }) {
+  const trail = Array.isArray(breadcrumb) ? breadcrumb : [];
+  if (!trail.length) return null;
   return React.createElement(
     "div",
     { className: "codemap-rf-groups", onPointerDown: (e) => e.stopPropagation() },
-    React.createElement("div", { className: "codemap-rf-groups-title" }, "GROUP HIERARCHY"),
-    ...ordered.map((entry) =>
-      React.createElement("div", {
-        key: entry.id,
-        className: "codemap-rf-group-row",
-        style: { paddingLeft: `${10 + entry.depth * 14}px` },
-      },
-        React.createElement("span", { className: "codemap-rf-group-label", title: entry.label }, entry.label),
-        React.createElement("button", {
-          className: "codemap-rf-group-plus",
-          title: `Drill into ${entry.label}`,
-          onClick: () => onDrilldownGroup?.(entry.id, entry.label),
-        }, "+"),
-      ),
+    React.createElement("div", { className: "codemap-rf-breadcrumbs codemap-rf-breadcrumbs-vertical" },
+      React.createElement("button", {
+        className: "codemap-rf-crumb is-clickable is-home",
+        title: "Back to overview",
+        onClick: () => onNavigateBreadcrumb?.(-1),
+      }, "OV"),
+      ...trail.map((entry, index) => {
+        const isLast = index === trail.length - 1;
+        return React.createElement(
+          "button",
+          {
+            key: `${entry.groupId || entry.label || index}`,
+            className: `codemap-rf-crumb${!isLast ? " is-clickable" : ""}${isLast ? " is-current" : ""}`,
+            disabled: isLast,
+            title: entry.label,
+            onClick: () => !isLast && onNavigateBreadcrumb?.(index),
+          },
+          compactOverlayLabel(entry.label),
+        );
+      }),
     ),
   );
+}
+
+function compactOverlayLabel(label) {
+  const words = String(label || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return "..";
+  if (words.length >= 2) {
+    return words
+      .slice(0, 3)
+      .map((word) => word.charAt(0).toUpperCase())
+      .join("");
+  }
+  const cleaned = words[0].replace(/[^a-z0-9]/gi, "");
+  if (!cleaned) return "..";
+  return cleaned.slice(0, 4);
 }
 
 function buildOrderedGroups(groups) {
@@ -1204,7 +1227,7 @@ function CaptureFlowApi() {
   return null;
 }
 
-function FitViewOnMount({ preserveView }) {
+function FitViewOnMount({ preserveView, graph }) {
   const rf = useReactFlow();
   useEffect(() => {
     if (preserveView && lastViewport) {
@@ -1212,7 +1235,7 @@ function FitViewOnMount({ preserveView }) {
       return;
     }
     rf.fitView({ duration: 280, padding: 0.22 });
-  }, [rf, preserveView]);
+  }, [rf, preserveView, graph]);
   return null;
 }
 
@@ -1223,6 +1246,30 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
   const groupById        = useMemo(() => new Map(groups.map((g) => [g.id, g])),  [groups]);
   const groupDepth       = useMemo(() => buildGroupDepthMap(groups),              [groups]);
   const nodeGroupChains  = useMemo(() => buildNodeGroupChains(groups),            [groups]);
+
+  const childGroupsByParent = useMemo(() => {
+    const map = new Map();
+    groups.forEach((g) => map.set(g.id, []));
+    groups.forEach((g) => {
+      if (!g.parentGroupId || !map.has(g.parentGroupId)) return;
+      map.get(g.parentGroupId).push(g.id);
+    });
+    return map;
+  }, [groups]);
+
+  const descendantGroupsByParent = useMemo(() => {
+    const map = new Map();
+    function collect(groupId) {
+      if (map.has(groupId)) return map.get(groupId);
+      const direct = childGroupsByParent.get(groupId) || [];
+      const all = [...direct];
+      direct.forEach((childId) => all.push(...collect(childId)));
+      map.set(groupId, all);
+      return all;
+    }
+    groups.forEach((g) => collect(g.id));
+    return map;
+  }, [groups, childGroupsByParent]);
 
   const layoutSnapshot   = callbacks.layoutSnapshot;
 
@@ -1252,15 +1299,15 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
   }, [callbacks.onDrilldownGroup, layoutMode]);
 
   // ── Full-mode independent collapse state ─────────────────────────────────
-  // Starts all-expanded; user can collapse/re-expand individual groups inline.
-  // Resets to all-expanded whenever switching into "full" mode.
+  // Starts all-collapsed so users can expand one layer at a time inline.
+  // Re-entering "full" mode resets back to the one-layer-at-a-time view.
   const [fullModeGroupState, setFullModeGroupState] = useState(
-    () => new Map(groups.map((g) => [g.id, { collapsed: false }])),
+    () => new Map(groups.map((g) => [g.id, { collapsed: true }])),
   );
   const prevLayoutModeRef = useRef(initialLayoutMode);
   useEffect(() => {
     if (layoutMode === "full" && prevLayoutModeRef.current !== "full") {
-      setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: false }])));
+      setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: true }])));
     }
     prevLayoutModeRef.current = layoutMode;
   }, [layoutMode, groups]);
@@ -1268,14 +1315,35 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
   const toggleFullModeGroup = useCallback((groupId) => {
     setFullModeGroupState((prev) => {
       const next = new Map(prev);
-      next.set(groupId, { collapsed: !prev.get(groupId)?.collapsed });
+      const isCollapsed = prev.get(groupId)?.collapsed !== false;
+      const descendantIds = descendantGroupsByParent.get(groupId) || [];
+      descendantIds.forEach((id) => next.set(id, { collapsed: true }));
+      next.set(groupId, { collapsed: !isCollapsed ? true : false });
       return next;
     });
-  }, []);
+  }, [descendantGroupsByParent]);
+
+  const expandAllFullModeGroups = useCallback(() => {
+    setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: false }])));
+  }, [groups]);
+
+  const collapseAllFullModeGroups = useCallback(() => {
+    setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: true }])));
+  }, [groups]);
 
   useEffect(() => {
     toggleGroupRef.current = toggleFullModeGroup;
   }, [toggleFullModeGroup]);
+
+  useEffect(() => {
+    if (layoutMode === "full" && groups.length > 0) {
+      expandAllGroupsRef.current = expandAllFullModeGroups;
+      collapseAllGroupsRef.current = collapseAllFullModeGroups;
+      return;
+    }
+    expandAllGroupsRef.current = null;
+    collapseAllGroupsRef.current = null;
+  }, [layoutMode, groups, expandAllFullModeGroups, collapseAllFullModeGroups]);
 
   // "grouped" mode → use groupState; "full" mode → use fullModeGroupState (user-controllable)
   const effectiveGroupState = useMemo(() => {
@@ -1355,13 +1423,7 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
           });
         },
         onNodeClick: (_event, node) => {
-          if (node.type === "codemapGroupNode") {
-            const { groupId, groupLabel } = node.data;
-            if (groupId) {
-              if (layoutMode === "full") toggleFullModeGroup(groupId);
-              else callbacks.onDrilldownGroup?.(groupId, groupLabel);
-            }
-          } else if (node.type !== "codemapGroupHeaderNode") {
+          if (node.type === "codemapNode") {
             callbacks.onNodeClick?.({ id: node.id, source: node.data?.source });
           }
         },
@@ -1390,11 +1452,13 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
         maskColor: "rgba(10, 12, 18, 0.42)",
       }),
       React.createElement(CaptureFlowApi, null),
-      React.createElement(FitViewOnMount, { preserveView }),
+      React.createElement(FitViewOnMount, { preserveView, graph }),
     ),
     layoutMode === "grouped" && React.createElement(GroupHierarchyOverlay, {
       groups,
+      breadcrumb: callbacks.flowchartBreadcrumb,
       onDrilldownGroup: callbacks.onDrilldownGroup,
+      onNavigateBreadcrumb: callbacks.onNavigateBreadcrumb,
     }),
   );
 }
@@ -1431,6 +1495,9 @@ export function renderFlowchartReactFlow(graph, options = {}) {
     nodeRect:    new Map(),
     nodes:       Array.isArray(graph?.nodes) ? graph.nodes : [],
     sceneEl:     null,
+    _hasGroupControls: flowchartViewMode === "full" && Array.isArray(graph?.metadata?.groups) && graph.metadata.groups.length > 0,
+    _expandAllGroups: () => expandAllGroupsRef.current?.(),
+    _collapseAllGroups: () => collapseAllGroupsRef.current?.(),
   };
 }
 
@@ -1446,6 +1513,8 @@ export function clearFlowchartReactFlow() {
   lastViewport         = null;
   flowApi              = null;
   drilldownRef.current = null;
+  expandAllGroupsRef.current = null;
+  collapseAllGroupsRef.current = null;
 }
 
 export function resetFlowchartReactView() {

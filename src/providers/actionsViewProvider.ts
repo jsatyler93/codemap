@@ -1,14 +1,15 @@
 import * as vscode from "vscode";
 
 const SHOW_EVIDENCE_KEY = "codemap.showEvidence";
-const REPEL_STRENGTH_KEY = "codemap.repelStrength";
-const ATTRACT_STRENGTH_KEY = "codemap.attractStrength";
-const AMBIENT_REPEL_STRENGTH_KEY = "codemap.ambientRepelStrength";
-const COHESION_STRENGTH_KEY = "codemap.cohesionStrength";
-const TREE_VIEW_KEY = "codemap.treeView";
-const FLOWCHART_LAYOUT_MODE_KEY = "codemap.flowchartLayoutMode";
 const FLOWCHART_VIEW_MODE_KEY = "codemap.flowchartViewMode";
 const CANVAS_BRIGHTNESS_KEY = "codemap.canvasBrightness";
+const CANVAS_THEME_MODE_KEY = "codemap.canvasThemeMode";
+const DEFAULT_REPEL_STRENGTH = 0.45;
+const DEFAULT_ATTRACT_STRENGTH = 0.32;
+const DEFAULT_AMBIENT_REPEL_STRENGTH = 0.18;
+const DEFAULT_COHESION_STRENGTH = 0.34;
+const DEFAULT_LAYOUT_MODE = "lanes" as const;
+const DEFAULT_CANVAS_THEME_MODE = "codemap" as const;
 
 interface ExecuteCommandMessage {
   type: "executeCommand";
@@ -18,36 +19,6 @@ interface ExecuteCommandMessage {
 interface ToggleEvidenceMessage {
   type: "toggleEvidence";
   enabled: boolean;
-}
-
-interface SetRepelStrengthMessage {
-  type: "setRepelStrength";
-  value: number;
-}
-
-interface SetAttractStrengthMessage {
-  type: "setAttractStrength";
-  value: number;
-}
-
-interface SetAmbientRepelStrengthMessage {
-  type: "setAmbientRepelStrength";
-  value: number;
-}
-
-interface SetCohesionStrengthMessage {
-  type: "setCohesionStrength";
-  value: number;
-}
-
-interface ToggleTreeViewMessage {
-  type: "toggleTreeView";
-  enabled: boolean;
-}
-
-interface SetLayoutModeMessage {
-  type: "setLayoutMode";
-  mode: "tree" | "lanes" | "freeform";
 }
 
 interface SetFlowchartViewModeMessage {
@@ -60,11 +31,16 @@ interface SetCanvasBrightnessMessage {
   value: number;
 }
 
+interface SetCanvasThemeModeMessage {
+  type: "setCanvasThemeMode";
+  mode: "codemap" | "vscode";
+}
+
 interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | SetLayoutModeMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | SetCanvasThemeModeMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -77,32 +53,18 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private lastSummary: { checked: number; total: number } = { checked: 0, total: 0 };
   private showEvidence: boolean;
-  private repelStrength: number;
-  private attractStrength: number;
-  private ambientRepelStrength: number;
-  private cohesionStrength: number;
-  private treeView: boolean;
-  private layoutMode: "tree" | "lanes" | "freeform";
   private flowchartViewMode: "grouped" | "full";
   private canvasBrightness: number;
+  private canvasThemeMode: "codemap" | "vscode";
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean }) => void,
+    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full"; canvasBrightness: number; canvasThemeMode: "codemap" | "vscode" }) => void,
   ) {
     this.showEvidence = context.workspaceState.get<boolean>(SHOW_EVIDENCE_KEY, false);
-    this.repelStrength = clamp01(context.workspaceState.get<number>(REPEL_STRENGTH_KEY, 0.45));
-    this.attractStrength = clamp01(context.workspaceState.get<number>(ATTRACT_STRENGTH_KEY, 0.32));
-    this.ambientRepelStrength = clamp01(context.workspaceState.get<number>(AMBIENT_REPEL_STRENGTH_KEY, 0.18));
-    this.cohesionStrength = clamp01(context.workspaceState.get<number>(COHESION_STRENGTH_KEY, 0.34));
-    this.treeView = context.workspaceState.get<boolean>(TREE_VIEW_KEY, false);
-    this.layoutMode = context.workspaceState.get<"tree" | "lanes" | "freeform">(
-      FLOWCHART_LAYOUT_MODE_KEY,
-      this.treeView ? "tree" : "lanes",
-    );
-    this.treeView = this.layoutMode === "tree";
     this.flowchartViewMode = context.workspaceState.get<"grouped" | "full">(FLOWCHART_VIEW_MODE_KEY, "grouped");
-    this.canvasBrightness = clamp01(context.workspaceState.get<number>(CANVAS_BRIGHTNESS_KEY, 1.0));
+    this.canvasBrightness = clampCanvasBrightness(context.workspaceState.get<number>(CANVAS_BRIGHTNESS_KEY, 1.0));
+    this.canvasThemeMode = context.workspaceState.get<"codemap" | "vscode">(CANVAS_THEME_MODE_KEY, DEFAULT_CANVAS_THEME_MODE);
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -118,48 +80,19 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         void this.context.workspaceState.update(SHOW_EVIDENCE_KEY, this.showEvidence);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
-      } else if (msg.type === "setRepelStrength") {
-        this.repelStrength = clamp01(msg.value);
-        void this.context.workspaceState.update(REPEL_STRENGTH_KEY, this.repelStrength);
-        this.postUiState();
-        this.onUiStateChanged(this.getUiState());
-      } else if (msg.type === "setAttractStrength") {
-        this.attractStrength = clamp01(msg.value);
-        void this.context.workspaceState.update(ATTRACT_STRENGTH_KEY, this.attractStrength);
-        this.postUiState();
-        this.onUiStateChanged(this.getUiState());
-      } else if (msg.type === "setAmbientRepelStrength") {
-        this.ambientRepelStrength = clamp01(msg.value);
-        void this.context.workspaceState.update(AMBIENT_REPEL_STRENGTH_KEY, this.ambientRepelStrength);
-        this.postUiState();
-        this.onUiStateChanged(this.getUiState());
-      } else if (msg.type === "setCohesionStrength") {
-        this.cohesionStrength = clamp01(msg.value);
-        void this.context.workspaceState.update(COHESION_STRENGTH_KEY, this.cohesionStrength);
-        this.postUiState();
-        this.onUiStateChanged(this.getUiState());
-      } else if (msg.type === "toggleTreeView") {
-        this.treeView = !!msg.enabled;
-        this.layoutMode = this.treeView ? "tree" : "lanes";
-        void this.context.workspaceState.update(TREE_VIEW_KEY, this.treeView);
-        void this.context.workspaceState.update(FLOWCHART_LAYOUT_MODE_KEY, this.layoutMode);
-        this.postUiState();
-        this.onUiStateChanged(this.getUiState());
-      } else if (msg.type === "setLayoutMode") {
-        this.layoutMode = msg.mode;
-        this.treeView = this.layoutMode === "tree";
-        void this.context.workspaceState.update(FLOWCHART_LAYOUT_MODE_KEY, this.layoutMode);
-        void this.context.workspaceState.update(TREE_VIEW_KEY, this.treeView);
-        this.postUiState();
-        this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "setFlowchartViewMode") {
         this.flowchartViewMode = msg.mode;
         void this.context.workspaceState.update(FLOWCHART_VIEW_MODE_KEY, this.flowchartViewMode);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "setCanvasBrightness") {
-        this.canvasBrightness = clamp01(msg.value);
+        this.canvasBrightness = clampCanvasBrightness(msg.value);
         void this.context.workspaceState.update(CANVAS_BRIGHTNESS_KEY, this.canvasBrightness);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "setCanvasThemeMode") {
+        this.canvasThemeMode = msg.mode;
+        void this.context.workspaceState.update(CANVAS_THEME_MODE_KEY, this.canvasThemeMode);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "ready") {
@@ -191,33 +124,23 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.showEvidence;
   }
 
-  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full"; canvasBrightness: number } {
+  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full"; canvasBrightness: number; canvasThemeMode: "codemap" | "vscode" } {
     return {
       showEvidence: this.showEvidence,
-      repelStrength: this.repelStrength,
-      attractStrength: this.attractStrength,
-      ambientRepelStrength: this.ambientRepelStrength,
-      cohesionStrength: this.cohesionStrength,
-      layoutMode: this.layoutMode,
-      treeView: this.treeView,
+      repelStrength: DEFAULT_REPEL_STRENGTH,
+      attractStrength: DEFAULT_ATTRACT_STRENGTH,
+      ambientRepelStrength: DEFAULT_AMBIENT_REPEL_STRENGTH,
+      cohesionStrength: DEFAULT_COHESION_STRENGTH,
+      layoutMode: DEFAULT_LAYOUT_MODE,
+      treeView: false,
       flowchartViewMode: this.flowchartViewMode,
       canvasBrightness: this.canvasBrightness,
+      canvasThemeMode: this.canvasThemeMode,
     };
   }
 
   private postUiState(): void {
-    this.view?.webview.postMessage({
-      type: "uiState",
-      showEvidence: this.showEvidence,
-      repelStrength: this.repelStrength,
-      attractStrength: this.attractStrength,
-      ambientRepelStrength: this.ambientRepelStrength,
-      cohesionStrength: this.cohesionStrength,
-      layoutMode: this.layoutMode,
-      treeView: this.treeView,
-      flowchartViewMode: this.flowchartViewMode,
-      canvasBrightness: this.canvasBrightness,
-    });
+    this.view?.webview.postMessage({ type: "uiState", ...this.getUiState() });
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -367,12 +290,10 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 
   <div class="section-title">Visualize</div>
   <button class="action" data-cmd="codemap.showWorkspaceGraph">Workspace Call Graph</button>
-  <button class="action" data-cmd="codemap.refresh">&#x21bb; Refresh Analysis</button>
 
   <details class="dropdown">
     <summary>Display Settings</summary>
     <div class="dropdown-content">
-      <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
       <div class="slider-block" id="flowchart-view-block" style="display:none;">
         <div class="slider-row" style="margin-bottom:4px"><span>Flowchart View</span></div>
         <div class="preset-row" style="margin-top:0;margin-bottom:0;">
@@ -381,90 +302,46 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         </div>
       </div>
       <div class="slider-block">
-        <div class="slider-row"><span>Flowchart Layout</span></div>
-        <select id="layout-mode" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--vscode-panel-border);background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground);">
-          <option value="tree">Tree</option>
-          <option value="lanes">Structured Lanes</option>
-          <option value="freeform">Freeform</option>
-        </select>
-      </div>
-      <div class="preset-row">
-        <button class="preset" data-preset="tidy">Tidy</button>
-        <button class="preset" data-preset="balanced">Balanced</button>
-        <button class="preset" data-preset="loose">Loose</button>
-      </div>
-      <div class="slider-block">
-        <div class="slider-row"><span>Overlap Repel</span><span class="slider-value" id="repel-value">0.45</span></div>
-        <input id="repel-slider" type="range" min="0" max="1" step="0.05" value="0.45" />
-      </div>
-      <div class="slider-block">
-        <div class="slider-row"><span>Link Attract</span><span class="slider-value" id="attract-value">0.32</span></div>
-        <input id="attract-slider" type="range" min="0" max="1" step="0.05" value="0.32" />
-      </div>
-      <div class="slider-block">
-        <div class="slider-row"><span>Ambient Repel</span><span class="slider-value" id="ambient-repel-value">0.18</span></div>
-        <input id="ambient-repel-slider" type="range" min="0" max="1" step="0.05" value="0.18" />
-      </div>
-      <div class="slider-block">
-        <div class="slider-row"><span>Field Cohesion</span><span class="slider-value" id="cohesion-value">0.34</span></div>
-        <input id="cohesion-slider" type="range" min="0" max="1" step="0.05" value="0.34" />
+        <div class="slider-row" style="margin-bottom:4px"><span>Canvas Theme</span></div>
+        <div class="preset-row" style="margin-top:0;margin-bottom:0;">
+          <button class="preset" id="theme-codemap" data-theme="codemap">CodeMap</button>
+          <button class="preset" id="theme-vscode" data-theme="vscode">Match VS Code</button>
+        </div>
       </div>
       <div class="slider-block">
         <div class="slider-row"><span>Brightness</span><span class="slider-value" id="brightness-value">1.00</span></div>
         <input id="brightness-slider" type="range" min="0" max="2" step="0.05" value="1" />
       </div>
+      <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
     </div>
   </details>
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const evidenceToggle = document.getElementById('toggle-evidence');
-  const layoutModeSelect = document.getElementById('layout-mode');
   const flowchartViewBlock = document.getElementById('flowchart-view-block');
   const fvButtons = document.querySelectorAll('[data-fv]');
-  const repelSlider = document.getElementById('repel-slider');
-  const repelValue = document.getElementById('repel-value');
-  const attractSlider = document.getElementById('attract-slider');
-  const attractValue = document.getElementById('attract-value');
-  const ambientRepelSlider = document.getElementById('ambient-repel-slider');
-  const ambientRepelValue = document.getElementById('ambient-repel-value');
-  const cohesionSlider = document.getElementById('cohesion-slider');
-  const cohesionValue = document.getElementById('cohesion-value');
+  const themeButtons = document.querySelectorAll('[data-theme]');
   const brightnessSlider = document.getElementById('brightness-slider');
   const brightnessValue = document.getElementById('brightness-value');
-  let pendingTimer = null;
-  const presets = {
-    tidy: { repel: 0.72, attract: 0.22, ambient: 0.10, cohesion: 0.58 },
-    balanced: { repel: 0.45, attract: 0.32, ambient: 0.18, cohesion: 0.34 },
-    loose: { repel: 0.30, attract: 0.42, ambient: 0.30, cohesion: 0.18 },
-  };
 
   document.querySelectorAll('button.action').forEach((btn) => {
     btn.addEventListener('click', () => {
       vscode.postMessage({ type: 'executeCommand', command: btn.dataset.cmd });
     });
   });
-  document.querySelectorAll('button.preset').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const preset = presets[btn.dataset.preset];
-      if (!preset) return;
-      repelSlider.value = String(preset.repel);
-      attractSlider.value = String(preset.attract);
-      ambientRepelSlider.value = String(preset.ambient);
-      cohesionSlider.value = String(preset.cohesion);
-      commitForcePreview();
-    });
-  });
 
   evidenceToggle.addEventListener('change', () => {
     vscode.postMessage({ type: 'toggleEvidence', enabled: evidenceToggle.checked });
   });
-  layoutModeSelect.addEventListener('change', () => {
-    vscode.postMessage({ type: 'setLayoutMode', mode: layoutModeSelect.value });
-  });
   fvButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
       vscode.postMessage({ type: 'setFlowchartViewMode', mode: btn.dataset.fv });
+    });
+  });
+  themeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'setCanvasThemeMode', mode: btn.dataset.theme });
     });
   });
   function setActiveFvButton(mode) {
@@ -480,48 +357,27 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         : 'var(--vscode-panel-border)';
     });
   }
-
-  function updateSliderLabels() {
-    repelValue.textContent = Number(repelSlider.value).toFixed(2);
-    attractValue.textContent = Number(attractSlider.value).toFixed(2);
-    ambientRepelValue.textContent = Number(ambientRepelSlider.value).toFixed(2);
-    cohesionValue.textContent = Number(cohesionSlider.value).toFixed(2);
-    brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
+  function setActiveThemeButton(mode) {
+    themeButtons.forEach((btn) => {
+      btn.style.background = btn.dataset.theme === mode
+        ? 'var(--vscode-focusBorder)'
+        : 'var(--vscode-button-secondaryBackground)';
+      btn.style.color = btn.dataset.theme === mode
+        ? '#fff'
+        : 'var(--vscode-button-secondaryForeground)';
+      btn.style.borderColor = btn.dataset.theme === mode
+        ? 'var(--vscode-focusBorder)'
+        : 'var(--vscode-panel-border)';
+    });
   }
 
-  function postForceState() {
-    vscode.postMessage({ type: 'setRepelStrength', value: Number(repelSlider.value) });
-    vscode.postMessage({ type: 'setAttractStrength', value: Number(attractSlider.value) });
-    vscode.postMessage({ type: 'setAmbientRepelStrength', value: Number(ambientRepelSlider.value) });
-    vscode.postMessage({ type: 'setCohesionStrength', value: Number(cohesionSlider.value) });
+  function updateSliderLabels() {
+    brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
   }
 
   brightnessSlider.addEventListener('input', () => {
     brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
     vscode.postMessage({ type: 'setCanvasBrightness', value: Number(brightnessSlider.value) });
-  });
-
-  function scheduleForcePreview() {
-    updateSliderLabels();
-    if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(() => {
-      pendingTimer = null;
-      postForceState();
-    }, 85);
-  }
-
-  function commitForcePreview() {
-    updateSliderLabels();
-    if (pendingTimer) {
-      clearTimeout(pendingTimer);
-      pendingTimer = null;
-    }
-    postForceState();
-  }
-
-  [repelSlider, attractSlider, ambientRepelSlider, cohesionSlider].forEach((slider) => {
-    slider.addEventListener('input', scheduleForcePreview);
-    slider.addEventListener('change', commitForcePreview);
   });
 
   window.addEventListener('message', (event) => {
@@ -531,14 +387,10 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         msg.checked + ' / ' + msg.total + ' files selected';
     } else if (msg.type === 'uiState') {
       evidenceToggle.checked = !!msg.showEvidence;
-      layoutModeSelect.value = msg.layoutMode || (msg.treeView ? 'tree' : 'lanes');
       const fvm = msg.flowchartViewMode || 'grouped';
       setActiveFvButton(fvm);
+      setActiveThemeButton(msg.canvasThemeMode || 'codemap');
       flowchartViewBlock.style.display = '';
-      repelSlider.value = String(typeof msg.repelStrength === 'number' ? msg.repelStrength : 0.35);
-      attractSlider.value = String(typeof msg.attractStrength === 'number' ? msg.attractStrength : 0.28);
-      ambientRepelSlider.value = String(typeof msg.ambientRepelStrength === 'number' ? msg.ambientRepelStrength : 0.18);
-      cohesionSlider.value = String(typeof msg.cohesionStrength === 'number' ? msg.cohesionStrength : 0.34);
       brightnessSlider.value = String(typeof msg.canvasBrightness === 'number' ? msg.canvasBrightness : 1.0);
       updateSliderLabels();
     }
@@ -554,6 +406,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0.35;
   return Math.max(0, Math.min(1, value));
+}
+
+function clampCanvasBrightness(value: number): number {
+  if (!Number.isFinite(value)) return 1.0;
+  return Math.max(0, Math.min(2, value));
 }
 
 function makeNonce(): string {

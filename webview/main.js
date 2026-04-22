@@ -4,6 +4,7 @@
 import { NS, makeSvgCanvas } from "./shared/panZoom.js";
 import { cubicPt } from "./shared/geometry.js";
 import { animate as motionAnimate } from "motion";
+import { clearCallGraphReactFlow, renderCallGraphReactFlow, resetCallGraphReactView } from "./views/callgraph/reactFlowCallGraphView.js";
 import { clearFlowchartReactFlow, renderFlowchartReactFlow, resetFlowchartReactView } from "./views/flowchart/reactFlowView.js";
 import { renderCallGraph } from "./views/callgraph/callGraphView.js";
 import { renderDataflowView, removeDataflowOverlay } from "./views/dataflow/dataflowView.js";
@@ -34,13 +35,14 @@ const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let time = 0;
-let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false };
+let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false, canvasBrightness: 1.0, canvasThemeMode: "codemap" };
 let overlayPrefs = { showLegacyOverlay: true, showModernOverlay: true };
 let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
 const LAYOUT_STORAGE_PREFIX = "codemap.layout.v3:";
 const STEP_PARTICLE_INTERVAL_MS = 1150;
 const USE_REACT_FLOW_FLOWCHART = true;
+const USE_REACT_FLOW_CALLGRAPH = true;
 
 /** Current breadcrumb trail for progressive flowchart reading. */
 let previousFlowchartBreadcrumb = [];
@@ -585,24 +587,28 @@ function renderGraph(graph, options = {}) {
 
   try {
     const useReactFlowForFlowchart = USE_REACT_FLOW_FLOWCHART && graph.graphType === "flowchart";
+    const useReactFlowForCallGraph = USE_REACT_FLOW_CALLGRAPH && (graph.graphType === "callgraph" || graph.graphType === "workspace" || graph.graphType === "trace");
     removeDataflowOverlay();
     clearSuperimposedDataflow(canvas.root);
     if (!useReactFlowForFlowchart) {
       clearFlowchartReactFlow();
+    }
+    if (!useReactFlowForCallGraph) {
+      clearCallGraphReactFlow();
     }
     if (canvas.clearScaleListeners) canvas.clearScaleListeners();
     if (animateFlowchartTransition) {
       retainOnlySceneLayer(previousRender?.sceneEl || null);
       clearDefs();
     } else {
-      if (!useReactFlowForFlowchart) {
+      if (!useReactFlowForFlowchart && !useReactFlowForCallGraph) {
         canvas.clear();
       } else {
         clearSceneLayers();
         clearDefs();
       }
     }
-    const sceneRoot = useReactFlowForFlowchart ? null : createSceneRoot(graph.graphType);
+    const sceneRoot = (useReactFlowForFlowchart || useReactFlowForCallGraph) ? null : createSceneRoot(graph.graphType);
     const layoutKey = buildLayoutStorageKey(graph, uiState.layoutMode || (uiState.treeView ? "tree" : "lanes"));
     const ctx = {
       root: sceneRoot,
@@ -648,24 +654,49 @@ function renderGraph(graph, options = {}) {
           hideTooltip,
           onLayoutChanged: ctx.onLayoutChanged,
           onDrilldownGroup: ctx.onDrilldownGroup,
+          flowchartBreadcrumb,
+          onNavigateBreadcrumb: (breadcrumbIndex) => {
+            vscode.postMessage({ type: "flowchartBreadcrumbNavigate", breadcrumbIndex });
+          },
           onPaneClick: () => {
             if (renderCtx._resetSelection) renderCtx._resetSelection();
           },
         },
       });
-      renderCtx._hasGroupControls = false;
       renderCtx._resetView = () => resetFlowchartReactView();
+    } else if (useReactFlowForCallGraph) {
+      result = renderCallGraphReactFlow(graph, {
+        mount: canvasEl,
+        preserveView: !!options.preserveView,
+        layoutSnapshot: ctx.layoutSnapshot,
+        uiState,
+        callbacks: {
+          onNodeClick,
+          onNodeDblClick,
+          showTooltip,
+          moveTooltip,
+          hideTooltip,
+          onLayoutChanged: ctx.onLayoutChanged,
+          onPaneClick: () => {
+            if (renderCtx._resetSelection) renderCtx._resetSelection();
+          },
+        },
+      });
+      renderCtx._resetView = () => resetCallGraphReactView();
     } else {
       result = renderCallGraph(graph, ctx);
     }
     current = {
       ...(result || { edgeRecords: [], nodeRect: new Map(), nodes: graph.nodes }),
       sceneEl: sceneRoot,
-      renderer: useReactFlowForFlowchart ? "reactflow" : "svg",
+      renderer: (useReactFlowForFlowchart || useReactFlowForCallGraph) ? "reactflow" : "svg",
     };
 
     // Copy renderer-attached helpers into shared renderCtx
     Object.keys(ctx).forEach((k) => { if (k.startsWith("_")) renderCtx[k] = ctx[k]; });
+    if (result) {
+      Object.keys(result).forEach((k) => { if (k.startsWith("_")) renderCtx[k] = result[k]; });
+    }
 
     updateStats(graph);
 
@@ -675,7 +706,7 @@ function renderGraph(graph, options = {}) {
       renderCtx._execTimeline = timeline;
     }
 
-    if (!useReactFlowForFlowchart) {
+    if (!useReactFlowForFlowchart && !useReactFlowForCallGraph) {
       if (preservedView) {
         canvas.reset(preservedView);
       } else if (current.initialView) {
@@ -685,7 +716,7 @@ function renderGraph(graph, options = {}) {
       }
     }
 
-    if (animateFlowchartTransition && !useReactFlowForFlowchart) {
+    if (animateFlowchartTransition && !useReactFlowForFlowchart && !useReactFlowForCallGraph) {
       animateFlowchartSceneTransition(previousRender, current);
     } else if (sceneRoot) {
       sceneRoot.style.pointerEvents = "auto";
@@ -787,6 +818,11 @@ function updateCanvasControls(graph) {
   expandGroupsBtn.disabled = !enabled;
 }
 
+function applyCanvasThemeMode() {
+  const mode = uiState.canvasThemeMode === "vscode" ? "vscode" : "codemap";
+  document.body.dataset.canvasThemeMode = mode;
+}
+
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (msg && msg.type === "setGraph") {
@@ -807,10 +843,13 @@ window.addEventListener("message", (event) => {
     uiState = { ...uiState, ...(msg.state || {}) };
     const bv = typeof uiState.canvasBrightness === "number" ? uiState.canvasBrightness : 1.0;
     canvasEl.style.filter = bv === 1.0 ? "" : `brightness(${bv})`;
+    applyCanvasThemeMode();
     hideTooltip();
     scheduleUiStateRender();
   }
 });
+
+applyCanvasThemeMode();
 
 /**
  * Rebuild the breadcrumb bar DOM from the current flowchartBreadcrumb state.
@@ -819,37 +858,8 @@ window.addEventListener("message", (event) => {
  */
 function updateBreadcrumbUi() {
   if (!breadcrumbEl) return;
-  const isFlowchart = currentGraph && currentGraph.graphType === "flowchart";
-  if (!isFlowchart) {
-    breadcrumbEl.style.display = "none";
-    breadcrumbEl.innerHTML = "";
-    return;
-  }
-  // Always show the bar for flowcharts — it signals progressive reading mode.
-  breadcrumbEl.style.display = "block";
-  if (flowchartBreadcrumb.length === 0) {
-    breadcrumbEl.innerHTML = `<span style="color:#454a60">&#8962; overview</span>&nbsp;<span style="color:#454a60;font-size:9px">&mdash; click <strong style="color:#7aa2f7">+</strong> on a block to drill in</span>`;
-    return;
-  }
-  const parts = [];
-  // Root overview crumb (always clickable)
-  parts.push(`<span class="bc-crumb bc-root" data-bc-index="-1" style="cursor:pointer;color:#7aa2f7">&#8962; overview</span>`);
-  flowchartBreadcrumb.forEach((crumb, i) => {
-    parts.push(`<span style="color:#454a60;margin:0 5px">›</span>`);
-    const isLast = i === flowchartBreadcrumb.length - 1;
-    if (isLast) {
-      parts.push(`<span style="color:#c0caf5">${escapeHtml(crumb.label)}</span>`);
-    } else {
-      parts.push(`<span class="bc-crumb" data-bc-index="${i}" style="cursor:pointer;color:#7aa2f7">${escapeHtml(crumb.label)}</span>`);
-    }
-  });
-  breadcrumbEl.innerHTML = parts.join("");
-  breadcrumbEl.querySelectorAll(".bc-crumb").forEach((el) => {
-    el.addEventListener("click", () => {
-      const idx = parseInt(el.dataset.bcIndex, 10);
-      vscode.postMessage({ type: "flowchartBreadcrumbNavigate", breadcrumbIndex: idx });
-    });
-  });
+  breadcrumbEl.style.display = "none";
+  breadcrumbEl.innerHTML = "";
 }
 
 // ── Toolbar buttons ──

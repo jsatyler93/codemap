@@ -78,6 +78,8 @@ export interface UiStateView {
   flowchartViewMode?: "grouped" | "full";
   /** Canvas brightness multiplier: 0.0 = black, 1.0 = normal, 2.0 = double. Default 1.0. */
   canvasBrightness?: number;
+  /** Canvas theme mode: custom CodeMap palette or VS Code-native surface colors. */
+  canvasThemeMode?: "codemap" | "vscode";
   /** Flowchart progressive reading state – undefined means overview mode */
   flowchartFocusGroupId?: string;
   flowchartBreadcrumb?: BreadcrumbEntry[];
