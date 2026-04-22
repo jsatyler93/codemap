@@ -416,6 +416,12 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
     if (b === entryId) return  1;
     return Number(nodesById.get(a)?.source?.line || 0) - Number(nodesById.get(b)?.source?.line || 0);
   });
+  // Snapshot before Kahn's while-loop drains the queue.
+  // Used below to seed ALL zero-in-degree roots so that drilled-in sub-graphs
+  // with multiple independent entry points (e.g. several incoming boundary
+  // proxy nodes from different external predecessors) each start at a valid
+  // canvas position rather than falling through to the fallbackY stack.
+  const initialZeroInDeg = [...topoQueue];
   const topoOrder = [];
   const topoSeen  = new Set();
   while (topoQueue.length) {
@@ -465,13 +471,24 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
       else if (tgt?.kind === "return" || tgt?.kind === "break" || tgt?.kind === "error")          side = -1;
       else if (tgt?.kind === "continue" || tgt?.kind === "loop")                                  side =  1;
       // Single unlabeled successor always goes DOWN (sequential flow)
-      else                                                                                         side = outs.length === 1 ? -1 : (String(edge.to) < String(nodeId) ? -1 : 1);
+      else                                                                                         side = outs.length === 1 ? -1 : (Number(nodesById.get(edge.to)?.source?.line || 0) <= Number(nodesById.get(nodeId)?.source?.line || 0) ? -1 : 1);
       return { edge, side };
     });
   }
 
-  // Seed entry node
-  if (entryId && visible.has(entryId)) place(entryId, START_X, START_Y);
+  // Seed ALL zero-in-degree nodes.
+  // For the common case (top-level or well-structured drilled sub-graph) there
+  // is exactly one root; behaviour is identical to seeding only the entry node.
+  // For drilled sub-graphs that have several independent entry points (multiple
+  // incoming boundary-proxy nodes from different external predecessors) every
+  // root gets a proper starting position.  The primary root (entryId, always
+  // first due to the sort above) takes the canonical START_X column.  Each
+  // additional root is shifted right by COMPONENT_W to give its sub-tree an
+  // independent column with no overlap with the primary flow.
+  const COMPONENT_W = BRANCH_X * 4; // ≈440 px per independent component
+  initialZeroInDeg.forEach((id, i) => {
+    if (visible.has(id)) place(id, START_X + COMPONENT_W * i, START_Y);
+  });
 
   // ── Process each node in topological order ────────────────────────────────
   let fallbackY = START_Y;
@@ -503,7 +520,7 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
       let falseSlot = 0, trueSlot = 0;
       scored.forEach(({ edge, side }) => {
         if (side < 0) { place(edge.to, c.x,                             c.y + V_STEP * (falseSlot + 1)); falseSlot++; }
-        else          { place(edge.to, c.x + BRANCH_X * (trueSlot + 1), c.y);                            trueSlot++;  }
+        else          { place(edge.to, c.x + BRANCH_X * (trueSlot + 1), c.y + V_STEP);                  trueSlot++;  }
       });
       continue;
     }
@@ -530,6 +547,34 @@ function initGroupState(groups, groupDepth, layoutSnapshot = null) {
   }]));
 }
 
+// ─── Find topological entry node for any (sub)graph ──────────────────────────
+// Works at every drill depth: prefers an explicit "entry" kind node, then
+// rootNodeIds hint, then the node(s) with no predecessors in the forward graph
+// (sorted by source line), then lowest source-line node as last resort.
+function findGraphEntryId(nodes, edges, rootNodeIds) {
+  // 1. Explicit entry kind
+  const entryKind = nodes.find((n) => n.kind === "entry");
+  if (entryKind) return entryKind.id;
+  // 2. rootNodeIds hint from metadata
+  const fromRoot = (rootNodeIds || []).find((id) => nodes.some((n) => n.id === id));
+  if (fromRoot) return fromRoot;
+  // 3. Node(s) with zero predecessors in forward (non-back-edge) graph
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const inDeg   = new Map(nodes.map((n) => [n.id, 0]));
+  for (const e of edges) {
+    if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) continue;
+    const lbl = String(e.label || "").toLowerCase();
+    if (lbl === "repeat" || lbl === "continue") continue; // back-edges
+    inDeg.set(e.to, (inDeg.get(e.to) || 0) + 1);
+  }
+  const roots = nodes
+    .filter((n) => (inDeg.get(n.id) || 0) === 0)
+    .sort((a, b) => (a.source?.line || 0) - (b.source?.line || 0));
+  if (roots.length) return roots[0].id;
+  // 4. Last resort: node with lowest source line
+  return nodes.slice().sort((a, b) => (a.source?.line || 0) - (b.source?.line || 0))[0]?.id;
+}
+
 // ─── Build React Flow nodes + edges from simplifiedGraph + groupState ─────────
 function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode = "grouped") {
   const nodes     = simplifiedGraph.nodes || [];
@@ -538,19 +583,15 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
 
   const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
 
-  // Entry node: prefer kind=="entry", fall back to rootNodeIds, then first node.
-  const entryId  = nodes.find((n) => n.kind === "entry")?.id
-                ?? (simplifiedGraph.rootNodeIds || []).find((id) => nodes.some((n) => n.id === id))
-                ?? nodes[0]?.id;
+  // Find the topological root — works correctly at any drill depth even when
+  // the subgraph has no explicit "entry" kind node.
+  const entryId  = findGraphEntryId(nodes, edges, simplifiedGraph.rootNodeIds);
   const prepared = new Map(nodes.map((n) => [n.id, prepareNode()]));
 
-  // ── Pass 1: layout ALL nodes — gives positions to hidden nodes inside collapsed groups.
+  // Layout ALL nodes so grouped mode uses the same coordinates as full mode —
+  // making the groups view a true spatial subset of the full view.
   const allPositions = new Map();
   applyFlowAlphabetLayout(allPositions, nodes, edges, prepared, entryId);
-
-  // ── Pass 2: layout VISIBLE nodes only — actual displayed positions.
-  const positions = new Map();
-  applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, visibility.visibleNodeIds);
 
   // Collapsed group positions — loop body chips go to the right of the loop node (flowchartView.js rule).
   // Use allPositions (all nodes) so chips for groups whose members are hidden still get a location.
@@ -563,8 +604,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
         n.kind === "loop" &&
         edges.some((e) => e.from === n.id && group.nodeSet.has(e.to)));
       if (loopCondNode) {
-        // Prefer visible position; fall back to allPositions (same as flowchartView.js nodeRectAll)
-        const loopPos = positions.get(loopCondNode.id) || allPositions.get(loopCondNode.id);
+        const loopPos = allPositions.get(loopCondNode.id);
         if (loopPos) {
           // Collapsed body chip sits to the RIGHT of the loop node at the same Y,
           // matching where applyFlowAlphabetLayout places the first body node (LOOP_X = 110).
@@ -586,7 +626,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   const rfNodes = [];
   for (const node of nodes) {
     if (!visibility.visibleNodeIds.has(node.id)) continue;
-    const pos = positions.get(node.id);
+    const pos = allPositions.get(node.id);
     if (!pos) continue;
     const color           = nodeKindColor(node.kind);
     const { top, bottom } = nodeChipText(node);
@@ -627,7 +667,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       // Gather positions of the group's own visible children (not grandchildren)
       const childPositions = group.nodeIds
         .filter((id) => visibility.visibleNodeIds.has(id))
-        .map((id) => positions.get(id))
+        .map((id) => allPositions.get(id))
         .filter(Boolean);
       if (!childPositions.length) continue;
       const minX = Math.min(...childPositions.map((p) => p.x));
