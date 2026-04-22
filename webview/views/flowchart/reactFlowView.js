@@ -950,10 +950,12 @@ function CodemapGroupHeaderNode({ id, data }) {
 // A polygon arrowhead is placed at the geometric midpoint of each arc.
 function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
   const label    = data?.label || "";
+  const lower    = String(label || "").toLowerCase();
   const loopBack = !!data?.loopBack;
   const loopBody = !!data?.loopBody;
   const backArc  = !!data?.backArc;
   const color    = data?.color || "#7aa2f7";
+  const fromKind = data?.fromKind || "process";
 
   let edgePath, arrowX, arrowY, arrowUx, arrowUy, labelX, labelY;
 
@@ -992,17 +994,46 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
     labelX = midCx + sign * (R + 14) * rpx;
     labelY = midCy + sign * (R + 14) * rpy;
   } else {
-    // Straight center-to-center line — midpoint tangent is exact, arrowhead always aligned.
     const dx = targetX - sourceX;
     const dy = targetY - sourceY;
-    const d  = Math.sqrt(dx * dx + dy * dy) || 1;
-    edgePath = `M ${sourceX},${sourceY} L ${targetX},${targetY}`;
-    labelX  = (sourceX + targetX) / 2;
-    labelY  = (sourceY + targetY) / 2;
-    arrowX  = labelX;
-    arrowY  = labelY;
-    arrowUx = dx / d;
-    arrowUy = dy / d;
+    const needsElbow = Math.abs(dx) > 6 && Math.abs(dy) > 6;
+    const decisionYes = fromKind === "decision" && /yes|true|then|ok|body/.test(lower);
+    const decisionNo  = fromKind === "decision" && /no|false|else|done|exit/.test(lower);
+    const horizontalFirst = decisionYes || (!decisionNo && dx > 0);
+
+    if (needsElbow) {
+      if (horizontalFirst) {
+        const elbowX = targetX;
+        const elbowY = sourceY;
+        edgePath = `M ${sourceX},${sourceY} L ${elbowX},${elbowY} L ${targetX},${targetY}`;
+        labelX  = (sourceX + elbowX) / 2;
+        labelY  = sourceY - 6;
+        arrowX  = targetX;
+        arrowY  = (elbowY + targetY) / 2;
+        arrowUx = 0;
+        arrowUy = Math.sign(targetY - elbowY) || 1;
+      } else {
+        const elbowX = sourceX;
+        const elbowY = targetY;
+        edgePath = `M ${sourceX},${sourceY} L ${elbowX},${elbowY} L ${targetX},${targetY}`;
+        labelX  = sourceX + 8;
+        labelY  = (sourceY + elbowY) / 2 - 4;
+        arrowX  = (elbowX + targetX) / 2;
+        arrowY  = targetY;
+        arrowUx = Math.sign(targetX - elbowX) || 1;
+        arrowUy = 0;
+      }
+    } else {
+      // Straight line only when the edge is already essentially axial.
+      const d  = Math.sqrt(dx * dx + dy * dy) || 1;
+      edgePath = `M ${sourceX},${sourceY} L ${targetX},${targetY}`;
+      labelX  = (sourceX + targetX) / 2;
+      labelY  = (sourceY + targetY) / 2;
+      arrowX  = labelX;
+      arrowY  = labelY;
+      arrowUx = dx / d;
+      arrowUy = dy / d;
+    }
   }
 
   // ── Mid-arc polygon arrowhead ───────────────────────────────────────────
