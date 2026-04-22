@@ -639,6 +639,7 @@ function renderGraph(graph, options = {}) {
         mount: canvasEl,
         preserveView: !!options.preserveView,
         layoutSnapshot: ctx.layoutSnapshot,
+        flowchartViewMode: uiState.flowchartViewMode || "grouped",
         callbacks: {
           onNodeClick,
           onNodeDblClick,

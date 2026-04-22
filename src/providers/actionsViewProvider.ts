@@ -7,6 +7,7 @@ const AMBIENT_REPEL_STRENGTH_KEY = "codemap.ambientRepelStrength";
 const COHESION_STRENGTH_KEY = "codemap.cohesionStrength";
 const TREE_VIEW_KEY = "codemap.treeView";
 const FLOWCHART_LAYOUT_MODE_KEY = "codemap.flowchartLayoutMode";
+const FLOWCHART_VIEW_MODE_KEY = "codemap.flowchartViewMode";
 
 interface ExecuteCommandMessage {
   type: "executeCommand";
@@ -48,11 +49,16 @@ interface SetLayoutModeMessage {
   mode: "tree" | "lanes" | "freeform";
 }
 
+interface SetFlowchartViewModeMessage {
+  type: "setFlowchartViewMode";
+  mode: "grouped" | "full";
+}
+
 interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | SetLayoutModeMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | SetLayoutModeMessage | SetFlowchartViewModeMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -71,6 +77,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private cohesionStrength: number;
   private treeView: boolean;
   private layoutMode: "tree" | "lanes" | "freeform";
+  private flowchartViewMode: "grouped" | "full";
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -87,6 +94,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       this.treeView ? "tree" : "lanes",
     );
     this.treeView = this.layoutMode === "tree";
+    this.flowchartViewMode = context.workspaceState.get<"grouped" | "full">(FLOWCHART_VIEW_MODE_KEY, "grouped");
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -136,6 +144,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         void this.context.workspaceState.update(TREE_VIEW_KEY, this.treeView);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "setFlowchartViewMode") {
+        this.flowchartViewMode = msg.mode;
+        void this.context.workspaceState.update(FLOWCHART_VIEW_MODE_KEY, this.flowchartViewMode);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "ready") {
         this.postSelection(this.lastSummary);
         this.postUiState();
@@ -165,7 +178,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.showEvidence;
   }
 
-  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean } {
+  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full" } {
     return {
       showEvidence: this.showEvidence,
       repelStrength: this.repelStrength,
@@ -174,6 +187,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       cohesionStrength: this.cohesionStrength,
       layoutMode: this.layoutMode,
       treeView: this.treeView,
+      flowchartViewMode: this.flowchartViewMode,
     };
   }
 
@@ -187,6 +201,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       cohesionStrength: this.cohesionStrength,
       layoutMode: this.layoutMode,
       treeView: this.treeView,
+      flowchartViewMode: this.flowchartViewMode,
     });
   }
 
@@ -343,6 +358,13 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     <summary>Display Settings</summary>
     <div class="dropdown-content">
       <label class="toggle"><input id="toggle-evidence" type="checkbox" /> Show Evidence Details</label>
+      <div class="slider-block" id="flowchart-view-block" style="display:none;">
+        <div class="slider-row" style="margin-bottom:4px"><span>Flowchart View</span></div>
+        <div class="preset-row" style="margin-top:0;margin-bottom:0;">
+          <button class="preset" id="fv-grouped" data-fv="grouped">Groups</button>
+          <button class="preset" id="fv-full" data-fv="full">Full</button>
+        </div>
+      </div>
       <div class="slider-block">
         <div class="slider-row"><span>Flowchart Layout</span></div>
         <select id="layout-mode" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--vscode-panel-border);background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground);">
@@ -379,6 +401,8 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   const vscode = acquireVsCodeApi();
   const evidenceToggle = document.getElementById('toggle-evidence');
   const layoutModeSelect = document.getElementById('layout-mode');
+  const flowchartViewBlock = document.getElementById('flowchart-view-block');
+  const fvButtons = document.querySelectorAll('[data-fv]');
   const repelSlider = document.getElementById('repel-slider');
   const repelValue = document.getElementById('repel-value');
   const attractSlider = document.getElementById('attract-slider');
@@ -417,6 +441,24 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   layoutModeSelect.addEventListener('change', () => {
     vscode.postMessage({ type: 'setLayoutMode', mode: layoutModeSelect.value });
   });
+  fvButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'setFlowchartViewMode', mode: btn.dataset.fv });
+    });
+  });
+  function setActiveFvButton(mode) {
+    fvButtons.forEach((btn) => {
+      btn.style.background = btn.dataset.fv === mode
+        ? 'var(--vscode-focusBorder)'
+        : 'var(--vscode-button-secondaryBackground)';
+      btn.style.color = btn.dataset.fv === mode
+        ? '#fff'
+        : 'var(--vscode-button-secondaryForeground)';
+      btn.style.borderColor = btn.dataset.fv === mode
+        ? 'var(--vscode-focusBorder)'
+        : 'var(--vscode-panel-border)';
+    });
+  }
 
   function updateSliderLabels() {
     repelValue.textContent = Number(repelSlider.value).toFixed(2);
@@ -463,6 +505,9 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     } else if (msg.type === 'uiState') {
       evidenceToggle.checked = !!msg.showEvidence;
       layoutModeSelect.value = msg.layoutMode || (msg.treeView ? 'tree' : 'lanes');
+      const fvm = msg.flowchartViewMode || 'grouped';
+      setActiveFvButton(fvm);
+      flowchartViewBlock.style.display = '';
       repelSlider.value = String(typeof msg.repelStrength === 'number' ? msg.repelStrength : 0.35);
       attractSlider.value = String(typeof msg.attractStrength === 'number' ? msg.attractStrength : 0.28);
       ambientRepelSlider.value = String(typeof msg.ambientRepelStrength === 'number' ? msg.ambientRepelStrength : 0.18);

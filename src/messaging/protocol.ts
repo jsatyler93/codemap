@@ -74,6 +74,8 @@ export interface UiStateView {
   cohesionStrength: number;
   layoutMode?: "tree" | "lanes" | "freeform";
   treeView: boolean;
+  /** Groups = collapsed group chips; full = all nodes expanded flat */
+  flowchartViewMode?: "grouped" | "full";
   /** Flowchart progressive reading state – undefined means overview mode */
   flowchartFocusGroupId?: string;
   flowchartBreadcrumb?: BreadcrumbEntry[];

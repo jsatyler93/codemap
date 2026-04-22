@@ -1,8 +1,8 @@
 // reactFlowView.js
 // React Flow flowchart renderer.
 // React Flow provides pan/zoom/canvas/drag only.
-// ALL layout, node chip text, group state, visibility, and simplification logic
-// are exact ports from flowchartView.js — no changes to spacing constants or algorithms.
+// Layout, node chip text, group state, visibility, and simplification are
+// Python-flowchart-focused implementations.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -10,9 +10,7 @@ import "@xyflow/react/dist/style.css";
 import {
   BaseEdge,
   Background,
-  getSmoothStepPath,
   Handle,
-  MarkerType,
   MiniMap,
   applyNodeChanges,
   Position,
@@ -22,13 +20,11 @@ import {
   useNodesState,
   useReactFlow,
 } from "@xyflow/react";
-import Dagre from "dagre";
 
-// ─── Constants — exact match with flowchartView.js ────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 const NODE_R        = 16;
 const NODE_CIRCLE_D = 32;
 const NODE_MIN_H    = 32;
-const ROW_GAP       = 28;
 
 // ─── Inline theme colors (same as theme.js nodeColor) ────────────────────────
 const NODE_COLOR = {
@@ -344,24 +340,6 @@ function buildNodeGroupChains(groups) {
   return chains;
 }
 
-function buildGroupDescendants(groups) {
-  const children    = new Map(groups.map((g) => [g.id, []]));
-  const descendants = new Map();
-  groups.forEach((g) => {
-    if (!g.parentGroupId || !children.has(g.parentGroupId)) return;
-    children.get(g.parentGroupId).push(g.id);
-  });
-  function collect(id) {
-    const direct = children.get(id) || [];
-    const all    = [];
-    direct.forEach((cid) => { all.push(cid, ...collect(cid)); });
-    descendants.set(id, all);
-    return all;
-  }
-  groups.forEach((g) => collect(g.id));
-  return descendants;
-}
-
 function resolveVisibleEndpoint(nodeId, nodeGroupChains, groupState) {
   const chain = nodeGroupChains.get(nodeId) || [];
   let outermost = null;
@@ -404,7 +382,7 @@ function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState
 //   • Decision false/else/no → downward at same X (main column continues).
 //   • Decision true/yes/body → RIGHT, same Y as decision.
 //   • Merge point → min(predecessor X) so branches always converge back to main column.
-function prepareNode() { return { lines: [], typeLines: [], h: NODE_MIN_H, align: "center" }; }
+function prepareNode() { return { h: NODE_MIN_H }; }
 
 function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, visibleNodeIds = null) {
   const visible   = visibleNodeIds instanceof Set ? visibleNodeIds : new Set(nodes.map((n) => n.id));
@@ -475,16 +453,19 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
   }
 
   function classifyEdges(nodeId, outs) {
-    const node = nodesById.get(nodeId);
     return outs.map((edge) => {
       const tgt   = nodesById.get(edge.to);
       const lbl   = String(edge.label || "").toLowerCase();
       let side = 0;
-      if (/false|else|done|exit/.test(lbl))                                                       side = -1;
-      else if (/true|then|ok|body/.test(lbl))                                                     side =  1;
+      // "no"/"false"/"else"/"done"/"exit" → DOWN: stays on the main spine
+      if (/no|false|else|done|exit/.test(lbl))                                                    side = -1;
+      // "yes"/"true"/"then"/"ok"/"body" → RIGHT: branches off the main spine
+      else if (/yes|true|then|ok|body/.test(lbl))                                                 side =  1;
+      // Terminal nodes (return/break/error) → DOWN so they close the main path
       else if (tgt?.kind === "return" || tgt?.kind === "break" || tgt?.kind === "error")          side = -1;
       else if (tgt?.kind === "continue" || tgt?.kind === "loop")                                  side =  1;
-      else side = String(edge.to) < String(nodeId) ? -1 : 1;
+      // Single unlabeled successor always goes DOWN (sequential flow)
+      else                                                                                         side = outs.length === 1 ? -1 : (String(edge.to) < String(nodeId) ? -1 : 1);
       return { edge, side };
     });
   }
@@ -670,17 +651,6 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     const isArcEdge = loopBack || loopBody || backArc;
     const color    = nodeKindColor(fromKind);
 
-    // ── Dynamic handle selection based on actual node positions ──────────────
-    // Picks the handle that produces an edge perpendicular to the node circle.
-    const getPos = (ep) => {
-      if (!ep.startsWith("group:")) return positions.get(ep) ?? allPositions.get(ep);
-      return collapsedGroupPositions.get(ep.slice(6));
-    };
-    const srcPos = getPos(srcEndpoint);
-    const tgtPos = getPos(tgtEndpoint);
-
-    // All edges connect center-to-center; arc edges form perfect semicircles,
-    // straight edges get an exact mid-point tangent for the arrowhead.
     const sourceHandle = "center-s";
     const targetHandle = "center-t";
 
@@ -692,9 +662,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       targetHandle,
       label:        label || undefined,
       type:         "codemapEdge",
-      data:         { label, loopBack, loopBody, backArc, color, fromKind, toKind },
-      // No markerEnd on any edge — CodemapEdge renders a mid-path polygon arrowhead instead
-      markerEnd:    undefined,
+      data:         { label, loopBack, loopBody, backArc, color, fromKind },
       style:        { stroke: color + (isArcEdge ? "9f" : "4f"), strokeWidth: 1.4 },
     });
   }
@@ -709,24 +677,16 @@ let lastViewport = null;
 let flowApi      = null;
 const drilldownRef = { current: null };
 
-const HANDLE_STYLE        = { opacity: 0, width: 1, height: 1, minWidth: 1, minHeight: 1 };
 // Center handles — positioned at the node's geometric center so arc edges attach there.
-const CENTRE_HANDLE_STYLE = { ...HANDLE_STYLE, top: '50%', left: '50%', transform: 'translate(-50%,-50%)' };
+const CENTRE_HANDLE_STYLE = { opacity: 0, width: 1, height: 1, minWidth: 1, minHeight: 1, top: '50%', left: '50%', transform: 'translate(-50%,-50%)' };
 
 // ─── CodemapNode — regular node circle, chip text identical to flowchartView.js
 function CodemapNode({ id, data }) {
   const { top, bottom, color, label } = data;
   return React.createElement(
     React.Fragment, null,
-    React.createElement(Handle, { id: "top",      type: "target", position: Position.Top,    style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "top-s",    type: "source", position: Position.Top,    style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "left-t",   type: "target", position: Position.Left,   style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "bottom-t", type: "target", position: Position.Bottom, style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "bottom",   type: "source", position: Position.Bottom, style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "right-s",  type: "source", position: Position.Right,  style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "left-s",   type: "source", position: Position.Left,   style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top,    style: CENTRE_HANDLE_STYLE, isConnectable: false }),
-    React.createElement(Handle, { id: "center-t", type: "target", position: Position.Top,    style: CENTRE_HANDLE_STYLE, isConnectable: false }),
+    React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
+    React.createElement(Handle, { id: "center-t", type: "target", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
     React.createElement("div", {
       className: "codemap-rf-node",
       "data-id": id,
@@ -758,15 +718,8 @@ function CodemapGroupNode({ id, data }) {
   const { top, bottom, color, groupId, groupLabel } = data;
   return React.createElement(
     React.Fragment, null,
-    React.createElement(Handle, { id: "top",      type: "target", position: Position.Top,    style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "top-s",    type: "source", position: Position.Top,    style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "left-t",   type: "target", position: Position.Left,   style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "bottom-t", type: "target", position: Position.Bottom, style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "bottom",   type: "source", position: Position.Bottom, style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "right-s",  type: "source", position: Position.Right,  style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "left-s",   type: "source", position: Position.Left,   style: HANDLE_STYLE,        isConnectable: false }),
-    React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top,    style: CENTRE_HANDLE_STYLE, isConnectable: false }),
-    React.createElement(Handle, { id: "center-t", type: "target", position: Position.Top,    style: CENTRE_HANDLE_STYLE, isConnectable: false }),
+    React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
+    React.createElement(Handle, { id: "center-t", type: "target", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
     React.createElement("div", {
       className: "codemap-rf-node codemap-rf-group-node",
       "data-group-id": groupId,
@@ -829,7 +782,7 @@ function CodemapGroupNode({ id, data }) {
 //   loopBack (body BOTTOM → loop BOTTOM): CCW half-circle, bows LEFT
 // Together they form a symmetric closed circle.
 // A polygon arrowhead is placed at the geometric midpoint of each arc.
-function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, style, data }) {
+function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
   const label    = data?.label || "";
   const loopBack = !!data?.loopBack;
   const loopBody = !!data?.loopBody;
@@ -900,7 +853,7 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, t
   return React.createElement(
     React.Fragment, null,
     React.createElement(BaseEdge, {
-      id, path: edgePath, markerEnd, style,
+      id, path: edgePath, style,
       className: loopBack ? "codemap-rf-edge codemap-rf-edge-loop" : "codemap-rf-edge",
     }),
     React.createElement("polygon", {
@@ -996,7 +949,7 @@ function FitViewOnMount({ preserveView }) {
 }
 
 // ─── FlowchartGraph — main React component ───────────────────────────────────
-function FlowchartGraph({ graph, callbacks, preserveView }) {
+function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
   const simplifiedGraph  = useMemo(() => simplifyAlphabetFlowGraph(graph), [graph]);
   const groups           = useMemo(() => normalizeGroups(simplifiedGraph.metadata?.groups || []), [simplifiedGraph]);
   const groupById        = useMemo(() => new Map(groups.map((g) => [g.id, g])),  [groups]);
@@ -1004,6 +957,13 @@ function FlowchartGraph({ graph, callbacks, preserveView }) {
   const nodeGroupChains  = useMemo(() => buildNodeGroupChains(groups),            [groups]);
 
   const layoutSnapshot   = callbacks.layoutSnapshot;
+
+  // Layout mode: "grouped" (collapsed chips) | "full" (all nodes expanded)
+  // Driven by the Actions sidebar via initialLayoutMode prop.
+  const [layoutMode, setLayoutMode] = useState(() => initialLayoutMode || "grouped");
+  useEffect(() => {
+    if (initialLayoutMode) setLayoutMode(initialLayoutMode);
+  }, [initialLayoutMode]);
 
   // Group collapse state — initial rules identical to flowchartView.js
   const [groupState, setGroupState] = useState(() => initGroupState(groups, groupDepth, layoutSnapshot));
@@ -1022,9 +982,16 @@ function FlowchartGraph({ graph, callbacks, preserveView }) {
     drilldownRef.current = callbacks.onDrilldownGroup;
   }, [callbacks.onDrilldownGroup]);
 
+  // In "full" mode force all groups expanded so every node is visible at once
+  const effectiveGroupState = useMemo(() => {
+    if (layoutMode === "full")
+      return new Map(groups.map((g) => [g.id, { collapsed: false }]));
+    return groupState;
+  }, [layoutMode, groupState, groups]);
+
   const { rfNodes, rfEdges } = useMemo(
-    () => buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth),
-    [simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth],
+    () => buildReactFlowGraph(simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth),
+    [simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth],
   );
 
   // Apply saved positions from layoutSnapshot
@@ -1122,7 +1089,7 @@ function FlowchartGraph({ graph, callbacks, preserveView }) {
       React.createElement(CaptureFlowApi, null),
       React.createElement(FitViewOnMount, { preserveView }),
     ),
-    React.createElement(GroupHierarchyOverlay, {
+    layoutMode === "grouped" && React.createElement(GroupHierarchyOverlay, {
       groups,
       onDrilldownGroup: callbacks.onDrilldownGroup,
     }),
@@ -1131,7 +1098,7 @@ function FlowchartGraph({ graph, callbacks, preserveView }) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 export function renderFlowchartReactFlow(graph, options = {}) {
-  const { mount, callbacks = {}, preserveView = false, layoutSnapshot = null } = options;
+  const { mount, callbacks = {}, preserveView = false, layoutSnapshot = null, flowchartViewMode = "grouped" } = options;
   if (!mount) return null;
 
   if (!flowHost) {
@@ -1151,6 +1118,7 @@ export function renderFlowchartReactFlow(graph, options = {}) {
         graph,
         callbacks: { ...callbacks, layoutSnapshot },
         preserveView,
+        initialLayoutMode: flowchartViewMode,
       }),
     ),
   );
