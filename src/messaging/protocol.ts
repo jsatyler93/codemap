@@ -76,6 +76,8 @@ export interface UiStateView {
   treeView: boolean;
   /** Groups = collapsed group chips; full = all nodes expanded flat */
   flowchartViewMode?: "grouped" | "full";
+  /** Canvas brightness multiplier: 0.0 = black, 1.0 = normal, 2.0 = double. Default 1.0. */
+  canvasBrightness?: number;
   /** Flowchart progressive reading state – undefined means overview mode */
   flowchartFocusGroupId?: string;
   flowchartBreadcrumb?: BreadcrumbEntry[];

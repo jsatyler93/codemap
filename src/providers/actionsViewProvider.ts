@@ -8,6 +8,7 @@ const COHESION_STRENGTH_KEY = "codemap.cohesionStrength";
 const TREE_VIEW_KEY = "codemap.treeView";
 const FLOWCHART_LAYOUT_MODE_KEY = "codemap.flowchartLayoutMode";
 const FLOWCHART_VIEW_MODE_KEY = "codemap.flowchartViewMode";
+const CANVAS_BRIGHTNESS_KEY = "codemap.canvasBrightness";
 
 interface ExecuteCommandMessage {
   type: "executeCommand";
@@ -54,11 +55,16 @@ interface SetFlowchartViewModeMessage {
   mode: "grouped" | "full";
 }
 
+interface SetCanvasBrightnessMessage {
+  type: "setCanvasBrightness";
+  value: number;
+}
+
 interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | SetLayoutModeMessage | SetFlowchartViewModeMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetRepelStrengthMessage | SetAttractStrengthMessage | SetAmbientRepelStrengthMessage | SetCohesionStrengthMessage | ToggleTreeViewMessage | SetLayoutModeMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -78,6 +84,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private treeView: boolean;
   private layoutMode: "tree" | "lanes" | "freeform";
   private flowchartViewMode: "grouped" | "full";
+  private canvasBrightness: number;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -95,6 +102,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     );
     this.treeView = this.layoutMode === "tree";
     this.flowchartViewMode = context.workspaceState.get<"grouped" | "full">(FLOWCHART_VIEW_MODE_KEY, "grouped");
+    this.canvasBrightness = clamp01(context.workspaceState.get<number>(CANVAS_BRIGHTNESS_KEY, 1.0));
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -149,6 +157,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         void this.context.workspaceState.update(FLOWCHART_VIEW_MODE_KEY, this.flowchartViewMode);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "setCanvasBrightness") {
+        this.canvasBrightness = clamp01(msg.value);
+        void this.context.workspaceState.update(CANVAS_BRIGHTNESS_KEY, this.canvasBrightness);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "ready") {
         this.postSelection(this.lastSummary);
         this.postUiState();
@@ -178,7 +191,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.showEvidence;
   }
 
-  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full" } {
+  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full"; canvasBrightness: number } {
     return {
       showEvidence: this.showEvidence,
       repelStrength: this.repelStrength,
@@ -188,6 +201,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       layoutMode: this.layoutMode,
       treeView: this.treeView,
       flowchartViewMode: this.flowchartViewMode,
+      canvasBrightness: this.canvasBrightness,
     };
   }
 
@@ -202,6 +216,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       layoutMode: this.layoutMode,
       treeView: this.treeView,
       flowchartViewMode: this.flowchartViewMode,
+      canvasBrightness: this.canvasBrightness,
     });
   }
 
@@ -394,6 +409,10 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         <div class="slider-row"><span>Field Cohesion</span><span class="slider-value" id="cohesion-value">0.34</span></div>
         <input id="cohesion-slider" type="range" min="0" max="1" step="0.05" value="0.34" />
       </div>
+      <div class="slider-block">
+        <div class="slider-row"><span>Brightness</span><span class="slider-value" id="brightness-value">1.00</span></div>
+        <input id="brightness-slider" type="range" min="0" max="2" step="0.05" value="1" />
+      </div>
     </div>
   </details>
 
@@ -411,6 +430,8 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   const ambientRepelValue = document.getElementById('ambient-repel-value');
   const cohesionSlider = document.getElementById('cohesion-slider');
   const cohesionValue = document.getElementById('cohesion-value');
+  const brightnessSlider = document.getElementById('brightness-slider');
+  const brightnessValue = document.getElementById('brightness-value');
   let pendingTimer = null;
   const presets = {
     tidy: { repel: 0.72, attract: 0.22, ambient: 0.10, cohesion: 0.58 },
@@ -465,6 +486,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     attractValue.textContent = Number(attractSlider.value).toFixed(2);
     ambientRepelValue.textContent = Number(ambientRepelSlider.value).toFixed(2);
     cohesionValue.textContent = Number(cohesionSlider.value).toFixed(2);
+    brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
   }
 
   function postForceState() {
@@ -473,6 +495,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'setAmbientRepelStrength', value: Number(ambientRepelSlider.value) });
     vscode.postMessage({ type: 'setCohesionStrength', value: Number(cohesionSlider.value) });
   }
+
+  brightnessSlider.addEventListener('input', () => {
+    brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
+    vscode.postMessage({ type: 'setCanvasBrightness', value: Number(brightnessSlider.value) });
+  });
 
   function scheduleForcePreview() {
     updateSliderLabels();
@@ -512,6 +539,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       attractSlider.value = String(typeof msg.attractStrength === 'number' ? msg.attractStrength : 0.28);
       ambientRepelSlider.value = String(typeof msg.ambientRepelStrength === 'number' ? msg.ambientRepelStrength : 0.18);
       cohesionSlider.value = String(typeof msg.cohesionStrength === 'number' ? msg.cohesionStrength : 0.34);
+      brightnessSlider.value = String(typeof msg.canvasBrightness === 'number' ? msg.canvasBrightness : 1.0);
       updateSliderLabels();
     }
   });

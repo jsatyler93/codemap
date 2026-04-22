@@ -531,7 +531,7 @@ function initGroupState(groups, groupDepth, layoutSnapshot = null) {
 }
 
 // ─── Build React Flow nodes + edges from simplifiedGraph + groupState ─────────
-function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth) {
+function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode = "grouped") {
   const nodes     = simplifiedGraph.nodes || [];
   const edges     = simplifiedGraph.edges || [];
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
@@ -618,6 +618,33 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     });
   }
 
+  // ── In "full" mode, add a header node above each expanded group region ─────
+  // The header shows the group label and a − button to collapse it inline.
+  if (layoutMode === "full") {
+    for (const groupId of visibility.visibleExpandedGroupIds) {
+      const group = groupById.get(groupId);
+      if (!group) continue;
+      // Gather positions of the group's own visible children (not grandchildren)
+      const childPositions = group.nodeIds
+        .filter((id) => visibility.visibleNodeIds.has(id))
+        .map((id) => positions.get(id))
+        .filter(Boolean);
+      if (!childPositions.length) continue;
+      const minX = Math.min(...childPositions.map((p) => p.x));
+      const minY = Math.min(...childPositions.map((p) => p.y));
+      const color = groupKindColor(group.kind);
+      rfNodes.push({
+        id:          `groupheader:${groupId}`,
+        type:        "codemapGroupHeaderNode",
+        data:        { color, groupId, groupLabel: group.label || group.kind },
+        position:    { x: minX, y: minY - 24 },
+        draggable:   false,
+        selectable:  false,
+        connectable: false,
+      });
+    }
+  }
+
   // ── React Flow edges ──────────────────────────────────────────────────────
   // Build a set of all RF node IDs that were actually added — edges that reference
   // a missing node (e.g. a collapsed group chip without a position) are dropped
@@ -675,7 +702,9 @@ let flowRoot     = null;
 let flowHost     = null;
 let lastViewport = null;
 let flowApi      = null;
-const drilldownRef = { current: null };
+const drilldownRef    = { current: null };
+const toggleGroupRef  = { current: null };
+const layoutModeRef   = { current: "grouped" };
 
 // Center handles — positioned at the node's geometric center so arc edges attach there.
 const CENTRE_HANDLE_STYLE = { opacity: 0, width: 1, height: 1, minWidth: 1, minHeight: 1, top: '50%', left: '50%', transform: 'translate(-50%,-50%)' };
@@ -713,9 +742,10 @@ function CodemapNode({ id, data }) {
   );
 }
 
-// ─── CodemapGroupNode — collapsed group chip, circle + + button ───────────────
+// ─── CodemapGroupNode — collapsed group chip, circle + +/× button ────────────
 function CodemapGroupNode({ id, data }) {
   const { top, bottom, color, groupId, groupLabel } = data;
+  const isFull = layoutModeRef.current === "full";
   return React.createElement(
     React.Fragment, null,
     React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
@@ -744,7 +774,7 @@ function CodemapGroupNode({ id, data }) {
       React.createElement("div", { style: { fontSize: "5.4px", fontFamily: "serif", color: color + "88", lineHeight: 1, letterSpacing: "0.2px" } }, bottom),
       React.createElement("div", {
         className: "codemap-rf-group-toggle",
-        title: `Drill into ${groupLabel}`,
+        title: isFull ? `Expand ${groupLabel}` : `Drill into ${groupLabel}`,
         style: {
           position: "absolute",
           top: "-5px",
@@ -768,10 +798,63 @@ function CodemapGroupNode({ id, data }) {
         onClick: (e) => {
           e.preventDefault();
           e.stopPropagation();
-          drilldownRef.current?.(groupId, groupLabel);
+          if (layoutModeRef.current === "full") {
+            toggleGroupRef.current?.(groupId);
+          } else {
+            drilldownRef.current?.(groupId, groupLabel);
+          }
         },
       }, "+"),
     ),
+  );
+}
+
+// ─── CodemapGroupHeaderNode — expanded group header band with − collapse button
+function CodemapGroupHeaderNode({ id, data }) {
+  const { color, groupId, groupLabel } = data;
+  return React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: "4px",
+      padding: "1px 5px 1px 5px",
+      borderRadius: "4px",
+      border: `1px solid ${color}44`,
+      background: color + "0a",
+      userSelect: "none",
+      whiteSpace: "nowrap",
+      pointerEvents: "all",
+    },
+  },
+    React.createElement("span", {
+      style: { fontSize: "7px", fontFamily: "serif", color: color + "bb", letterSpacing: "0.1px" },
+    }, groupLabel),
+    React.createElement("button", {
+      title: `Collapse ${groupLabel}`,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: "11px",
+        height: "11px",
+        borderRadius: "50%",
+        border: `1px solid ${color}75`,
+        background: color + "1e",
+        fontSize: "9px",
+        fontWeight: "700",
+        color: color + "ee",
+        cursor: "pointer",
+        lineHeight: 1,
+        padding: 0,
+        flexShrink: 0,
+      },
+      onPointerDown: (e) => e.stopPropagation(),
+      onClick: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleGroupRef.current?.(groupId);
+      },
+    }, "−"),
   );
 }
 
@@ -871,8 +954,6 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
     React.createElement("g", { pointerEvents: "none" },
       React.createElement("circle", { r: (loopBack || loopBody || backArc) ? 2.2 : 1.9, fill: color, opacity: (loopBack || loopBody || backArc) ? "0.9" : "0.75" },
         React.createElement("animateMotion", { dur: (loopBack || loopBody || backArc) ? "5.8s" : "7.2s", repeatCount: "indefinite", path: edgePath })),
-      React.createElement("circle", { r: 1.3, fill: color, opacity: "0.45" },
-        React.createElement("animateMotion", { dur: (loopBack || loopBody || backArc) ? "8.6s" : "10.8s", begin: "-2.7s", repeatCount: "indefinite", path: edgePath })),
     ),
   );
 }
@@ -977,21 +1058,46 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
     }
   }, [simplifiedGraph, groups, groupDepth, layoutSnapshot]);
 
-  // Keep drilldown callback ref stable
+  // Keep drilldown callback ref and group-toggle/mode refs stable
   useEffect(() => {
-    drilldownRef.current = callbacks.onDrilldownGroup;
-  }, [callbacks.onDrilldownGroup]);
+    drilldownRef.current   = callbacks.onDrilldownGroup;
+    layoutModeRef.current  = layoutMode;
+  }, [callbacks.onDrilldownGroup, layoutMode]);
 
-  // In "full" mode force all groups expanded so every node is visible at once
+  // ── Full-mode independent collapse state ─────────────────────────────────
+  // Starts all-expanded; user can collapse/re-expand individual groups inline.
+  // Resets to all-expanded whenever switching into "full" mode.
+  const [fullModeGroupState, setFullModeGroupState] = useState(
+    () => new Map(groups.map((g) => [g.id, { collapsed: false }])),
+  );
+  const prevLayoutModeRef = useRef(initialLayoutMode);
+  useEffect(() => {
+    if (layoutMode === "full" && prevLayoutModeRef.current !== "full") {
+      setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: false }])));
+    }
+    prevLayoutModeRef.current = layoutMode;
+  }, [layoutMode, groups]);
+
+  const toggleFullModeGroup = useCallback((groupId) => {
+    setFullModeGroupState((prev) => {
+      const next = new Map(prev);
+      next.set(groupId, { collapsed: !prev.get(groupId)?.collapsed });
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    toggleGroupRef.current = toggleFullModeGroup;
+  }, [toggleFullModeGroup]);
+
+  // "grouped" mode → use groupState; "full" mode → use fullModeGroupState (user-controllable)
   const effectiveGroupState = useMemo(() => {
-    if (layoutMode === "full")
-      return new Map(groups.map((g) => [g.id, { collapsed: false }]));
-    return groupState;
-  }, [layoutMode, groupState, groups]);
+    return layoutMode === "full" ? fullModeGroupState : groupState;
+  }, [layoutMode, groupState, fullModeGroupState]);
 
   const { rfNodes, rfEdges } = useMemo(
-    () => buildReactFlowGraph(simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth),
-    [simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth],
+    () => buildReactFlowGraph(simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode),
+    [simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode],
   );
 
   // Apply saved positions from layoutSnapshot
@@ -1015,7 +1121,11 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
     [setNodes],
   );
 
-  const nodeTypes = useMemo(() => ({ codemapNode: CodemapNode, codemapGroupNode: CodemapGroupNode }), []);
+  const nodeTypes = useMemo(() => ({
+    codemapNode: CodemapNode,
+    codemapGroupNode: CodemapGroupNode,
+    codemapGroupHeaderNode: CodemapGroupHeaderNode,
+  }), []);
   const edgeTypes = useMemo(() => ({ codemapEdge: CodemapEdge }), []);
 
   const persistLayout = useCallback((nodeList) => {
@@ -1057,8 +1167,11 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
         onNodeClick: (_event, node) => {
           if (node.type === "codemapGroupNode") {
             const { groupId, groupLabel } = node.data;
-            if (groupId) callbacks.onDrilldownGroup?.(groupId, groupLabel);
-          } else {
+            if (groupId) {
+              if (layoutMode === "full") toggleFullModeGroup(groupId);
+              else callbacks.onDrilldownGroup?.(groupId, groupLabel);
+            }
+          } else if (node.type !== "codemapGroupHeaderNode") {
             callbacks.onNodeClick?.({ id: node.id, source: node.data?.source });
           }
         },

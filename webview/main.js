@@ -805,6 +805,8 @@ window.addEventListener("message", (event) => {
     renderRuntimeFrame(msg.frame, msg.highlightNodeIds || []);
   } else if (msg && msg.type === "setUiState") {
     uiState = { ...uiState, ...(msg.state || {}) };
+    const bv = typeof uiState.canvasBrightness === "number" ? uiState.canvasBrightness : 1.0;
+    canvasEl.style.filter = bv === 1.0 ? "" : `brightness(${bv})`;
     hideTooltip();
     scheduleUiStateRender();
   }
