@@ -838,7 +838,7 @@ window.addEventListener("message", (event) => {
     const mode = flowchartBreadcrumb.length === 0 ? "overview" : "drilldown";
     renderGraph(msg.graph, { progressiveMode: mode });
   } else if (msg && msg.type === "setRuntimeFrame") {
-    renderRuntimeFrame(msg.frame, msg.highlightNodeIds || []);
+    renderRuntimeFrame(msg.frame, msg.highlightNodeIds || [], msg.breakpointNodeIds || []);
   } else if (msg && msg.type === "setUiState") {
     uiState = { ...uiState, ...(msg.state || {}) };
     const bv = typeof uiState.canvasBrightness === "number" ? uiState.canvasBrightness : 1.0;
@@ -1175,19 +1175,28 @@ vscode.postMessage({ type: "ready" });
 
 // ── Runtime / debug live overlay ──
 let runtimeHighlightedIds = [];
+let runtimeBreakpointIds = [];
 let runtimePrevFrame = null;
 let runtimePrevPrimaryNodeId = null;
 let runtimeFlashTimer = null;
 
-function renderRuntimeFrame(frame, highlightIds) {
+function renderRuntimeFrame(frame, highlightIds, breakpointIds = []) {
   const panel = document.getElementById("runtime-panel");
   if (!panel) return;
   // Clear previous static highlights.
   for (const prevId of runtimeHighlightedIds) {
     const g = canvasEl.querySelector('[data-id="' + cssEscape(prevId) + '"]');
-    if (g) g.classList.remove("runtime-active");
+    if (!g) continue;
+    g.classList.remove("runtime-active");
+    g.classList.remove("runtime-ancestor");
+    g.classList.remove("runtime-breakpoint-hit");
+  }
+  for (const prevId of runtimeBreakpointIds) {
+    const g = canvasEl.querySelector('[data-id="' + cssEscape(prevId) + '"]');
+    if (g) g.classList.remove("runtime-breakpoint-hit");
   }
   runtimeHighlightedIds = [];
+  runtimeBreakpointIds = [];
 
   if (!frame) {
     panel.style.display = "none";
@@ -1272,7 +1281,7 @@ function renderRuntimeFrame(frame, highlightIds) {
     }
   }
   // Highlight ancestors from the call stack as a softer pulse.
-  if (Array.isArray(highlightIds)) {
+  if (currentGraph?.graphType !== "flowchart" && Array.isArray(highlightIds)) {
     for (const id of highlightIds) {
       if (id === primaryNodeId) continue;
       const g = canvasEl.querySelector('[data-id="' + cssEscape(id) + '"]');
@@ -1283,6 +1292,16 @@ function renderRuntimeFrame(frame, highlightIds) {
     }
   }
 
+  if (Array.isArray(breakpointIds)) {
+    for (const id of breakpointIds) {
+      const g = canvasEl.querySelector('[data-id="' + cssEscape(id) + '"]');
+      if (!g) continue;
+      g.classList.add("runtime-breakpoint-hit");
+      runtimeBreakpointIds.push(id);
+      if (!runtimeHighlightedIds.includes(id)) runtimeHighlightedIds.push(id);
+    }
+  }
+
   // ── Spawn bright execution particle on node transitions ──
   if (primaryNodeId && primaryNodeId !== runtimePrevPrimaryNodeId) {
     spawnRuntimeParticle(runtimePrevPrimaryNodeId, primaryNodeId);
@@ -1290,7 +1309,7 @@ function renderRuntimeFrame(frame, highlightIds) {
   runtimePrevPrimaryNodeId = primaryNodeId;
 
   // ── Briefly flash any node that mentions a touched variable name ──
-  if (touched.size > 0 && currentGraph) {
+  if (touched.size > 0 && currentGraph && currentGraph.graphType !== "flowchart") {
     flashNodesMentioningVars(touched);
   }
 

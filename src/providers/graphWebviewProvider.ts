@@ -13,7 +13,7 @@ interface LayerStackEntry {
 export class GraphWebviewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private lastGraph: GraphDocument | undefined;
-  private lastRuntime: { frame: RuntimeFrameView | null; highlightNodeIds?: string[] } | undefined;
+  private lastRuntime: { frame: RuntimeFrameView | null; highlightNodeIds?: string[]; breakpointNodeIds?: string[] } | undefined;
   /** Stack for flowchart progressive reading mode.  Empty = overview layer. */
   private flowchartLayerStack: LayerStackEntry[] = [];
   private uiState: UiStateView = {
@@ -79,6 +79,7 @@ export class GraphWebviewProvider {
               type: "setRuntimeFrame",
               frame: this.lastRuntime.frame,
               highlightNodeIds: this.lastRuntime.highlightNodeIds,
+              breakpointNodeIds: this.lastRuntime.breakpointNodeIds,
             });
           }
         }
@@ -148,13 +149,14 @@ export class GraphWebviewProvider {
     this.panel?.webview.postMessage({ type: "setGraph", graph });
   }
 
-  postRuntimeFrame(frame: RuntimeFrameView | null, highlightNodeIds?: string[]): void {
-    this.lastRuntime = { frame, highlightNodeIds };
+  postRuntimeFrame(frame: RuntimeFrameView | null, highlightNodeIds?: string[], breakpointNodeIds?: string[]): void {
+    this.lastRuntime = { frame, highlightNodeIds, breakpointNodeIds };
     if (!this.panel) return;
     this.panel.webview.postMessage({
       type: "setRuntimeFrame",
       frame,
       highlightNodeIds,
+      breakpointNodeIds,
     });
   }
 

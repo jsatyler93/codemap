@@ -32,4 +32,4 @@ if __name__ == "__main__":
     c = Circle(radius=2.0)
     print("Circle area:", c.area())
     print("Circle circumference:", c.circumference())
-    print("Polygon area:", polygon_area([(0, 0), (3, 0), (3, 4)]))
+    print("Polygon area:", polygon_area([(0, 0), (3, 0), (3, 4),(-3, 4),(-3, -4),(5, 0),(7, -4)]))

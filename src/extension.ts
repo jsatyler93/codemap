@@ -254,19 +254,35 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!provider.isVisible()) return;
       const graph = provider.getCurrentGraph();
       const highlights: string[] = [];
+      const breakpointHighlights: string[] = [];
       if (frame && graph && frame.source) {
         const matchId = findGraphNodeByLocation(graph, frame.source);
         if (matchId) highlights.push(matchId);
-        // Highlight call-stack ancestors that map onto graph nodes too.
-        for (const sf of frame.callStack) {
-          if (!sf.file || !sf.line) continue;
-          const id = findGraphNodeByLocation(graph, { file: sf.file, line: sf.line });
-          if (id && !highlights.includes(id)) highlights.push(id);
+        if (matchId && isActiveSourceBreakpointHit(frame.source.file, frame.source.line)) {
+          breakpointHighlights.push(matchId);
+        }
+        // Flowcharts should mirror editor-style current-line focus.
+        if (graph.graphType !== "flowchart") {
+          for (const sf of frame.callStack) {
+            if (!sf.file || !sf.line) continue;
+            const id = findGraphNodeByLocation(graph, { file: sf.file, line: sf.line });
+            if (id && !highlights.includes(id)) highlights.push(id);
+          }
         }
       }
-      provider.postRuntimeFrame(frame, highlights);
+      provider.postRuntimeFrame(frame, highlights, breakpointHighlights);
     }),
   );
+
+  function isActiveSourceBreakpointHit(file: string, line: number): boolean {
+    const normalizedFile = file.replace(/\\/g, "/").toLowerCase();
+    return vscode.debug.breakpoints.some((breakpoint) => {
+      if (!(breakpoint instanceof vscode.SourceBreakpoint)) return false;
+      if (!breakpoint.enabled) return false;
+      const breakpointFile = breakpoint.location.uri.fsPath.replace(/\\/g, "/").toLowerCase();
+      return breakpointFile === normalizedFile && breakpoint.location.range.start.line + 1 === line;
+    });
+  }
 
   async function requireActiveSupportedEditor(): Promise<vscode.TextEditor | undefined> {
     const editor = vscode.window.activeTextEditor;

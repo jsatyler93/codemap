@@ -449,16 +449,16 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
 .runtime-active polygon,
 .runtime-active circle,
 .runtime-active path {
-  stroke: #f7768e !important;
+  stroke: #f7e76d !important;
   stroke-width: 3 !important;
-  filter: drop-shadow(0 0 12px rgba(247, 118, 142, 0.85));
+  filter: drop-shadow(0 0 12px rgba(247, 231, 109, 0.9));
 }
 .runtime-active {
   animation: runtime-pulse 1.4s ease-in-out infinite;
 }
 .react-flow__node.runtime-active .codemap-rf-node {
-  border-color: #f7768e !important;
-  box-shadow: 0 0 0 2px rgba(247, 118, 142, 0.32), 0 0 20px rgba(247, 118, 142, 0.44);
+  border-color: #f7e76d !important;
+  box-shadow: 0 0 0 2px rgba(247, 231, 109, 0.34), 0 0 20px rgba(247, 231, 109, 0.46);
 }
 @keyframes runtime-pulse {
   0%, 100% { opacity: 1; }
@@ -470,13 +470,34 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
 .runtime-ancestor polygon,
 .runtime-ancestor circle,
 .runtime-ancestor path {
-  stroke: #f7e76d !important;
+  stroke: #7aa2f7 !important;
   stroke-width: 2 !important;
-  filter: drop-shadow(0 0 6px rgba(247, 231, 109, 0.55));
+  filter: drop-shadow(0 0 6px rgba(122, 162, 247, 0.45));
 }
 .react-flow__node.runtime-ancestor .codemap-rf-node {
-  border-color: #f7e76d !important;
-  box-shadow: 0 0 0 1px rgba(247, 231, 109, 0.3), 0 0 12px rgba(247, 231, 109, 0.24);
+  border-color: #7aa2f7 !important;
+  box-shadow: 0 0 0 1px rgba(122, 162, 247, 0.22), 0 0 12px rgba(122, 162, 247, 0.18);
+}
+
+.runtime-breakpoint-hit rect,
+.runtime-breakpoint-hit polygon,
+.runtime-breakpoint-hit circle,
+.runtime-breakpoint-hit path {
+  stroke: #f7768e !important;
+  stroke-width: 3 !important;
+  filter: drop-shadow(0 0 14px rgba(247, 118, 142, 0.95));
+}
+.react-flow__node.runtime-breakpoint-hit .codemap-rf-node {
+  border-color: #f7768e !important;
+  box-shadow: 0 0 0 2px rgba(247, 118, 142, 0.34), 0 0 20px rgba(247, 118, 142, 0.52);
+}
+.runtime-breakpoint-hit {
+  animation: runtime-breakpoint-pulse 0.9s ease-out 1;
+}
+@keyframes runtime-breakpoint-pulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.04); }
+  100% { transform: scale(1); }
 }
 
 /* One-shot bright pulse when execution lands on a node with no traceable edge */

@@ -64,6 +64,8 @@ export interface SetRuntimeFrameMessage {
   frame: RuntimeFrameView | null;
   // Optional list of node IDs to highlight (computed by the host).
   highlightNodeIds?: string[];
+  // Optional list of node IDs whose current frame line is an active source breakpoint.
+  breakpointNodeIds?: string[];
 }
 
 export interface UiStateView {
