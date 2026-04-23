@@ -31,7 +31,9 @@ body[data-canvas-theme-mode="vscode"] {
   height: 44px; background: #0e1018;
   border-bottom: 1px solid #181c28;
   display: flex; align-items: center;
-  padding: 0 16px; z-index: 100; gap: 10px;
+  padding: 0 10px; z-index: 100; gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 body[data-canvas-theme-mode="vscode"] #toolbar {
   background: var(--vscode-editor-background);
@@ -47,9 +49,10 @@ body[data-canvas-theme-mode="vscode"] #toolbar {
 #toolbar .sep { width: 1px; height: 20px; background: #181c28; }
 .btn {
   background: #12151f; border: 1px solid #181c28; border-radius: 5px;
-  color: #606680; font-size: 10px; padding: 4px 10px;
+  color: #606680; font-size: 9px; padding: 4px 8px;
   cursor: pointer; transition: all .15s; white-space: nowrap;
   font-family: -apple-system, sans-serif;
+  flex: 0 0 auto;
 }
 .btn:hover { background: #181c2a; border-color: #7aa2f7; color: #c0caf5; }
 .btn.active { background: #151d35; border-color: #5580cc; color: #7aa2f7; }
@@ -90,7 +93,7 @@ body[data-canvas-theme-mode="vscode"] #toolbar .sep {
 #search-box {
   margin-left: auto; background: #12151f; border: 1px solid #181c28;
   border-radius: 5px; padding: 5px 10px; color: #c0caf5;
-  font-family: monospace; font-size: 11px; width: 180px; outline: none;
+  font-family: monospace; font-size: 11px; width: 120px; min-width: 120px; outline: none;
 }
 #search-box:focus { border-color: #7aa2f7; }
 #search-box::placeholder { color: #222640; }
@@ -105,6 +108,245 @@ body[data-canvas-theme-mode="vscode"] #search-box::placeholder {
 #canvas {
   position: absolute; top: 44px; left: 0; right: 0; bottom: 0;
   overflow: hidden; cursor: grab;
+}
+#debug-overlay-root {
+  position: absolute;
+  top: 44px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 80;
+  pointer-events: none;
+}
+.cm-debug-overlay {
+  position: absolute;
+  inset: 0;
+}
+.cm-debug-overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+#debug-overlay-root.is-interactive .cm-debug-overlay-canvas {
+  pointer-events: auto;
+}
+.cm-probe-panel-host {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  bottom: 12px;
+  width: 250px;
+  pointer-events: none;
+}
+.cm-probe-panel {
+  display: none;
+  gap: 8px;
+  align-content: start;
+  max-height: 100%;
+  overflow-y: auto;
+  padding-right: 2px;
+  pointer-events: auto;
+}
+.cm-probe-panel-title {
+  color: #f5deb2;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-family: Consolas, monospace;
+  opacity: 0.9;
+}
+.cm-probe-panel-entry {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(224, 175, 104, 0.24);
+  background: rgba(11, 15, 24, 0.92);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+.cm-probe-panel-entry.is-error {
+  border-color: rgba(247, 118, 142, 0.38);
+}
+.cm-probe-panel-main {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.cm-probe-panel-label {
+  color: #dfe6ff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.cm-probe-panel-meta {
+  color: #8f9bb8;
+  font-size: 10px;
+  line-height: 1.35;
+}
+.cm-probe-panel-actions {
+  display: flex;
+  gap: 6px;
+}
+.cm-probe-panel-actions button {
+  border-radius: 999px;
+  border: 1px solid rgba(122, 162, 247, 0.28);
+  background: rgba(23, 30, 45, 0.94);
+  color: #dfe6ff;
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.cm-probe-panel-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.cm-plotly-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 220;
+  display: none;
+}
+.cm-plotly-viewer.is-open {
+  display: block;
+}
+.cm-plotly-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 7, 12, 0.74);
+}
+.cm-plotly-dialog {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(940px, calc(100vw - 42px));
+  height: min(700px, calc(100vh - 72px));
+  background: rgba(10, 15, 24, 0.98);
+  border: 1px solid rgba(122, 162, 247, 0.28);
+  border-radius: 16px;
+  box-shadow: 0 24px 66px rgba(0, 0, 0, 0.5);
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+}
+.cm-plotly-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid rgba(122, 162, 247, 0.16);
+}
+.cm-plotly-title {
+  color: #dfe6ff;
+  font-size: 14px;
+  font-weight: 700;
+}
+.cm-plotly-close {
+  border-radius: 999px;
+  border: 1px solid rgba(122, 162, 247, 0.32);
+  background: rgba(23, 30, 45, 0.95);
+  color: #dfe6ff;
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.cm-plotly-meta {
+  color: #8f9bb8;
+  font-size: 11px;
+  padding: 8px 14px 10px;
+}
+.cm-plotly-canvas {
+  min-height: 300px;
+  width: 100%;
+  height: 100%;
+}
+.cm-probe-card {
+  position: absolute;
+  width: 260px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(224, 175, 104, 0.36);
+  background: rgba(11, 15, 24, 0.96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  color: #dfe6ff;
+  pointer-events: auto;
+}
+.cm-probe-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+.cm-probe-label {
+  color: #f5deb2;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.cm-probe-rationale,
+.cm-probe-meta {
+  color: #8f9bb8;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.cm-probe-meta {
+  margin-top: 6px;
+  margin-bottom: 8px;
+}
+.cm-probe-actions {
+  display: flex;
+  gap: 4px;
+}
+.cm-probe-actions button {
+  border-radius: 999px;
+  border: 1px solid rgba(122, 162, 247, 0.28);
+  background: rgba(23, 30, 45, 0.94);
+  color: #dfe6ff;
+  font-size: 10px;
+  padding: 3px 7px;
+}
+.cm-probe-table {
+  display: grid;
+  gap: 4px;
+}
+.cm-probe-row {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+.cm-probe-key {
+  color: #7aa2f7;
+  font-size: 10px;
+  font-family: Consolas, monospace;
+}
+.cm-probe-value,
+.cm-probe-pre,
+.cm-probe-error {
+  color: #d9e1f5;
+  font-size: 10px;
+  line-height: 1.4;
+  font-family: Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.cm-probe-error {
+  color: #f7768e;
+}
+.cm-probe-flash {
+  animation: codemap-probe-flash 900ms ease;
+}
+@keyframes codemap-probe-flash {
+  0% { filter: drop-shadow(0 0 0 rgba(224, 175, 104, 0)); }
+  30% { filter: drop-shadow(0 0 10px rgba(224, 175, 104, 0.85)); }
+  100% { filter: drop-shadow(0 0 0 rgba(224, 175, 104, 0)); }
 }
 .react-flow-host {
   position: absolute;

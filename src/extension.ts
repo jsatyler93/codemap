@@ -1,18 +1,30 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
 import { buildFlowchartFor, buildIdlFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
 import { JavaScriptWorkspaceIndexer } from "./javascript/analysis/javascriptWorkspaceIndexer";
 import { buildJavaScriptFlowchartFor } from "./javascript/analysis/javascriptFlowchartBuilder";
 import { IdlWorkspaceIndexer } from "./idl/analysis/idlWorkspaceIndexer";
-import { DebugSyncService } from "./live/debugSync";
+import { DebugSyncService, RuntimeFrame } from "./live/debugSync";
 import { NavigationController } from "./navigation/navigationController";
 import { ActionsViewProvider } from "./providers/actionsViewProvider";
 import { FileTreeProvider } from "./providers/fileTreeProvider";
 import { buildWorkspaceGraph } from "./python/analysis/pythonCallGraphBuilder";
 import { GraphDocument } from "./python/model/graphTypes";
 import { computeModuleColorMap } from "./python/analysis/hierarchicalGraphBuilder";
+import { resolveNarrationModel } from "./ai/copilotBridge";
+import { NarrationKind } from "./ai/narrationTypes";
+import { generateSingleDebugProbe, getCachedOrGenerateDebugProbes } from "./debug/debugProbeAgent";
+import { injectProbe } from "./debug/debugInjector";
+import { ProbeResultStore } from "./debug/probeResultStore";
+import { DebugProbe } from "./debug/debugProbeTypes";
+import {
+  getCachedOrGenerateFlowchartScript,
+  getCachedOrGenerateTraceScript,
+  renderScriptAsMarkdown,
+} from "./ai/traceScriptGenerator";
 
 export function activate(context: vscode.ExtensionContext): void {
   const pythonIndexer = new PythonWorkspaceIndexer(context.extensionPath);
@@ -22,8 +34,30 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("CodeMap");
   context.subscriptions.push(output);
   let provider: GraphWebviewProvider;
+  const probeResultStore = new ProbeResultStore();
+  let lastRuntimeFrame: RuntimeFrame | null = null;
+  let lastProbeTriggerKey = "";
+
+  function presentGraph(graph: GraphDocument): void {
+    logGraph(graph);
+    provider.show(graph);
+    if (!actionsViewProvider.isNarrationEnabled()) return;
+    const autoGenerate = vscode.workspace.getConfiguration("codemap").get<boolean>("narration.autoGenerate", false);
+    if (!autoGenerate) return;
+    void generateAndPostNarration(graph, {
+      interactive: false,
+      forceRegenerate: false,
+    }).catch((error) => {
+      output.appendLine(`[narration:auto] ${(error as Error).message}`);
+    });
+  }
+
   const actionsViewProvider = new ActionsViewProvider(context, (state) => {
     provider.updateUiState(state);
+    if (state.narrationEnabled === false) {
+      provider.clearNarration();
+      provider.clearDebugProbes();
+    }
   });
   const fileTreeProvider = new FileTreeProvider(context);
   context.subscriptions.push(
@@ -107,8 +141,7 @@ export function activate(context: vscode.ExtensionContext): void {
           },
         );
         if (graph && graph.nodes && graph.nodes.length > 0) {
-          logGraph(graph);
-          provider.show(graph);
+          presentGraph(graph);
         } else {
           output.appendLine(`[requestFlowchart] no flowchart for ${nodeId} at ${source.file}:${source.line}`);
           vscode.window.showInformationMessage(`CodeMap: no flowchart available for ${nodeId}`);
@@ -117,16 +150,46 @@ export function activate(context: vscode.ExtensionContext): void {
         output.appendLine(`[requestFlowchart] error: ${(e as Error).message}`);
       }
     },
+    (kind, regenerate) => {
+      const graph = provider.getCurrentGraph();
+      if (!graph) {
+        vscode.window.showInformationMessage("CodeMap: no graph is open to narrate.");
+        return;
+      }
+      void generateAndPostNarration(graph, {
+        requestedKind: kind,
+        forceRegenerate: regenerate,
+        interactive: true,
+      }).catch(showError);
+    },
+    () => {
+      void exportNarrationScript().catch(showError);
+    },
+    (enabled) => {
+      actionsViewProvider.setNarrationEnabled(enabled);
+      if (!enabled) {
+        provider.clearNarration();
+        provider.clearDebugProbes();
+      }
+    },
+    (nodeId) => {
+      const graph = provider.getCurrentGraph();
+      if (!graph || !lastRuntimeFrame) return;
+      void generateAndPostDebugProbes(graph, lastRuntimeFrame, nodeId, true).catch(showError);
+    },
+    (probeId) => {
+      const probe = findProbeById(probeId);
+      if (!probe) return;
+      probeResultStore.clearNode(probe.nodeId);
+      provider.clearDebugProbes(probe.nodeId);
+    },
   );
   provider.updateUiState(actionsViewProvider.getUiState());
 
   const navController = new NavigationController(
     context.extensionPath,
     pythonIndexer,
-    (graph) => {
-      logGraph(graph);
-      provider.show(graph);
-    },
+    (graph) => presentGraph(graph),
     (message) => output.appendLine(message),
   );
 
@@ -245,18 +308,160 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("CodeMap: workspace re-indexed.");
       }
     }),
+    vscode.commands.registerCommand("codemap.narrateCurrentGraph", async () => {
+      const graph = provider.getCurrentGraph();
+      if (!graph) {
+        vscode.window.showInformationMessage("CodeMap: no graph is open to narrate.");
+        return;
+      }
+      await generateAndPostNarration(graph, { interactive: true, forceRegenerate: false });
+    }),
+    vscode.commands.registerCommand("codemap.narrateTrace", async () => {
+      const graph = provider.getCurrentGraph();
+      if (!graph) {
+        vscode.window.showInformationMessage("CodeMap: no graph is open to narrate.");
+        return;
+      }
+      if (!supportsTraceNarration(graph)) {
+        vscode.window.showWarningMessage("CodeMap: trace narration needs a call graph with an execution timeline.");
+        return;
+      }
+      await generateAndPostNarration(graph, {
+        interactive: true,
+        forceRegenerate: false,
+        requestedKind: "trace",
+      });
+    }),
+    vscode.commands.registerCommand("codemap.narrateFlowchart", async () => {
+      const graph = provider.getCurrentGraph();
+      if (!graph) {
+        vscode.window.showInformationMessage("CodeMap: no graph is open to narrate.");
+        return;
+      }
+      if (graph.graphType !== "flowchart") {
+        vscode.window.showWarningMessage("CodeMap: flowchart narration requires an open flowchart.");
+        return;
+      }
+      await generateAndPostNarration(graph, {
+        interactive: true,
+        forceRegenerate: false,
+        requestedKind: "flowchart",
+      });
+    }),
+    vscode.commands.registerCommand("codemap.regenerateNarration", async () => {
+      const graph = provider.getCurrentGraph();
+      if (!graph) {
+        vscode.window.showInformationMessage("CodeMap: no graph is open to narrate.");
+        return;
+      }
+      await generateAndPostNarration(graph, {
+        interactive: true,
+        forceRegenerate: true,
+      });
+    }),
+    vscode.commands.registerCommand("codemap.exportScript", async () => {
+      await exportNarrationScript();
+    }),
+    vscode.commands.registerCommand("codemap.generateProbes", async () => {
+      const graph = provider.getCurrentGraph();
+      if (!graph || !lastRuntimeFrame) {
+        vscode.window.showInformationMessage("CodeMap: stop at a breakpoint in an open graph before generating probes.");
+        return;
+      }
+      const nodeId = lastRuntimeFrame.source ? findGraphNodeByLocation(graph, lastRuntimeFrame.source) : undefined;
+      if (!nodeId) {
+        vscode.window.showInformationMessage("CodeMap: the current frame does not map to a graph node.");
+        return;
+      }
+      await generateAndPostDebugProbes(graph, lastRuntimeFrame, nodeId, true);
+    }),
+    vscode.commands.registerCommand("codemap.askProbe", async () => {
+      const graph = provider.getCurrentGraph();
+      if (!graph || !lastRuntimeFrame?.source) {
+        vscode.window.showInformationMessage("CodeMap: stop at a breakpoint in an open graph before asking for a probe.");
+        return;
+      }
+      const nodeId = findGraphNodeByLocation(graph, lastRuntimeFrame.source);
+      const node = nodeId ? graph.nodes.find((entry) => entry.id === nodeId) : undefined;
+      if (!node) {
+        vscode.window.showInformationMessage("CodeMap: the current frame does not map to a graph node.");
+        return;
+      }
+      const question = await vscode.window.showInputBox({
+        prompt: "What do you want to inspect at this breakpoint?",
+        placeHolder: "e.g. show the phase PSD or summarize the current tensor state",
+      });
+      if (!question?.trim()) return;
+      const tokenSource = new vscode.CancellationTokenSource();
+      try {
+        const probe = await generateSingleDebugProbe({
+          context,
+          graph,
+          node,
+          runtimeFrame: lastRuntimeFrame,
+          narrationScript: provider.getCurrentNarration() || null,
+          token: tokenSource.token,
+          question,
+        });
+        if (!probe) return;
+        probeResultStore.setProbes(node.id, [...probeResultStore.getProbes(node.id), probe]);
+        provider.postDebugProbes(probeResultStore.getProbes(node.id));
+        const session = vscode.debug.activeDebugSession;
+        if (!session) return;
+        const result = await injectProbe(probe, lastRuntimeFrame, session, probeResultStore.nextHitCount(probe.id));
+        probeResultStore.recordResult(result);
+        provider.postProbeResult(result);
+      } finally {
+        tokenSource.dispose();
+      }
+    }),
+    vscode.commands.registerCommand("codemap.clearProbes", async () => {
+      provider.clearDebugProbes();
+      lastProbeTriggerKey = "";
+    }),
+    vscode.commands.registerCommand("codemap.exportProbes", async () => {
+      const probes = probeResultStore.getAllProbes();
+      if (!probes.length) {
+        vscode.window.showInformationMessage("CodeMap: generate probes before exporting them.");
+        return;
+      }
+      const uri = await vscode.window.showSaveDialog({
+        filters: { Python: ["py"] },
+        saveLabel: "Export Debug Probes",
+        defaultUri: vscode.Uri.file(path.join(
+          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || context.extensionPath,
+          "codemap_debug_probes.py",
+        )),
+      });
+      if (!uri) return;
+      const lines = [
+        `# CodeMap Debug Probes - generated ${new Date().toISOString()}`,
+        "",
+      ];
+      probes.forEach((probe, index) => {
+        lines.push(`# Probe ${index + 1}: ${probe.label}`);
+        lines.push(`# Node: ${probe.nodeId} @ ${probe.breakpointFile}:${probe.breakpointLine}`);
+        lines.push(probe.snippetPython);
+        lines.push("");
+      });
+      fs.writeFileSync(uri.fsPath, lines.join("\n"), "utf8");
+      vscode.window.showInformationMessage(`CodeMap: exported debug probes to ${uri.fsPath}`);
+    }),
   );
 
   // Debug sync wiring: when active, push runtime frames + computed highlights
   // to whatever graph is currently shown in the webview.
   context.subscriptions.push(
     debugSync.onRuntime((frame) => {
+      lastRuntimeFrame = frame;
       if (!provider.isVisible()) return;
       const graph = provider.getCurrentGraph();
       const highlights: string[] = [];
       const breakpointHighlights: string[] = [];
+      let matchedNodeId: string | undefined;
       if (frame && graph && frame.source) {
         const matchId = findGraphNodeByLocation(graph, frame.source);
+        matchedNodeId = matchId;
         if (matchId) highlights.push(matchId);
         if (matchId && isActiveSourceBreakpointHit(frame.source.file, frame.source.line)) {
           breakpointHighlights.push(matchId);
@@ -271,6 +476,15 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
       provider.postRuntimeFrame(frame, highlights, breakpointHighlights);
+      if (!frame || !graph || !matchedNodeId || !breakpointHighlights.includes(matchedNodeId) || !actionsViewProvider.isNarrationEnabled()) {
+        return;
+      }
+      const triggerKey = `${frame.sessionId}:${frame.frameId}:${matchedNodeId}:${frame.source?.file}:${frame.source?.line}`;
+      if (triggerKey === lastProbeTriggerKey) return;
+      lastProbeTriggerKey = triggerKey;
+      void generateAndPostDebugProbes(graph, frame, matchedNodeId, false).catch((error) => {
+        output.appendLine(`[debug-probes] ${(error as Error).message}`);
+      });
     }),
   );
 
@@ -316,8 +530,7 @@ export function activate(context: vscode.ExtensionContext): void {
           { location: vscode.ProgressLocation.Window, title: "CodeMap: building JavaScript flowchart..." },
           () => Promise.resolve(buildJavaScriptFlowchartFor(file, line)),
         );
-        logGraph(graph);
-        provider.show(graph);
+        presentGraph(graph);
         return;
       }
 
@@ -331,8 +544,7 @@ export function activate(context: vscode.ExtensionContext): void {
           { location: vscode.ProgressLocation.Window, title: "CodeMap: building IDL flowchart..." },
           () => buildIdlFlowchartFor(context.extensionPath, file, line),
         );
-        logGraph(graph);
-        provider.show(graph);
+        presentGraph(graph);
         return;
       }
 
@@ -345,8 +557,7 @@ export function activate(context: vscode.ExtensionContext): void {
         { location: vscode.ProgressLocation.Window, title: "CodeMap: building flowchart..." },
         () => buildFlowchartFor(context.extensionPath, file, line, analysis),
       );
-      logGraph(graph);
-      provider.show(graph);
+      presentGraph(graph);
     } catch (e) {
       showError(e);
     }
@@ -372,8 +583,7 @@ export function activate(context: vscode.ExtensionContext): void {
           subtitle: `${jsWorkspaceGraphCache.nodes.length} symbols · ${jsWorkspaceGraphCache.edges.length} call edges`,
         };
       }
-      logGraph(jsWorkspaceGraphCache);
-      provider.show(jsWorkspaceGraphCache);
+      presentGraph(jsWorkspaceGraphCache);
       return;
     }
     if (preferred === "idl") {
@@ -391,8 +601,7 @@ export function activate(context: vscode.ExtensionContext): void {
           subtitle: `${idlWorkspaceGraphCache.nodes.length} symbols · ${idlWorkspaceGraphCache.edges.length} call edges`,
         };
       }
-      logGraph(idlWorkspaceGraphCache);
-      provider.show(idlWorkspaceGraphCache);
+      presentGraph(idlWorkspaceGraphCache);
       return;
     }
     await navController.showWorkspaceCallGraph(forceRefresh);
@@ -482,12 +691,153 @@ export function activate(context: vscode.ExtensionContext): void {
         },
       };
 
-      logGraph(graph);
-      provider.show(graph);
+      presentGraph(graph);
     } catch (e) {
       showError(e);
     }
   }
+
+  async function generateAndPostNarration(
+    graph: GraphDocument,
+    options: {
+      requestedKind?: NarrationKind;
+      forceRegenerate?: boolean;
+      interactive: boolean;
+    },
+  ): Promise<void> {
+    if (!actionsViewProvider.isNarrationEnabled()) {
+      if (options.interactive) {
+        vscode.window.showInformationMessage("CodeMap: Copilot narration is turned off in Controls > Display Settings.");
+      }
+      provider.clearNarration();
+      return;
+    }
+
+    const kind = resolveNarrationKind(graph, options.requestedKind);
+    const modelChoice = await resolveNarrationModel(context, options.interactive);
+    if (!modelChoice) return;
+
+    const runGeneration = async (token: vscode.CancellationToken): Promise<void> => {
+      const script = kind === "flowchart"
+        ? await getCachedOrGenerateFlowchartScript({
+            context,
+            graph,
+            model: modelChoice.model,
+            token,
+            forceRegenerate: options.forceRegenerate,
+          })
+        : await getCachedOrGenerateTraceScript({
+            context,
+            graph,
+            model: modelChoice.model,
+            token,
+            forceRegenerate: options.forceRegenerate,
+          });
+      provider.postNarrationScript(script);
+    };
+
+    if (options.interactive) {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `CodeMap: Generating ${kind === "flowchart" ? "flowchart annotations" : "narration"} with ${modelChoice.model.name}...`,
+        },
+        async (_progress, token) => runGeneration(token),
+      );
+      return;
+    }
+
+    const source = new vscode.CancellationTokenSource();
+    try {
+      await runGeneration(source.token);
+    } finally {
+      source.dispose();
+    }
+  }
+
+  async function generateAndPostDebugProbes(
+    graph: GraphDocument,
+    frame: RuntimeFrame,
+    nodeId: string,
+    forceRegenerate: boolean,
+  ): Promise<void> {
+    if (!actionsViewProvider.isNarrationEnabled()) {
+      provider.clearDebugProbes(nodeId);
+      return;
+    }
+    const node = graph.nodes.find((entry) => entry.id === nodeId);
+    if (!node) return;
+    const session = vscode.debug.activeDebugSession;
+    if (!session) return;
+    const tokenSource = new vscode.CancellationTokenSource();
+    try {
+      const probes = await getCachedOrGenerateDebugProbes({
+        context,
+        graph,
+        node,
+        runtimeFrame: frame,
+        narrationScript: provider.getCurrentNarration() || null,
+        token: tokenSource.token,
+        forceRegenerate,
+      });
+      if (!probes.length) return;
+      probeResultStore.setProbes(nodeId, probes);
+      provider.postDebugProbes(probes);
+      provider.highlightProbeNode(nodeId);
+      for (const probe of probes) {
+        void injectProbe(probe, frame, session, probeResultStore.nextHitCount(probe.id))
+          .then((result) => {
+            probeResultStore.recordResult(result);
+            provider.postProbeResult(result);
+            provider.highlightProbeNode(result.nodeId);
+          })
+          .catch((error) => {
+            provider.postProbeResult({
+              probeId: probe.id,
+              nodeId: probe.nodeId,
+              hitCount: probeResultStore.nextHitCount(probe.id),
+              timestamp: Date.now(),
+              data: null,
+              error: (error as Error).message,
+            });
+          });
+      }
+    } finally {
+      tokenSource.dispose();
+    }
+  }
+
+  function findProbeById(probeId: string): DebugProbe | undefined {
+    return probeResultStore.getProbe(probeId);
+  }
+
+  async function exportNarrationScript(): Promise<void> {
+    const script = provider.getCurrentNarration();
+    if (!script) {
+      vscode.window.showInformationMessage("CodeMap: generate narration before exporting a script.");
+      return;
+    }
+    const uri = await vscode.window.showSaveDialog({
+      filters: { Markdown: ["md"] },
+      saveLabel: "Export Narration Script",
+      defaultUri: vscode.Uri.file(path.join(
+        vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || context.extensionPath,
+        `${script.graphId}-narration.md`,
+      )),
+    });
+    if (!uri) return;
+    fs.writeFileSync(uri.fsPath, renderScriptAsMarkdown(script), "utf8");
+    vscode.window.showInformationMessage(`CodeMap: exported narration script to ${uri.fsPath}`);
+  }
+}
+
+function resolveNarrationKind(graph: GraphDocument, requestedKind?: NarrationKind): NarrationKind {
+  if (requestedKind) return requestedKind;
+  return graph.graphType === "flowchart" ? "flowchart" : "trace";
+}
+
+function supportsTraceNarration(graph: GraphDocument): boolean {
+  return graph.graphType !== "flowchart" && Array.isArray(graph.metadata?.execTimeline) && graph.metadata.execTimeline.length > 0;
 }
 
 function languageForDocument(doc: vscode.TextDocument): "python" | "javascript" | "idl" | undefined {

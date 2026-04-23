@@ -126,8 +126,6 @@ export function renderUnifiedView(graph, ctx) {
   const { root, defs, canvas } = ctx;
   const nodes = graph.nodes || [];
   const edges = graph.edges || [];
-  let selectedSymbol = null;
-  let deepZoomTimer = null;
 
   // Separate by level
   const pkgNodes = nodes.filter((n) => n.metadata && n.metadata.level === 0);
@@ -308,65 +306,27 @@ export function renderUnifiedView(graph, ctx) {
 
     sg.addEventListener("click", function (ev) {
       ev.stopPropagation();
-      selectedSymbol = n;
       if (ctx.onNodeClick) ctx.onNodeClick(n);
     });
 
     sg.addEventListener("dblclick", function (ev) {
       ev.stopPropagation();
       if (n.kind === "function" || n.kind === "method") {
-        selectedSymbol = n;
-        if (canvas && canvas.animateZoomTo) {
-          canvas.animateZoomTo(
-            p.x + p.w / 2,
-            p.y + p.h / 2,
-            Math.max(zoomThresholds.flowchartMin || 2.1, canvas.state.scale),
-            220,
-          );
-          window.setTimeout(() => {
-            vscode.postMessage({
-              type: "navigateLevel",
-              targetLevel: 3,
-              targetId: n.id,
-            });
-          }, 230);
-        } else {
-          vscode.postMessage({
-            type: "navigateLevel",
-            targetLevel: 3,
-            targetId: n.id,
-          });
-        }
+        vscode.postMessage({
+          type: "navigateLevel",
+          targetLevel: 3,
+          targetId: n.id,
+        });
       }
     });
   }
 
   // ── Scale watcher: toggle zoom-level CSS class ──
-  let zoomThresholds = { packageMax: 0.45, symbolMin: 1.3, flowchartMin: 2.1 };
-
   function updateZoomClass(scale) {
     root.classList.remove("zoom-pkg", "zoom-mod", "zoom-sym");
-    if (scale < zoomThresholds.packageMax) root.classList.add("zoom-pkg");
-    else if (scale < zoomThresholds.symbolMin) root.classList.add("zoom-mod");
+    if (scale < 0.45) root.classList.add("zoom-pkg");
+    else if (scale < 1.3) root.classList.add("zoom-mod");
     else root.classList.add("zoom-sym");
-
-    if (deepZoomTimer) {
-      window.clearTimeout(deepZoomTimer);
-      deepZoomTimer = null;
-    }
-    if (
-      selectedSymbol &&
-      (selectedSymbol.kind === "function" || selectedSymbol.kind === "method") &&
-      scale >= zoomThresholds.flowchartMin
-    ) {
-      deepZoomTimer = window.setTimeout(() => {
-        vscode.postMessage({
-          type: "navigateLevel",
-          targetLevel: 3,
-          targetId: selectedSymbol.id,
-        });
-      }, 140);
-    }
   }
 
   if (canvas && canvas.onScaleChange) {
@@ -392,18 +352,8 @@ export function renderUnifiedView(graph, ctx) {
     canvas && canvas.svg && canvas.svg.getBoundingClientRect
       ? canvas.svg.getBoundingClientRect()
       : { width: 1200, height: 800 };
-  const fitS = Math.min(svgRect.width / cw, svgRect.height / ch, 0.62);
+  const fitS = Math.min(svgRect.width / cw, svgRect.height / ch, 0.4);
   const s = Math.max(0.1, fitS);
-  zoomThresholds = {
-    packageMax: Math.max(0.08, s * 0.62),
-    symbolMin: Math.max(0.12, s * 0.98),
-    flowchartMin: Math.max(0.18, s * 1.55),
-  };
-  graph.metadata = {
-    ...(graph.metadata || {}),
-    zoomThresholds,
-  };
-  updateZoomClass(s);
 
   return {
     edgeRecords: edgeRecords,

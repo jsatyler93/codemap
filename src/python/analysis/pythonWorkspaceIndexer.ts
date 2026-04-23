@@ -2,15 +2,12 @@ import * as vscode from "vscode";
 import { PyAnalysisResult } from "../model/symbolTypes";
 import { indexWorkspace } from "./pythonRunner";
 
-declare function setTimeout(handler: () => void, timeout: number): unknown;
-declare function clearTimeout(handle: unknown): void;
-
 /** Caches the latest analysis. Refresh on demand or on file change. */
 export class PythonWorkspaceIndexer implements vscode.Disposable {
   private cache: PyAnalysisResult | undefined;
   private inflight: Promise<PyAnalysisResult> | undefined;
   private readonly watcher: vscode.FileSystemWatcher;
-  private debounceHandle: unknown;
+  private debounceHandle: NodeJS.Timeout | undefined;
   private includedFiles: string[] | undefined;
 
   constructor(private readonly extensionPath: string) {
@@ -78,7 +75,7 @@ export class PythonWorkspaceIndexer implements vscode.Disposable {
         "**/{node_modules,.venv,venv,__pycache__,.git,build,dist}/**",
         cap,
       );
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     if (files.length === 0) {
       return { symbols: {}, modules: {}, errors: [] };
     }

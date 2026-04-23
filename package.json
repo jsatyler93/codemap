@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "publisher": "local",
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
     "Visualization",
@@ -68,8 +68,54 @@
         "command": "codemap.refresh",
         "title": "CodeMap: Refresh Analysis",
         "category": "CodeMap"
+      },
+      {
+        "command": "codemap.narrateCurrentGraph",
+        "title": "CodeMap: Narrate Current Graph",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.narrateTrace",
+        "title": "CodeMap: Narrate Execution Trace",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.narrateFlowchart",
+        "title": "CodeMap: Annotate Flowchart with Copilot",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.regenerateNarration",
+        "title": "CodeMap: Regenerate Narration",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.exportScript",
+        "title": "CodeMap: Export Narration Script",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.generateProbes",
+        "title": "CodeMap: Generate Debug Probes at Breakpoint",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.askProbe",
+        "title": "CodeMap: Ask a Debug Question at This Point",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.clearProbes",
+        "title": "CodeMap: Clear All Debug Probes",
+        "category": "CodeMap"
+      },
+      {
+        "command": "codemap.exportProbes",
+        "title": "CodeMap: Export Debug Probes as Python Script",
+        "category": "CodeMap"
       }
     ],
+    "languageModels": {},
     "menus": {
       "editor/context": [
         {
@@ -116,6 +162,11 @@
           "type": "boolean",
           "default": true,
           "description": "If true and the 'jedi' package is installed in the analyzer's interpreter, use it to upgrade unresolved call sites with type-aware resolution."
+        },
+        "codemap.narration.autoGenerate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically generate Copilot narration for newly rendered graphs using the preferred or automatically selected model."
         }
       }
     }
@@ -124,23 +175,30 @@
     "vscode:prepublish": "npm run compile",
     "compile": "npm run compile:ext && npm run bundle:webview",
     "compile:ext": "tsc -p ./",
-    "bundle:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --outfile=dist/webview/main.js",
+    "bundle:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --external:litegraph.js --outfile=dist/webview/main.js",
     "watch": "tsc -watch -p ./",
-    "watch:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --outfile=dist/webview/main.js --watch"
+    "watch:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --external:litegraph.js --outfile=dist/webview/main.js --watch"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@types/vscode": "^1.80.0",
+    "@types/vscode": "^1.90.0",
     "esbuild": "^0.28.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
+    "d3-scale-chromatic": "^3.1.0",
     "dagre": "^0.8.5",
+    "litegraph.js": "^0.7.18",
     "motion": "^12.38.0",
+    "msgpack-lite": "^0.1.26",
+    "msgpackr": "^1.11.10",
+    "plotly.js-dist-min": "^3.5.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.12"
   }
 }

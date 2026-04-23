@@ -72,15 +72,17 @@ export interface GraphDocument {
   metadata?: Record<string, unknown>;
 }
 
-// ── Semantic zoom types ───────────────────────────────────────────────
-
+// Semantic zoom model used by hierarchical and unified views.
 export type ZoomLevel = 0 | 1 | 2 | 3;
 
-export interface NavigationPathEntry {
+export interface BreadcrumbEntry {
   level: ZoomLevel;
   label: string;
   id: string;
 }
+
+// Backward compatibility alias for older builders.
+export type NavigationPathEntry = BreadcrumbEntry;
 
 export interface PeripheralRef {
   id: string;
@@ -93,7 +95,9 @@ export interface PeripheralRef {
 
 export interface ZoomContext {
   level: ZoomLevel;
-  navigationPath: NavigationPathEntry[];
+  breadcrumb?: BreadcrumbEntry[];
+  // Backward compatibility field consumed by some renderers/builders.
+  navigationPath?: NavigationPathEntry[];
   peripherals: PeripheralRef[];
   parentId?: string;
   moduleColorMap?: Record<string, string>;

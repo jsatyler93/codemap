@@ -1,6 +1,8 @@
 // Semantic-zoom controller: dispatches GraphDocument rendering based on the
-// ZoomContext attached to graph.metadata. Also manages peripheral docks.
+// ZoomContext attached to graph.metadata. Also manages the breadcrumb bar
+// and peripheral docks.
 
+import { renderBreadcrumb } from "./breadcrumb.js";
 import { renderPeripherals } from "./peripheralDock.js";
 import { renderPackageView } from "../views/package/packageView.js";
 import { renderModuleView } from "../views/module/moduleView.js";
@@ -39,18 +41,20 @@ export function renderZoomGraph(graph, ctx) {
 }
 
 /**
- * Update chrome (peripheral docks) for the current graph.
+ * Update chrome (breadcrumb + peripheral docks) for the current graph.
  * Always safe to call; no-ops for graphs without a zoomContext.
  */
 export function updateZoomChrome(elements, graph) {
   const zoom = graph && graph.metadata && graph.metadata.zoomContext;
 
-  // Hide peripheral docks for unified (continuous zoom) view
+  // Hide breadcrumb + peripheral docks for unified (continuous zoom) view
   if (isUnifiedGraph(graph)) {
+    if (elements.breadcrumbBar) elements.breadcrumbBar.style.display = "none";
     if (elements.leftDock) elements.leftDock.style.display = "none";
     if (elements.rightDock) elements.rightDock.style.display = "none";
     return;
   }
 
+  renderBreadcrumb(elements.breadcrumbBar, zoom);
   renderPeripherals(elements.leftDock, elements.rightDock, zoom);
 }

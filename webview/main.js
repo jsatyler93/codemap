@@ -5,7 +5,18 @@ import { NS, makeSvgCanvas } from "./shared/panZoom.js";
 import { cubicPt } from "./shared/geometry.js";
 import { animate as motionAnimate } from "motion";
 import { clearCallGraphReactFlow, renderCallGraphReactFlow, resetCallGraphReactView } from "./views/callgraph/reactFlowCallGraphView.js";
+import { renderFlowchart } from "./views/flowchart/flowchartView.js";
 import { clearFlowchartReactFlow, renderFlowchartReactFlow, resetFlowchartReactView } from "./views/flowchart/reactFlowView.js";
+import { createNarrationPanel } from "./views/narration/narrationPanel.js";
+import { createOverlayManager } from "./views/debugOverlay/overlayManager.js";
+import { decodePackedBase64 } from "./utils/packedTransport.js";
+import {
+  clearOverlayProbeResults,
+  setOverlayActiveNodes,
+  setOverlayGraph,
+  setOverlayProbeResult,
+  setOverlayProbes,
+} from "./state/graphOverlayStore.js";
 import { renderCallGraph } from "./views/callgraph/callGraphView.js";
 import { renderDataflowView, removeDataflowOverlay } from "./views/dataflow/dataflowView.js";
 import { clearSuperimposedDataflow, renderSuperimposedDataflow } from "./views/dataflow/superimposedOverlay.js";
@@ -18,6 +29,9 @@ const titleEl    = document.getElementById("title");
 const statsEl    = document.getElementById("stats");
 const execBtn    = document.getElementById("btn-exec");
 const stepBtn    = document.getElementById("btn-step");
+const aiToggle   = document.getElementById("toggle-ai");
+const probeInteractToggle = document.getElementById("toggle-probe-interact");
+const narrateBtn = document.getElementById("btn-narrate");
 const resetBtn   = document.getElementById("btn-reset");
 const clearBtn   = document.getElementById("btn-clear");
 const refreshBtn = document.getElementById("btn-refresh");
@@ -30,15 +44,18 @@ const expandGroupsBtn = document.getElementById("btn-expand-groups");
 const overlayLegacyLabel = overlayLegacyToggle ? overlayLegacyToggle.closest("label") : null;
 const overlayModernLabel = overlayModernToggle ? overlayModernToggle.closest("label") : null;
 const breadcrumbEl = document.getElementById("flowchart-breadcrumb");
+const narrationRoot = document.getElementById("narration-root");
+const debugOverlayRoot = document.getElementById("debug-overlay-root");
 
 const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let time = 0;
-let uiState = { showEvidence: false, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false, canvasBrightness: 1.0, canvasThemeMode: "codemap" };
+let uiState = { showEvidence: false, narrationEnabled: true, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false, canvasBrightness: 1.0, canvasThemeMode: "codemap" };
 let overlayPrefs = { showLegacyOverlay: true, showModernOverlay: true };
 let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
+let pendingFlowchartRenderSanityCheck = null;
 const LAYOUT_STORAGE_PREFIX = "codemap.layout.v3:";
 const STEP_PARTICLE_INTERVAL_MS = 1150;
 const USE_REACT_FLOW_FLOWCHART = true;
@@ -48,6 +65,7 @@ const USE_REACT_FLOW_CALLGRAPH = true;
 let previousFlowchartBreadcrumb = [];
 let flowchartBreadcrumb = []; // [{groupId, label}, ...]
 let flowchartTransitionToken = 0;
+let currentNarrationScript = null;
 
 function showTooltip(e, n) {
   if (n && n.tooltipKind === "edge") {
@@ -152,6 +170,45 @@ function onNodeClick(n) {
 function onNodeDblClick(n) {
   // Request flowchart for this function (cross-layer navigation)
   vscode.postMessage({ type: "requestFlowchart", nodeId: n.id, source: n.source });
+}
+
+function applyNarrationAvailability() {
+  const enabled = uiState.narrationEnabled !== false;
+  if (aiToggle) aiToggle.checked = enabled;
+  if (probeInteractToggle) {
+    probeInteractToggle.disabled = !enabled;
+    if (!enabled) probeInteractToggle.checked = false;
+  }
+  if (narrateBtn) {
+    narrateBtn.hidden = !enabled;
+    narrateBtn.disabled = !enabled;
+    narrateBtn.title = enabled ? "Generate narration for the current graph" : "Copilot narration is turned off in Controls";
+  }
+  if (!enabled && currentNarrationScript) {
+    currentNarrationScript = null;
+    narrationPanel.clear();
+  }
+  if (!enabled) {
+    debugOverlay.clear();
+  }
+  applyProbeOverlayInteraction();
+}
+
+function applyProbeOverlayInteraction() {
+  const enabled = uiState.narrationEnabled !== false && !!probeInteractToggle?.checked;
+  debugOverlay.setInteractive(enabled);
+}
+
+function narrationByNodeId() {
+  if (uiState.narrationEnabled === false || !currentNarrationScript || currentNarrationScript.kind !== "flowchart") {
+    return {};
+  }
+  const out = {};
+  for (const step of currentNarrationScript.steps || []) {
+    if (!step.nodeId || !step.narration) continue;
+    out[step.nodeId] = step.narration;
+  }
+  return out;
 }
 
 // Click on empty canvas → reset selection
@@ -586,7 +643,7 @@ function renderGraph(graph, options = {}) {
   Object.keys(renderCtx).forEach((k) => delete renderCtx[k]);
 
   try {
-    const useReactFlowForFlowchart = USE_REACT_FLOW_FLOWCHART && graph.graphType === "flowchart";
+    const useReactFlowForFlowchart = USE_REACT_FLOW_FLOWCHART && !options.forceLegacyFlowchart && graph.graphType === "flowchart";
     const useReactFlowForCallGraph = USE_REACT_FLOW_CALLGRAPH && (graph.graphType === "callgraph" || graph.graphType === "workspace" || graph.graphType === "trace");
     removeDataflowOverlay();
     clearSuperimposedDataflow(canvas.root);
@@ -637,15 +694,17 @@ function renderGraph(graph, options = {}) {
       updateStats(graph);
       updateLegend(graph);
       updateCanvasControls(graph);
+      debugOverlay.sync();
       return;
     }
 
-    if (graph.graphType === "flowchart") {
+    if (useReactFlowForFlowchart) {
       result = renderFlowchartReactFlow(graph, {
         mount: canvasEl,
         preserveView: !!options.preserveView,
         layoutSnapshot: ctx.layoutSnapshot,
         flowchartViewMode: uiState.flowchartViewMode || "grouped",
+        narrationByNodeId: narrationByNodeId(),
         callbacks: {
           onNodeClick,
           onNodeDblClick,
@@ -664,6 +723,9 @@ function renderGraph(graph, options = {}) {
         },
       });
       renderCtx._resetView = () => resetFlowchartReactView();
+      scheduleFlowchartRenderSanityCheck(graph, options);
+    } else if (graph.graphType === "flowchart") {
+      result = renderFlowchart(graph, ctx);
     } else if (useReactFlowForCallGraph) {
       result = renderCallGraphReactFlow(graph, {
         mount: canvasEl,
@@ -725,12 +787,40 @@ function renderGraph(graph, options = {}) {
     updateExecPanel(graph);
     updateLegend(graph);
     updateCanvasControls(graph);
+    debugOverlay.sync();
     // Refresh the breadcrumb bar in case graph type changed.
     updateBreadcrumbUi();
   } catch (err) {
     const msg = err && err.stack ? err.stack : String(err);
     vscode.postMessage({ type: "debug", message: "[render-error] " + msg });
   }
+}
+
+function scheduleFlowchartRenderSanityCheck(graph, options = {}) {
+  if (pendingFlowchartRenderSanityCheck) {
+    clearTimeout(pendingFlowchartRenderSanityCheck);
+    pendingFlowchartRenderSanityCheck = null;
+  }
+  if (!graph || graph.graphType !== "flowchart" || options.forceLegacyFlowchart) return;
+  if (!Array.isArray(graph.nodes) || graph.nodes.length === 0) return;
+  pendingFlowchartRenderSanityCheck = window.setTimeout(() => {
+    pendingFlowchartRenderSanityCheck = null;
+    if (currentGraph !== graph) return;
+    // React Flow flowchart host is created inside #canvas by reactFlowView.js
+    // with id="react-flow-host". Look it up via that id OR via the
+    // .react-flow-host class so we stay resilient to future renames.
+    const host =
+      document.getElementById("react-flow-host") ||
+      canvasEl.querySelector(".react-flow-host");
+    const viewport = host?.querySelector(".react-flow__viewport");
+    const nodeEls = host?.querySelectorAll(".react-flow__node") || [];
+    if (viewport && nodeEls.length > 0) return;
+    vscode.postMessage({
+      type: "debug",
+      message: `[render-fallback] flowchart React Flow did not mount visible nodes for ${graph.title}; retrying with SVG`,
+    });
+    renderGraph(graph, { ...options, preserveView: true, forceLegacyFlowchart: true });
+  }, 140);
 }
 
 function safeRenderSuperimposed(graph, result, ctx) {
@@ -831,19 +921,54 @@ window.addEventListener("message", (event) => {
     flowchartBreadcrumb = [];
     updateBreadcrumbUi();
     renderGraph(msg.graph, { progressiveMode: msg.graph.graphType === "flowchart" ? "overview" : "none" });
+    setOverlayGraph(msg.graph);
+    narrationPanel.setGraph(msg.graph);
   } else if (msg && msg.type === "flowchartLayer") {
     previousFlowchartBreadcrumb = flowchartBreadcrumb;
     flowchartBreadcrumb = msg.breadcrumb || [];
     updateBreadcrumbUi();
     const mode = flowchartBreadcrumb.length === 0 ? "overview" : "drilldown";
     renderGraph(msg.graph, { progressiveMode: mode });
+    setOverlayGraph(msg.graph);
+    narrationPanel.setGraph(msg.graph);
   } else if (msg && msg.type === "setRuntimeFrame") {
     renderRuntimeFrame(msg.frame, msg.highlightNodeIds || [], msg.breakpointNodeIds || []);
+    setOverlayActiveNodes([...(msg.highlightNodeIds || []), ...(msg.breakpointNodeIds || [])]);
+  } else if (msg && msg.type === "setNarrationScript") {
+    currentNarrationScript = msg.script || null;
+    narrationPanel.load(currentNarrationScript, currentGraph);
+    if (currentGraph?.graphType === "flowchart") {
+      const mode = flowchartBreadcrumb.length === 0 ? "overview" : "drilldown";
+      renderGraph(currentGraph, { preserveView: true, progressiveMode: mode });
+    }
+  } else if (msg && msg.type === "clearNarration") {
+    currentNarrationScript = null;
+    narrationPanel.clear();
+    if (currentGraph?.graphType === "flowchart") {
+      const mode = flowchartBreadcrumb.length === 0 ? "overview" : "drilldown";
+      renderGraph(currentGraph, { preserveView: true, progressiveMode: mode });
+    }
+  } else if (msg && msg.type === "setDebugProbes") {
+    const probes = msg.probesPacked ? decodePackedBase64(msg.probesPacked) : (msg.probes || []);
+    setOverlayProbes(probes || []);
+    debugOverlay.setProbes(probes || []);
+  } else if (msg && msg.type === "probeResult") {
+    const result = msg.resultPacked ? decodePackedBase64(msg.resultPacked) : msg.result;
+    if (result) {
+      setOverlayProbeResult(result);
+      debugOverlay.updateProbe(result);
+    }
+  } else if (msg && msg.type === "clearDebugProbes") {
+    clearOverlayProbeResults(msg.nodeId);
+    debugOverlay.clearProbes(msg.nodeId);
+  } else if (msg && msg.type === "highlightProbeNode") {
+    debugOverlay.flashNode(msg.nodeId);
   } else if (msg && msg.type === "setUiState") {
     uiState = { ...uiState, ...(msg.state || {}) };
     const bv = typeof uiState.canvasBrightness === "number" ? uiState.canvasBrightness : 1.0;
     canvasEl.style.filter = bv === 1.0 ? "" : `brightness(${bv})`;
     applyCanvasThemeMode();
+    applyNarrationAvailability();
     hideTooltip();
     scheduleUiStateRender();
   }
@@ -889,6 +1014,19 @@ refreshBtn.addEventListener("click", () => {
   vscode.postMessage({ type: "requestRefresh" });
 });
 
+narrateBtn?.addEventListener("click", () => {
+  if (uiState.narrationEnabled === false) return;
+  vscode.postMessage({
+    type: "requestNarration",
+    kind: currentGraph?.graphType === "flowchart" ? "flowchart" : "trace",
+    regenerate: false,
+  });
+});
+
+aiToggle?.addEventListener("change", () => {
+  vscode.postMessage({ type: "toggleAiAssistance", enabled: aiToggle.checked });
+});
+
 overlayLegacyToggle?.addEventListener("change", () => {
   overlayPrefs.showLegacyOverlay = overlayLegacyToggle.checked;
   if (currentGraph) {
@@ -901,6 +1039,10 @@ overlayModernToggle?.addEventListener("change", () => {
   if (currentGraph) {
     renderGraph(currentGraph, { preserveView: true });
   }
+});
+
+probeInteractToggle?.addEventListener("change", () => {
+  applyProbeOverlayInteraction();
 });
 
 collapseGroupsBtn?.addEventListener("click", () => {
@@ -993,6 +1135,7 @@ function resetExecPanelDisplay() {
   if (panel) {
     panel.classList.remove("active-exec", "active-step");
   }
+  dispatchExecStepEvent();
 }
 
 function highlightExecStep() {
@@ -1024,6 +1167,7 @@ function updateExecStepDisplay() {
     panel.classList.toggle("active-exec", execAutoMode);
     panel.classList.toggle("active-step", execStepMode && !execAutoMode);
   }
+  dispatchExecStepEvent();
 }
 
 function toggleAutoTrace() {
@@ -1087,8 +1231,7 @@ function advanceAutoTrace() {
     updateExecStepDisplay();
     return;
   }
-  if (renderCtx._highlightStep) renderCtx._highlightStep(execStep);
-  updateExecStepDisplay();
+  highlightExecStep();
   const step = timeline[execStep];
   if (step.edge) {
     const key = step.edge[0] + "->" + step.edge[1];
@@ -1098,6 +1241,28 @@ function advanceAutoTrace() {
       if (d) execDots.push(d);
     }
   }
+}
+
+function dispatchExecStepEvent() {
+  const timeline = renderCtx._execTimeline;
+  const step = timeline && execStep >= 0 && execStep < timeline.length ? timeline[execStep] : null;
+  document.dispatchEvent(new CustomEvent("codemap:execStep", {
+    detail: {
+      stepIndex: execStep,
+      step,
+    },
+  }));
+}
+
+function setExecStepIndex(stepIndex) {
+  const timeline = renderCtx._execTimeline;
+  if (!timeline || !timeline.length) return false;
+  if (execAutoMode) stopAutoTrace();
+  execStepMode = true;
+  stepBtn.classList.add("active");
+  execStep = Math.max(0, Math.min(stepIndex, timeline.length - 1));
+  highlightExecStep();
+  return true;
 }
 
 function spawnCurrentStepParticle(force = false) {
@@ -1170,6 +1335,29 @@ function loop() {
   requestAnimationFrame(loop);
 }
 loop();
+
+const narrationPanel = createNarrationPanel({
+  rootEl: narrationRoot,
+  vscode,
+  getCurrentGraph: () => currentGraph,
+  resolveNodeElement: (nodeId) => canvasEl.querySelector(`[data-id="${cssEscape(nodeId)}"]`),
+  setExecStepIndex,
+});
+
+const debugOverlay = createOverlayManager({
+  rootEl: debugOverlayRoot,
+  canvasEl,
+  resolveNodeElement: (nodeId) => canvasEl.querySelector(`[data-id="${cssEscape(nodeId)}"]`),
+  onDismissProbe: (probeId) => vscode.postMessage({ type: "dismissProbe", probeId }),
+  onRegenerateProbes: (nodeId) => vscode.postMessage({ type: "regenerateProbes", nodeId }),
+  onSelectNode: (nodeId) => {
+    debugOverlay.flashNode(nodeId);
+    const node = currentGraph?.nodes?.find((entry) => entry.id === nodeId);
+    if (node) onNodeClick(node);
+  },
+});
+
+applyProbeOverlayInteraction();
 
 vscode.postMessage({ type: "ready" });
 

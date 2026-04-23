@@ -1,5 +1,9 @@
 import * as path from "path";
 import * as vscode from "vscode";
+import { pack } from "msgpackr";
+import { NarrationScript } from "../ai/narrationTypes";
+import { DebugProbe, ProbeResult } from "../debug/debugProbeTypes";
+import { parseDebugProbeList, parseProbeResult } from "../debug/probeSchemas";
 import { GraphDocument } from "../python/model/graphTypes";
 import { BreadcrumbEntry, FromWebviewMessage, RuntimeFrameView, UiStateView } from "../messaging/protocol";
 
@@ -14,10 +18,14 @@ export class GraphWebviewProvider {
   private panel: vscode.WebviewPanel | undefined;
   private lastGraph: GraphDocument | undefined;
   private lastRuntime: { frame: RuntimeFrameView | null; highlightNodeIds?: string[]; breakpointNodeIds?: string[] } | undefined;
+  private lastNarration: NarrationScript | undefined;
+  private lastDebugProbes: DebugProbe[] = [];
+  private lastProbeResults = new Map<string, ProbeResult>();
   /** Stack for flowchart progressive reading mode.  Empty = overview layer. */
   private flowchartLayerStack: LayerStackEntry[] = [];
   private uiState: UiStateView = {
     showEvidence: false,
+    narrationEnabled: true,
     repelStrength: 0.45,
     attractStrength: 0.32,
     ambientRepelStrength: 0.18,
@@ -34,10 +42,16 @@ export class GraphWebviewProvider {
     private readonly onRefreshRequested: () => void,
     private readonly onDebugMessage: (message: string) => void,
     private readonly onRequestFlowchart: (nodeId: string, source?: GraphDocument["nodes"][0]["source"]) => void,
+    private readonly onRequestNarration: (kind?: "trace" | "flowchart", regenerate?: boolean) => void,
+    private readonly onRequestExportNarration: () => void,
+    private readonly onToggleAiAssistance: (enabled: boolean) => void,
+    private readonly onRegenerateProbes: (nodeId: string) => void,
+    private readonly onDismissProbe: (probeId: string) => void,
   ) {}
 
   show(graph: GraphDocument): void {
     this.lastGraph = graph;
+    this.lastNarration = undefined;
     // Any new top-level graph resets the drilldown stack.
     this.flowchartLayerStack = [];
     if (!this.panel) {
@@ -62,6 +76,16 @@ export class GraphWebviewProvider {
           this.onRefreshRequested();
         } else if (msg.type === "requestFlowchart") {
           this.onRequestFlowchart(msg.nodeId, msg.source);
+        } else if (msg.type === "requestNarration") {
+          this.onRequestNarration(msg.kind, msg.regenerate);
+        } else if (msg.type === "requestExportNarration") {
+          this.onRequestExportNarration();
+        } else if (msg.type === "toggleAiAssistance") {
+          this.onToggleAiAssistance(msg.enabled);
+        } else if (msg.type === "regenerateProbes") {
+          this.onRegenerateProbes(msg.nodeId);
+        } else if (msg.type === "dismissProbe") {
+          this.onDismissProbe(msg.probeId);
         } else if (msg.type === "debug") {
           this.onDebugMessage(msg.message);
         } else if (msg.type === "drilldownFlowchart") {
@@ -82,6 +106,24 @@ export class GraphWebviewProvider {
               breakpointNodeIds: this.lastRuntime.breakpointNodeIds,
             });
           }
+          if (this.lastNarration) {
+            this.panel?.webview.postMessage({
+              type: "setNarrationScript",
+              script: this.lastNarration,
+            });
+          }
+          if (this.lastDebugProbes.length) {
+            this.panel?.webview.postMessage({
+              type: "setDebugProbes",
+              probesPacked: encodePacked(this.lastDebugProbes),
+            });
+            for (const result of this.lastProbeResults.values()) {
+              this.panel?.webview.postMessage({
+                type: "probeResult",
+                resultPacked: encodePacked(result),
+              });
+            }
+          }
         }
       });
       const html = this.buildHtml(this.panel.webview);
@@ -92,6 +134,8 @@ export class GraphWebviewProvider {
     }
     this.panel.title = `CodeMap · ${graph.title}`;
     this.panel.reveal(vscode.ViewColumn.Two, false);
+    this.clearNarration();
+    this.clearDebugProbes();
     this.postGraph(graph);
   }
 
@@ -160,6 +204,56 @@ export class GraphWebviewProvider {
     });
   }
 
+  postNarrationScript(script: NarrationScript): void {
+    this.lastNarration = script;
+    this.panel?.webview.postMessage({
+      type: "setNarrationScript",
+      script,
+    });
+  }
+
+  clearNarration(): void {
+    this.lastNarration = undefined;
+    this.panel?.webview.postMessage({ type: "clearNarration" });
+  }
+
+  postDebugProbes(probes: DebugProbe[]): void {
+    const safeProbes = parseDebugProbeList(probes);
+    this.lastDebugProbes = safeProbes;
+    this.panel?.webview.postMessage({
+      type: "setDebugProbes",
+      probesPacked: encodePacked(safeProbes),
+    });
+  }
+
+  postProbeResult(result: ProbeResult): void {
+    const safeResult = parseProbeResult(result);
+    this.lastProbeResults.set(safeResult.probeId, safeResult);
+    this.panel?.webview.postMessage({
+      type: "probeResult",
+      resultPacked: encodePacked(safeResult),
+    });
+  }
+
+  clearDebugProbes(nodeId?: string): void {
+    if (!nodeId) {
+      this.lastDebugProbes = [];
+      this.lastProbeResults.clear();
+    } else {
+      this.lastDebugProbes = this.lastDebugProbes.filter((probe) => probe.nodeId !== nodeId);
+      for (const [probeId, result] of this.lastProbeResults.entries()) {
+        if (result.nodeId === nodeId) {
+          this.lastProbeResults.delete(probeId);
+        }
+      }
+    }
+    this.panel?.webview.postMessage({ type: "clearDebugProbes", nodeId });
+  }
+
+  highlightProbeNode(nodeId: string): void {
+    this.panel?.webview.postMessage({ type: "highlightProbeNode", nodeId });
+  }
+
   updateUiState(state: UiStateView): void {
     this.uiState = state;
     this.postUiState();
@@ -171,6 +265,10 @@ export class GraphWebviewProvider {
 
   getCurrentGraph(): GraphDocument | undefined {
     return this.lastGraph;
+  }
+
+  getCurrentNarration(): NarrationScript | undefined {
+    return this.lastNarration;
   }
 
   private postUiState(): void {
@@ -190,6 +288,7 @@ export class GraphWebviewProvider {
     const cssUri = asUri(webviewRoot, "styles.css");
     const flowCssUri = asUri(distRoot, "main.css");
     const mainUri = asUri(distRoot, "main.js");
+    const litegraphUri = asUri(distRoot, "litegraph.js");
     const nonce = makeNonce();
     const csp = [
       `default-src 'none'`,
@@ -216,6 +315,9 @@ export class GraphWebviewProvider {
     <span class="sep"></span>
     <button class="btn exec" id="btn-exec">&#9654; auto trace</button>
     <button class="btn step" id="btn-step">&#9193; step-by-step</button>
+    <label class="tick"><input id="toggle-ai" type="checkbox" checked /> AI</label>
+    <label class="tick"><input id="toggle-probe-interact" type="checkbox" /> widgets</label>
+    <button class="btn" id="btn-narrate">narrate</button>
     <button class="btn" id="btn-reset">reset</button>
     <button class="btn" id="btn-clear">clear</button>
     <button class="btn" id="btn-refresh">&#x21bb; refresh</button>
@@ -224,6 +326,8 @@ export class GraphWebviewProvider {
     <input id="search-box" type="text" placeholder="Search..." />
   </div>
   <div id="flowchart-breadcrumb" style="display:none;position:sticky;top:0;z-index:120;padding:5px 14px 4px;background:rgba(10,12,18,0.92);border-bottom:1px solid #2a3042;font-size:11px;font-family:Consolas,monospace;color:#7aa2f7;line-height:1.6;"></div>
+  <div id="narration-root"></div>
+  <div id="debug-overlay-root"></div>
   <div id="canvas"></div>
   <div id="canvas-controls">
     <button class="canvas-btn" id="btn-collapse-groups">collapse all</button>
@@ -261,10 +365,15 @@ export class GraphWebviewProvider {
       });
     })();
   </script>
+  <script nonce="${nonce}" src="${litegraphUri}"></script>
   <script nonce="${nonce}" src="${mainUri}"></script>
 </body>
 </html>`;
   }
+}
+
+function encodePacked(value: unknown): string {
+  return Buffer.from(pack(value)).toString("base64");
 }
 
 function makeNonce(): string {

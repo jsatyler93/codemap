@@ -1,4 +1,6 @@
 import { GraphDocument, SourceRef, ZoomLevel } from "../python/model/graphTypes";
+import { NarrationKind, NarrationScript } from "../ai/narrationTypes";
+import { DebugProbe, ProbeResult } from "../debug/debugProbeTypes";
 
 // Messages: webview <-> extension host
 
@@ -21,6 +23,31 @@ export interface RequestFlowchartMessage {
   type: "requestFlowchart";
   nodeId: string;
   source?: SourceRef;
+}
+
+export interface RequestNarrationMessage {
+  type: "requestNarration";
+  kind?: NarrationKind;
+  regenerate?: boolean;
+}
+
+export interface RequestExportNarrationMessage {
+  type: "requestExportNarration";
+}
+
+export interface ToggleAiAssistanceMessage {
+  type: "toggleAiAssistance";
+  enabled: boolean;
+}
+
+export interface RegenerateProbesMessage {
+  type: "regenerateProbes";
+  nodeId: string;
+}
+
+export interface DismissProbeMessage {
+  type: "dismissProbe";
+  probeId: string;
 }
 
 export interface ReadyMessage {
@@ -70,6 +97,7 @@ export interface SetRuntimeFrameMessage {
 
 export interface UiStateView {
   showEvidence: boolean;
+  narrationEnabled?: boolean;
   repelStrength: number;
   attractStrength: number;
   ambientRepelStrength: number;
@@ -135,16 +163,58 @@ export interface SetUiStateMessage {
   state: UiStateView;
 }
 
+export interface SetNarrationScriptMessage {
+  type: "setNarrationScript";
+  script: NarrationScript;
+}
+
+export interface ClearNarrationMessage {
+  type: "clearNarration";
+}
+
+export interface SetDebugProbesMessage {
+  type: "setDebugProbes";
+  probes?: DebugProbe[];
+  probesPacked?: string;
+}
+
+export interface ProbeResultMessage {
+  type: "probeResult";
+  result?: ProbeResult;
+  resultPacked?: string;
+}
+
+export interface ClearDebugProbesMessage {
+  type: "clearDebugProbes";
+  nodeId?: string;
+}
+
+export interface HighlightProbeNodeMessage {
+  type: "highlightProbeNode";
+  nodeId: string;
+}
+
 export type FromExtensionMessage =
   | SetGraphMessage
   | SetThemeMessage
   | SetRuntimeFrameMessage
   | SetUiStateMessage
+  | SetNarrationScriptMessage
+  | ClearNarrationMessage
+  | SetDebugProbesMessage
+  | ProbeResultMessage
+  | ClearDebugProbesMessage
+  | HighlightProbeNodeMessage
   | FlowchartLayerMessage;
 export type FromWebviewMessage =
   | RevealNodeMessage
   | RequestRefreshMessage
   | RequestFlowchartMessage
+  | RequestNarrationMessage
+  | RequestExportNarrationMessage
+  | ToggleAiAssistanceMessage
+  | RegenerateProbesMessage
+  | DismissProbeMessage
   | NavigateLevelMessage
   | NavigatePeripheralMessage
   | DrilldownFlowchartMessage

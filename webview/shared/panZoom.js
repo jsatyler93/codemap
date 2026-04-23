@@ -56,7 +56,6 @@ export function makeSvgCanvas(canvasEl) {
     state.panX  = initial.panX;
     state.panY  = initial.panY;
     apply();
-    notifyScaleListeners();
   }
 
   function clear() {
@@ -64,54 +63,7 @@ export function makeSvgCanvas(canvasEl) {
     while (defs.firstChild) defs.removeChild(defs.firstChild);
   }
 
-  // ── Scale-change listeners (for semantic zoom level switching) ──
-  const scaleListeners = [];
-  function onScaleChange(fn) {
-    if (typeof fn === "function") scaleListeners.push(fn);
-  }
-  function clearScaleListeners() {
-    scaleListeners.length = 0;
-  }
-  function notifyScaleListeners() {
-    for (const fn of scaleListeners) fn(state.scale);
-  }
-
-  // Notify on every wheel zoom
-  const origWheel = canvasEl.__codemapWheel;
-  canvasEl.addEventListener("wheel", () => {
-    // Debounce: listeners are called after the state update in the wheel handler above
-    requestAnimationFrame(() => notifyScaleListeners());
-  }, { passive: true });
-
-  // ── Animated zoom-to-point ──
-  function animateZoomTo(cx, cy, targetScale, duration = 400) {
-    const rc = canvasEl.getBoundingClientRect();
-    const vw = rc.width;
-    const vh = rc.height;
-    const startScale = state.scale;
-    const startPanX = state.panX;
-    const startPanY = state.panY;
-    const endPanX = vw / 2 - cx * targetScale;
-    const endPanY = vh / 2 - cy * targetScale;
-    const startTime = performance.now();
-
-    function step(now) {
-      const t = Math.min(1, (now - startTime) / duration);
-      const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-      state.scale = startScale + (targetScale - startScale) * ease;
-      state.panX = startPanX + (endPanX - startPanX) * ease;
-      state.panY = startPanY + (endPanY - startPanY) * ease;
-      apply();
-      if (t < 1) {
-        requestAnimationFrame(step);
-      } else {
-        notifyScaleListeners();
-      }
-    }
-    requestAnimationFrame(step);
-  }
-
-  return { svg, root, defs, reset, clear, state, onScaleChange, clearScaleListeners, animateZoomTo };
+  return { svg, root, defs, reset, clear, state };
 }
 
 export function mkArrow(defs, id, color) {

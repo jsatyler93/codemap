@@ -88,10 +88,10 @@ export function renderPackageView(graph, ctx) {
     edgeLayer.appendChild(path);
 
     if (e.label) {
-      const mid = cubicPt(sx, sy, cx, sy, cx, ty, tx, ty, 0.5);
+      const mid = cubicPt(0.5, [sx, sy], [cx, sy], [cx, ty], [tx, ty]);
       const t = document.createElementNS(NS, "text");
-      t.setAttribute("x", mid.x);
-      t.setAttribute("y", mid.y - 6);
+      t.setAttribute("x", mid[0]);
+      t.setAttribute("y", mid[1] - 6);
       t.setAttribute("fill", from.color);
       t.setAttribute("font-size", "10");
       t.setAttribute("font-weight", "600");
@@ -108,9 +108,9 @@ export function renderPackageView(graph, ctx) {
     dotLayer.appendChild(dot);
     edgeRecords.push({
       dot,
-      sx, sy, c1x: cx, c1y: sy, c2x: cx, c2y: ty, tx, ty,
-      offset: Math.random(),
-      speed: 0.0005 + Math.random() * 0.0004,
+      from: [sx, sy], c1: [cx, sy], c2: [cx, ty], to: [tx, ty],
+      speed: 0.22 + Math.random() * 0.18,
+      phase: Math.random(),
     });
   }
 

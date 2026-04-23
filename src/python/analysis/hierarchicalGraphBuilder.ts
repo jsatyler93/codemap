@@ -1,8 +1,8 @@
 import {
+  BreadcrumbEntry,
   GraphDocument,
   GraphEdge,
   GraphNode,
-  NavigationPathEntry,
   PeripheralRef,
   ZoomContext,
 } from "../model/graphTypes";
@@ -149,7 +149,7 @@ export function buildPackageGraph(
 
   const zoomContext: ZoomContext = {
     level: 0,
-    navigationPath: [{ level: 0, label: "Workspace", id: "root" }],
+    breadcrumb: [{ level: 0, label: "Workspace", id: "root" }],
     peripherals: [],
     moduleColorMap: colorMap,
   };
@@ -300,14 +300,14 @@ export function buildModuleGraph(
     });
   }
 
-  const navigationPath: NavigationPathEntry[] = [
+  const breadcrumb: BreadcrumbEntry[] = [
     { level: 0, label: "Workspace", id: "root" },
     { level: 1, label: folderName, id: pkgId(folderName) },
   ];
 
   const zoomContext: ZoomContext = {
     level: 1,
-    navigationPath,
+    breadcrumb,
     peripherals,
     parentId: pkgId(folderName),
     moduleColorMap: colorMap,
@@ -347,7 +347,7 @@ export function buildSymbolGraph(
       title: "Unknown module",
       nodes: [],
       edges: [],
-      metadata: { zoomContext: { level: 2, navigationPath: [], peripherals: [], moduleColorMap: colorMap } },
+      metadata: { zoomContext: { level: 2, breadcrumb: [], peripherals: [], moduleColorMap: colorMap } },
     };
   }
   const moduleName = modSym.module;
@@ -426,7 +426,7 @@ export function buildSymbolGraph(
     });
   }
 
-  const navigationPath: NavigationPathEntry[] = [
+  const breadcrumb: BreadcrumbEntry[] = [
     { level: 0, label: "Workspace", id: "root" },
     { level: 1, label: folderName, id: pkgId(folderName) },
     { level: 2, label: shortModuleName(moduleName), id: moduleId },
@@ -434,7 +434,7 @@ export function buildSymbolGraph(
 
   const zoomContext: ZoomContext = {
     level: 2,
-    navigationPath,
+    breadcrumb,
     peripherals,
     parentId: moduleId,
     moduleColorMap: colorMap,
@@ -470,12 +470,12 @@ export function buildUnifiedGraph(
   const colorMap = moduleColorMap ?? computeModuleColorMap(analysis);
 
   // Layout constants (SVG coordinate units)
-  const SYM_W = 180, SYM_H = 32, SYM_GAP = 4;
-  const MOD_HDR = 40, MOD_PAD_X = 18, MOD_PAD_BOT = 16;
+  const SYM_W = 200, SYM_H = 36, SYM_GAP = 6;
+  const MOD_HDR = 44, MOD_PAD_X = 24, MOD_PAD_BOT = 20;
   const MOD_W = SYM_W + MOD_PAD_X * 2;
-  const MOD_GAP_X = 30, MOD_GAP_Y = 24;
-  const PKG_HDR = 48, PKG_PAD_X = 24, PKG_PAD_BOT = 22;
-  const PKG_GAP = 120;
+  const MOD_GAP_X = 50, MOD_GAP_Y = 40;
+  const PKG_HDR = 56, PKG_PAD_X = 36, PKG_PAD_BOT = 30;
+  const PKG_GAP = 200;
 
   // 1) Group symbols by folder → module
   const folderModules = new Map<
@@ -775,7 +775,7 @@ export function buildUnifiedGraph(
 
   const zoomContext: ZoomContext = {
     level: 0,
-    navigationPath: [{ level: 0, label: "Workspace", id: "root" }],
+    breadcrumb: [{ level: 0, label: "Workspace", id: "root" }],
     peripherals: [],
     moduleColorMap: colorMap,
   };
@@ -819,8 +819,6 @@ function symbolToNode(sym: PySymbol, color?: string): GraphNode {
       decorators: sym.decorators ?? [],
       params: sym.params ?? [],
       returnType: sym.returnType,
-      returnTypeSource: sym.returnTypeSource,
-      returnTypeConfidence: sym.returnTypeConfidence,
       docSummary: sym.docSummary,
       methodKind: sym.methodKind,
       bases: sym.bases,
@@ -845,20 +843,20 @@ export function flowchartZoomContext(
   const colorMap = moduleColorMap ?? computeModuleColorMap(analysis);
   const sym = analysis.symbols[symbolId];
   if (!sym) {
-    return { level: 3, navigationPath: [], peripherals: [], moduleColorMap: colorMap };
+    return { level: 3, breadcrumb: [], peripherals: [], moduleColorMap: colorMap };
   }
   const moduleName = sym.module;
   const moduleId = analysis.modules[moduleName];
   const folderName = folderOfModule(moduleName);
 
-  const navigationPath: NavigationPathEntry[] = [
+  const breadcrumb: BreadcrumbEntry[] = [
     { level: 0, label: "Workspace", id: "root" },
     { level: 1, label: folderName, id: pkgId(folderName) },
   ];
   if (moduleId) {
-    navigationPath.push({ level: 2, label: shortModuleName(moduleName), id: moduleId });
+    breadcrumb.push({ level: 2, label: shortModuleName(moduleName), id: moduleId });
   }
-  navigationPath.push({
+  breadcrumb.push({
     level: 3,
     label: `${sym.name}()`,
     id: sym.id,
@@ -885,7 +883,7 @@ export function flowchartZoomContext(
 
   return {
     level: 3,
-    navigationPath,
+    breadcrumb,
     peripherals,
     parentId: sym.id,
     moduleColorMap: colorMap,

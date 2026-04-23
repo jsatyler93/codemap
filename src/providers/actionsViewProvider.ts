@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
+import { UiStateView } from "../messaging/protocol";
 
 const SHOW_EVIDENCE_KEY = "codemap.showEvidence";
+const NARRATION_ENABLED_KEY = "codemap.narrationEnabled";
 const FLOWCHART_VIEW_MODE_KEY = "codemap.flowchartViewMode";
 const CANVAS_BRIGHTNESS_KEY = "codemap.canvasBrightness";
 const CANVAS_THEME_MODE_KEY = "codemap.canvasThemeMode";
@@ -18,6 +20,11 @@ interface ExecuteCommandMessage {
 
 interface ToggleEvidenceMessage {
   type: "toggleEvidence";
+  enabled: boolean;
+}
+
+interface ToggleNarrationMessage {
+  type: "toggleNarration";
   enabled: boolean;
 }
 
@@ -40,7 +47,7 @@ interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | SetCanvasThemeModeMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | ToggleNarrationMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | SetCanvasThemeModeMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -53,15 +60,17 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private lastSummary: { checked: number; total: number } = { checked: 0, total: 0 };
   private showEvidence: boolean;
+  private narrationEnabled: boolean;
   private flowchartViewMode: "grouped" | "full";
   private canvasBrightness: number;
   private canvasThemeMode: "codemap" | "vscode";
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly onUiStateChanged: (state: { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full"; canvasBrightness: number; canvasThemeMode: "codemap" | "vscode" }) => void,
+    private readonly onUiStateChanged: (state: UiStateView) => void,
   ) {
     this.showEvidence = context.workspaceState.get<boolean>(SHOW_EVIDENCE_KEY, false);
+    this.narrationEnabled = context.workspaceState.get<boolean>(NARRATION_ENABLED_KEY, true);
     this.flowchartViewMode = context.workspaceState.get<"grouped" | "full">(FLOWCHART_VIEW_MODE_KEY, "grouped");
     this.canvasBrightness = clampCanvasBrightness(context.workspaceState.get<number>(CANVAS_BRIGHTNESS_KEY, 1.0));
     this.canvasThemeMode = context.workspaceState.get<"codemap" | "vscode">(CANVAS_THEME_MODE_KEY, DEFAULT_CANVAS_THEME_MODE);
@@ -78,6 +87,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === "toggleEvidence") {
         this.showEvidence = !!msg.enabled;
         void this.context.workspaceState.update(SHOW_EVIDENCE_KEY, this.showEvidence);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "toggleNarration") {
+        this.narrationEnabled = !!msg.enabled;
+        void this.context.workspaceState.update(NARRATION_ENABLED_KEY, this.narrationEnabled);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "setFlowchartViewMode") {
@@ -124,9 +138,21 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.showEvidence;
   }
 
-  getUiState(): { showEvidence: boolean; repelStrength: number; attractStrength: number; ambientRepelStrength: number; cohesionStrength: number; layoutMode: "tree" | "lanes" | "freeform"; treeView: boolean; flowchartViewMode: "grouped" | "full"; canvasBrightness: number; canvasThemeMode: "codemap" | "vscode" } {
+  isNarrationEnabled(): boolean {
+    return this.narrationEnabled;
+  }
+
+  setNarrationEnabled(enabled: boolean): void {
+    this.narrationEnabled = enabled;
+    void this.context.workspaceState.update(NARRATION_ENABLED_KEY, this.narrationEnabled);
+    this.postUiState();
+    this.onUiStateChanged(this.getUiState());
+  }
+
+  getUiState(): UiStateView {
     return {
       showEvidence: this.showEvidence,
+      narrationEnabled: this.narrationEnabled,
       repelStrength: DEFAULT_REPEL_STRENGTH,
       attractStrength: DEFAULT_ATTRACT_STRENGTH,
       ambientRepelStrength: DEFAULT_AMBIENT_REPEL_STRENGTH,
@@ -290,10 +316,13 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 
   <div class="section-title">Visualize</div>
   <button class="action" data-cmd="codemap.showWorkspaceGraph">Workspace Call Graph</button>
+  <button class="action" data-cmd="codemap.narrateCurrentGraph" data-requires-narration="true">Narrate Current Graph</button>
+  <button class="action" data-cmd="codemap.exportScript" data-requires-narration="true">Export Narration Script</button>
 
   <details class="dropdown">
     <summary>Display Settings</summary>
     <div class="dropdown-content">
+      <label class="toggle"><input id="toggle-narration" type="checkbox" checked /> Enable Copilot Narration</label>
       <div class="slider-block" id="flowchart-view-block" style="display:none;">
         <div class="slider-row" style="margin-bottom:4px"><span>Flowchart View</span></div>
         <div class="preset-row" style="margin-top:0;margin-bottom:0;">
@@ -319,11 +348,13 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const evidenceToggle = document.getElementById('toggle-evidence');
+  const narrationToggle = document.getElementById('toggle-narration');
   const flowchartViewBlock = document.getElementById('flowchart-view-block');
   const fvButtons = document.querySelectorAll('[data-fv]');
   const themeButtons = document.querySelectorAll('[data-theme]');
   const brightnessSlider = document.getElementById('brightness-slider');
   const brightnessValue = document.getElementById('brightness-value');
+  const narrationActions = document.querySelectorAll('[data-requires-narration="true"]');
 
   document.querySelectorAll('button.action').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -333,6 +364,9 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 
   evidenceToggle.addEventListener('change', () => {
     vscode.postMessage({ type: 'toggleEvidence', enabled: evidenceToggle.checked });
+  });
+  narrationToggle.addEventListener('change', () => {
+    vscode.postMessage({ type: 'toggleNarration', enabled: narrationToggle.checked });
   });
   fvButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -375,6 +409,15 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
   }
 
+  function setNarrationEnabled(enabled) {
+    narrationToggle.checked = !!enabled;
+    narrationActions.forEach((btn) => {
+      btn.disabled = !enabled;
+      btn.style.opacity = enabled ? '1' : '0.55';
+      btn.title = enabled ? '' : 'Enable Copilot Narration in Display Settings to use this action';
+    });
+  }
+
   brightnessSlider.addEventListener('input', () => {
     brightnessValue.textContent = Number(brightnessSlider.value).toFixed(2);
     vscode.postMessage({ type: 'setCanvasBrightness', value: Number(brightnessSlider.value) });
@@ -387,6 +430,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         msg.checked + ' / ' + msg.total + ' files selected';
     } else if (msg.type === 'uiState') {
       evidenceToggle.checked = !!msg.showEvidence;
+      setNarrationEnabled(msg.narrationEnabled !== false);
       const fvm = msg.flowchartViewMode || 'grouped';
       setActiveFvButton(fvm);
       setActiveThemeButton(msg.canvasThemeMode || 'codemap');

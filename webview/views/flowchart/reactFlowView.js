@@ -648,7 +648,7 @@ function buildVisibleEndpointLayoutGraph(nodes, edges, entryId, visibility, node
 }
 
 // ─── Build React Flow nodes + edges from simplifiedGraph + groupState ─────────
-function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode = "grouped") {
+function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode = "grouped", narrationByNodeId = {}) {
   const nodes     = simplifiedGraph.nodes || [];
   const edges     = simplifiedGraph.edges || [];
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
@@ -750,7 +750,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     rfNodes.push({
       id:   node.id,
       type: "codemapNode",
-      data: { top, bottom, color, kind: node.kind, label: node.label || node.id, detail: node.detail || "", source: node.source },
+      data: { top, bottom, color, kind: node.kind, label: node.label || node.id, detail: node.detail || "", source: node.source, narration: narrationByNodeId[node.id] || "" },
       position:    { x: pos.x, y: pos.y },
       draggable:   layoutMode === "full",
       selectable:  true,
@@ -872,7 +872,8 @@ const CENTRE_HANDLE_STYLE = { opacity: 0, width: 1, height: 1, minWidth: 1, minH
 
 // ─── CodemapNode — regular node circle, chip text identical to flowchartView.js
 function CodemapNode({ id, data }) {
-  const { top, bottom, color, label } = data;
+  const { top, bottom, color, label, narration } = data;
+  const [annotationOpen, setAnnotationOpen] = useState(false);
   return React.createElement(
     React.Fragment, null,
     React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
@@ -899,6 +900,17 @@ function CodemapNode({ id, data }) {
     },
       React.createElement("div", { style: { fontSize: "6.1px", fontFamily: "serif", color: color + "dd", lineHeight: 1, letterSpacing: "0.1px" } }, top),
       React.createElement("div", { style: { fontSize: "5.4px", fontFamily: "serif", color: color + "88", lineHeight: 1, letterSpacing: "0.2px" } }, bottom),
+      narration && React.createElement("button", {
+        type: "button",
+        className: `codemap-flow-annotation-chip${annotationOpen ? "" : " is-collapsed"}`,
+        title: narration,
+        onPointerDown: (event) => event.stopPropagation(),
+        onClick: (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setAnnotationOpen((value) => !value);
+        },
+      }, annotationOpen ? narration : "note"),
     ),
   );
 }
@@ -1240,7 +1252,7 @@ function FitViewOnMount({ preserveView, graph }) {
 }
 
 // ─── FlowchartGraph — main React component ───────────────────────────────────
-function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
+function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, narrationByNodeId = {} }) {
   const simplifiedGraph  = useMemo(() => simplifyAlphabetFlowGraph(graph), [graph]);
   const groups           = useMemo(() => normalizeGroups(simplifiedGraph.metadata?.groups || []), [simplifiedGraph]);
   const groupById        = useMemo(() => new Map(groups.map((g) => [g.id, g])),  [groups]);
@@ -1351,8 +1363,8 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
   }, [layoutMode, groupState, fullModeGroupState]);
 
   const { rfNodes, rfEdges } = useMemo(
-    () => buildReactFlowGraph(simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode),
-    [simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode],
+    () => buildReactFlowGraph(simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode, narrationByNodeId),
+    [simplifiedGraph, effectiveGroupState, groupById, groups, nodeGroupChains, groupDepth, layoutMode, narrationByNodeId],
   );
 
   // Apply saved positions from layoutSnapshot
@@ -1465,7 +1477,7 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode }) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 export function renderFlowchartReactFlow(graph, options = {}) {
-  const { mount, callbacks = {}, preserveView = false, layoutSnapshot = null, flowchartViewMode = "grouped" } = options;
+  const { mount, callbacks = {}, preserveView = false, layoutSnapshot = null, flowchartViewMode = "grouped", narrationByNodeId = {} } = options;
   if (!mount) return null;
 
   if (!flowHost) {
@@ -1486,6 +1498,7 @@ export function renderFlowchartReactFlow(graph, options = {}) {
         callbacks: { ...callbacks, layoutSnapshot },
         preserveView,
         initialLayoutMode: flowchartViewMode,
+        narrationByNodeId,
       }),
     ),
   );
