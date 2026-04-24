@@ -16,8 +16,8 @@ interface FileNode {
   parent: FileNode | undefined;
   /** Child nodes (folders first, then files), keyed by basename for lookup. */
   children: Map<string, FileNode>;
-  /** Number of .py files contained in this subtree (1 for a .py file). */
-  pythonFileCount: number;
+  /** Number of supported source files contained in this subtree. */
+  sourceFileCount: number;
 }
 
 const EXCLUDED_DIRS = new Set([
@@ -34,10 +34,11 @@ const EXCLUDED_DIRS = new Set([
 ]);
 
 const STORAGE_KEY_UNCHECKED = "codemap.uncheckedFiles";
+const SUPPORTED_FILE_GLOB = "**/*.{py,pro,js,jsx,mjs,cjs,ts,tsx}";
 
 /**
  * TreeDataProvider that mirrors the workspace file tree, restricted to folders
- * containing Python files and the .py files themselves. Each item exposes a
+ * containing supported source files and those files themselves. Each item exposes a
  * checkbox; checked files form the analysis scope for the rest of CodeMap.
  *
  * Checkbox propagation (parent → descendants and child → ancestors) is managed
@@ -67,10 +68,12 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
     this.uncheckedPaths = new Set(stored);
   }
 
-  /** Build the initial tree and start watching for .py file changes. */
+  /** Build the initial tree and start watching for supported source file changes. */
   async initialize(): Promise<void> {
     await this.rebuildTree();
-    this.watcher = vscode.workspace.createFileSystemWatcher("**/*.py");
+    this._onDidChangeTreeData.fire();
+    this.updateBadge();
+    this.watcher = vscode.workspace.createFileSystemWatcher(SUPPORTED_FILE_GLOB);
     const schedule = (): void => this.scheduleRebuild();
     this.disposables.push(
       this.watcher,
@@ -104,16 +107,16 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
 
   // --- Public API -------------------------------------------------------
 
-  /** All currently-checked .py files (absolute paths). */
+  /** All currently-checked source files (absolute paths). */
   getCheckedFiles(): string[] {
     const out: string[] = [];
     this.collectCheckedFiles(this.root, out);
     return out;
   }
 
-  /** {checked, total} summary across all .py files in the tree. */
+  /** {checked, total} summary across all source files in the tree. */
   getSelectionSummary(): { checked: number; total: number } {
-    const total = this.root.pythonFileCount;
+    const total = this.root.sourceFileCount;
     const checked = this.getCheckedFiles().length;
     return { checked, total };
   }
@@ -148,9 +151,9 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
     );
     item.id = element.fsPath;
     item.resourceUri = vscode.Uri.file(element.fsPath);
-    item.contextValue = element.isDirectory ? "folder" : "pythonFile";
+    item.contextValue = element.isDirectory ? "folder" : "sourceFile";
     if (element.isDirectory) {
-      item.description = `(${element.pythonFileCount})`;
+      item.description = `(${element.sourceFileCount})`;
     } else {
       item.command = {
         command: "vscode.open",
@@ -193,7 +196,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
   private async rebuildTree(): Promise<void> {
     const excludeGlob =
       "**/{" + Array.from(EXCLUDED_DIRS).join(",") + "}/**";
-    const files = await vscode.workspace.findFiles("**/*.py", excludeGlob);
+    const files = await vscode.workspace.findFiles(SUPPORTED_FILE_GLOB, excludeGlob);
     const folders = vscode.workspace.workspaceFolders ?? [];
 
     this.root = this.makeNode("", "", true, undefined);
@@ -229,12 +232,12 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
       const fileName = segments[segments.length - 1];
       if (!current.children.has(fileName)) {
         const fileNode = this.makeNode(fsPath, fileName, false, current);
-        fileNode.pythonFileCount = 1;
+        fileNode.sourceFileCount = 1;
         current.children.set(fileName, fileNode);
       }
     }
 
-    // Compute folder pythonFileCount bottom-up and prune empty folders.
+    // Compute folder sourceFileCount bottom-up and prune empty folders.
     this.finalize(this.root);
 
     // Drop any persisted-unchecked entries for paths that no longer exist.
@@ -266,13 +269,13 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
       isDirectory,
       parent,
       children: new Map(),
-      pythonFileCount: 0,
+      sourceFileCount: 0,
     };
   }
 
-  /** Recursively compute pythonFileCount and remove folders with no .py files. */
+  /** Recursively compute sourceFileCount and remove folders with no source files. */
   private finalize(node: FileNode): number {
-    if (!node.isDirectory) return node.pythonFileCount;
+    if (!node.isDirectory) return node.sourceFileCount;
     let total = 0;
     for (const [key, child] of Array.from(node.children.entries())) {
       const count = this.finalize(child);
@@ -282,7 +285,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
         total += count;
       }
     }
-    node.pythonFileCount = total;
+    node.sourceFileCount = total;
     return total;
   }
 
@@ -292,7 +295,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
     if (!node.isDirectory) {
       return !this.uncheckedPaths.has(node.fsPath);
     }
-    // A folder is checked iff at least one descendant .py file is checked.
+    // A folder is checked iff at least one descendant source file is checked.
     // (We display Checked for fully-checked folders too. Mixed state is shown
     // as Checked since the TreeView checkbox is binary; user can drill in.)
     for (const child of node.children.values()) {
@@ -353,7 +356,7 @@ export class FileTreeProvider implements vscode.TreeDataProvider<FileNode> {
     if (!this.treeView) return;
     const { checked, total } = this.getSelectionSummary();
     this.treeView.badge = {
-      tooltip: `${checked} of ${total} Python files selected for analysis`,
+      tooltip: `${checked} of ${total} source files selected for analysis`,
       value: total - checked,
     };
     this.treeView.description = `${checked} / ${total} files`;
