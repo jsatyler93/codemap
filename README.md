@@ -1,18 +1,24 @@
 # CodeMap
 
-CodeMap is a Python-first VS Code extension that provides interactive
+CodeMap is a multi-language VS Code extension that provides interactive
 visualizations of your code:
 
 - **Function flowcharts** – control-flow chart for the function under the
-  cursor.
+  cursor (Python, JavaScript/TypeScript, IDL).
 - **Symbol-centric call graphs** – callers and callees of the selected
-  Python symbol.
+  symbol.
 - **Workspace graphs** – module/symbol graph for the whole project.
 - **Static traces** – approximate ordered traversal of calls reached from a
   function (clearly labelled as static analysis, not runtime truth).
+- **Optional Copilot narration** of graphs and flowcharts.
+- **Optional runtime debug probes** (Python and JavaScript) – LLM-generated,
+  read-only snippets evaluated at the active breakpoint via the Debug
+  Adapter Protocol.
 
-All analysis is performed locally using Python's standard `ast` module; no
-network calls, no LLMs, no telemetry.
+Static analysis is performed locally (Python via `ast`, JavaScript/TypeScript
+via the TypeScript compiler API, IDL via a bundled parser). No network calls
+are required for analysis. Narration and probe generation use VS Code's
+Language Model API only when explicitly enabled.
 
 > The visual style of the two views is borrowed from a pair of HTML
 > templates included in `flowchart_interactive.html` and
@@ -65,10 +71,11 @@ quality:
 
 Things CodeMap does not (yet) attempt:
 
-- runtime tracing
-- dynamic dispatch via `getattr` / `exec` / `eval`
+- runtime tracing of execution paths
+- dynamic dispatch via `getattr` / `exec` / `eval` (Python) or computed
+  property access (JavaScript)
 - decorator-introduced wrappers changing call shape
-- multi-language workspaces (Python only in v1)
+- runtime debug probes for IDL (DAP integration is best-effort only)
 
 The "static trace" mode is an **approximate ordered traversal** – it does
 not reflect actual runtime execution.

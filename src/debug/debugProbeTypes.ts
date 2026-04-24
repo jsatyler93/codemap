@@ -20,12 +20,17 @@ export type WidgetSpec =
   | { type: "table"; title: string; columns?: string[] }
   | { type: "tensor"; title: string };
 
+export type ProbeLanguage = "python" | "javascript" | "idl";
+
 export interface DebugProbe {
   id: string;
   nodeId: string;
   breakpointFile: string;
   breakpointLine: number;
-  snippetPython: string;
+  /** Source language of the probe snippet. Determines how the snippet is validated and injected. */
+  language: ProbeLanguage;
+  /** Read-only snippet evaluated at the breakpoint. Must end in a JSON-serializable expression. */
+  snippet: string;
   expectedOutputSchema: ProbeOutputSchema;
   widgetSpec: WidgetSpec;
   label: string;

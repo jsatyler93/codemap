@@ -322,7 +322,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("CodeMap: no graph is open to narrate.");
         return;
       }
-      if (!supportsTraceNarration(graph)) {
+      if (!getGraphCapabilities(graph).traceNarration) {
         vscode.window.showWarningMessage("CodeMap: trace narration needs a call graph with an execution timeline.");
         return;
       }
@@ -368,6 +368,11 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("CodeMap: stop at a breakpoint in an open graph before generating probes.");
         return;
       }
+      const capabilities = getGraphCapabilities(graph);
+      if (!capabilities.runtimeProbes) {
+        vscode.window.showWarningMessage(`CodeMap: runtime probes are not supported for ${capabilities.language} graphs yet.`);
+        return;
+      }
       const nodeId = lastRuntimeFrame.source ? findGraphNodeByLocation(graph, lastRuntimeFrame.source) : undefined;
       if (!nodeId) {
         vscode.window.showInformationMessage("CodeMap: the current frame does not map to a graph node.");
@@ -379,6 +384,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const graph = provider.getCurrentGraph();
       if (!graph || !lastRuntimeFrame?.source) {
         vscode.window.showInformationMessage("CodeMap: stop at a breakpoint in an open graph before asking for a probe.");
+        return;
+      }
+      const capabilities = getGraphCapabilities(graph);
+      if (!capabilities.runtimeProbes) {
+        vscode.window.showWarningMessage(`CodeMap: runtime probes are not supported for ${capabilities.language} graphs yet.`);
         return;
       }
       const nodeId = findGraphNodeByLocation(graph, lastRuntimeFrame.source);
@@ -425,23 +435,37 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage("CodeMap: generate probes before exporting them.");
         return;
       }
+      // Choose extension/comment syntax based on the dominant probe language.
+      const langCounts = new Map<string, number>();
+      for (const probe of probes) {
+        langCounts.set(probe.language, (langCounts.get(probe.language) || 0) + 1);
+      }
+      let dominantLanguage: "python" | "javascript" | "idl" = "python";
+      let bestCount = -1;
+      for (const [lang, count] of langCounts) {
+        if (count > bestCount) {
+          bestCount = count;
+          dominantLanguage = lang as "python" | "javascript" | "idl";
+        }
+      }
+      const exportFormat = PROBE_EXPORT_FORMATS[dominantLanguage];
       const uri = await vscode.window.showSaveDialog({
-        filters: { Python: ["py"] },
+        filters: exportFormat.filters,
         saveLabel: "Export Debug Probes",
         defaultUri: vscode.Uri.file(path.join(
           vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || context.extensionPath,
-          "codemap_debug_probes.py",
+          `codemap_debug_probes.${exportFormat.extension}`,
         )),
       });
       if (!uri) return;
-      const lines = [
-        `# CodeMap Debug Probes - generated ${new Date().toISOString()}`,
-        "",
-      ];
+      const headerComment = exportFormat.comment(`CodeMap Debug Probes - generated ${new Date().toISOString()}`);
+      const lines = [headerComment, ""];
       probes.forEach((probe, index) => {
-        lines.push(`# Probe ${index + 1}: ${probe.label}`);
-        lines.push(`# Node: ${probe.nodeId} @ ${probe.breakpointFile}:${probe.breakpointLine}`);
-        lines.push(probe.snippetPython);
+        const probeFormat = PROBE_EXPORT_FORMATS[probe.language] || exportFormat;
+        lines.push(probeFormat.comment(`Probe ${index + 1}: ${probe.label}`));
+        lines.push(probeFormat.comment(`Node: ${probe.nodeId} @ ${probe.breakpointFile}:${probe.breakpointLine}`));
+        lines.push(probeFormat.comment(`Language: ${probe.language}`));
+        lines.push(probe.snippet);
         lines.push("");
       });
       fs.writeFileSync(uri.fsPath, lines.join("\n"), "utf8");
@@ -836,9 +860,58 @@ function resolveNarrationKind(graph: GraphDocument, requestedKind?: NarrationKin
   return graph.graphType === "flowchart" ? "flowchart" : "trace";
 }
 
-function supportsTraceNarration(graph: GraphDocument): boolean {
-  return graph.graphType !== "flowchart" && Array.isArray(graph.metadata?.execTimeline) && graph.metadata.execTimeline.length > 0;
+/** Single source of truth for whether a given graph supports each capability. */
+export interface GraphCapabilities {
+  language: "python" | "javascript" | "idl" | "unknown";
+  flowchartNarration: boolean;
+  traceNarration: boolean;
+  /** Whether the runtime probe pipeline (LLM-generated snippets injected via DAP) is supported. */
+  runtimeProbes: boolean;
 }
+
+export function getGraphCapabilities(graph: GraphDocument): GraphCapabilities {
+  const language = inferGraphLanguage(graph);
+  const hasTimeline = Array.isArray(graph.metadata?.execTimeline) && graph.metadata!.execTimeline!.length > 0;
+  const isFlowchart = graph.graphType === "flowchart";
+  // Probes are wired for Python and JavaScript via DAP `evaluate`. IDL probe support is best-effort
+  // and not yet validated end-to-end, so we keep it disabled to avoid surprising users.
+  const runtimeProbes = language === "python" || language === "javascript";
+  return {
+    language,
+    flowchartNarration: isFlowchart,
+    traceNarration: !isFlowchart && hasTimeline,
+    runtimeProbes,
+  };
+}
+
+function inferGraphLanguage(graph: GraphDocument): GraphCapabilities["language"] {
+  const metaLang = (graph.metadata as { language?: unknown } | undefined)?.language;
+  if (typeof metaLang === "string") {
+    if (metaLang === "python" || metaLang === "javascript" || metaLang === "idl") return metaLang;
+  }
+  for (const node of graph.nodes) {
+    const file = node.source?.file;
+    if (!file) continue;
+    const lang = languageForPath(file);
+    if (lang) return lang;
+  }
+  return "unknown";
+}
+
+function supportsTraceNarration(graph: GraphDocument): boolean {
+  return getGraphCapabilities(graph).traceNarration;
+}
+
+/** Per-language formatting for the probe export file. */
+const PROBE_EXPORT_FORMATS: Record<"python" | "javascript" | "idl", {
+  extension: string;
+  filters: { [name: string]: string[] };
+  comment: (text: string) => string;
+}> = {
+  python: { extension: "py", filters: { Python: ["py"] }, comment: (text) => `# ${text}` },
+  javascript: { extension: "js", filters: { JavaScript: ["js"], TypeScript: ["ts"] }, comment: (text) => `// ${text}` },
+  idl: { extension: "pro", filters: { IDL: ["pro"] }, comment: (text) => `; ${text}` },
+};
 
 function languageForDocument(doc: vscode.TextDocument): "python" | "javascript" | "idl" | undefined {
   if (doc.languageId === "python") return "python";
