@@ -1342,6 +1342,8 @@ const narrationPanel = createNarrationPanel({
   getCurrentGraph: () => currentGraph,
   resolveNodeElement: (nodeId) => canvasEl.querySelector(`[data-id="${cssEscape(nodeId)}"]`),
   setExecStepIndex,
+  motionAnimate,
+  canvasEl,
 });
 
 const debugOverlay = createOverlayManager({

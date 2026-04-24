@@ -208,7 +208,6 @@ function simplifyAlphabetFlowGraph(graph) {
   dedupedEdges.forEach((e) => { if (outgoingEdgeMap.has(e.from)) outgoingEdgeMap.get(e.from).push(e); });
 
   const mutableGroups           = new Map(baseGroups.map((g) => [g.id, { ...g, nodeIds: [...g.nodeIds] }]));
-  const representativeLoopEdges = [];
 
   function removePromotedNodes(groupId, promotedNodeIds) {
     let currentId = groupId;
@@ -233,6 +232,11 @@ function simplifyAlphabetFlowGraph(graph) {
       if (nodeKindMap.get(id) !== "loop") return false;
       return (incomingEdgeMap.get(id) || []).some((fromId) => !nodeSet.has(fromId));
     }));
+    const loopBackSourceIds = new Set(mg.nodeIds.filter((id) => {
+      if (headerIds.has(id)) return false;
+      const outs = outgoingEdgeMap.get(id) || [];
+      return outs.some((e) => e.to !== id && headerIds.has(e.to) && (e.label === "repeat" || e.label === "continue"));
+    }));
     const bodyEntryIds = new Set(mg.nodeIds.filter((id) => {
       if (headerIds.has(id)) return false;
       const k = nodeKindMap.get(id);
@@ -242,50 +246,22 @@ function simplifyAlphabetFlowGraph(graph) {
     let promotedBodyId = null;
     if (bodyEntryIds.size) {
       promotedBodyId = mg.nodeIds.find((id) => bodyEntryIds.has(id)) || null;
-      if (promotedBodyId) {
-        const preferred = mg.nodeIds.find((id) => {
-          if (!bodyEntryIds.has(id)) return false;
-          const outs = outgoingEdgeMap.get(id) || [];
-          return outs.some((e) => e.to !== id && headerIds.has(e.to) && (e.label === "repeat" || e.label === "continue"));
+      if (promotedBodyId && nodeKindMap.get(promotedBodyId) === "decision") {
+        const preferredConcreteLoopBack = mg.nodeIds.find((id) => {
+          if (!loopBackSourceIds.has(id)) return false;
+          const kind = nodeKindMap.get(id);
+          return kind !== "decision" && kind !== "continue" && kind !== "break" && kind !== "return";
         });
-        if (preferred) promotedBodyId = preferred;
+        if (preferredConcreteLoopBack) promotedBodyId = preferredConcreteLoopBack;
       }
     }
     if (!headerIds.size && !promotedBodyId) return;
-    const headerId = headerIds.size ? Array.from(headerIds)[0] : null;
-    if (headerId && promotedBodyId) {
-      const existingDirectLoopBack = dedupedEdges.some((e) =>
-        e.from === promotedBodyId && e.to === headerId &&
-        (e.label === "repeat" || e.label === "continue"));
-      if (!existingDirectLoopBack) {
-        const hiddenLoopBack = dedupedEdges.find((e) =>
-          e.to === headerId && e.from !== promotedBodyId &&
-          nodeSet.has(e.from) && (e.label === "repeat" || e.label === "continue"));
-        if (hiddenLoopBack) {
-          const loopBackLabel = String(hiddenLoopBack.label || "").trim().toLowerCase() === "continue"
-            ? "continue" : "repeat";
-          representativeLoopEdges.push({
-            ...hiddenLoopBack,
-            id: `rep_${promotedBodyId}_${headerId}_${loopBackLabel}`,
-            from: promotedBodyId, to: headerId,
-            label: loopBackLabel, synthetic: true,
-          });
-        }
-      }
-    }
     const promotedNodeIds = new Set(headerIds);
     if (promotedBodyId) promotedNodeIds.add(promotedBodyId);
     removePromotedNodes(group.id, promotedNodeIds);
   });
 
   const visibleEdges    = dedupedEdges.slice();
-  const visibleEdgeKeys = new Set(visibleEdges.map((e) => `${e.from}->${e.to}::${e.label || ""}`));
-  representativeLoopEdges.forEach((e) => {
-    const key = `${e.from}->${e.to}::${e.label || ""}`;
-    if (visibleEdgeKeys.has(key)) return;
-    visibleEdgeKeys.add(key);
-    visibleEdges.push(e);
-  });
 
   const nextGroups = Array.from(mutableGroups.values())
     .map((g) => ({ ...g, nodeSet: new Set(g.nodeIds) }))
@@ -340,7 +316,8 @@ function buildNodeGroupChains(groups) {
   return chains;
 }
 
-function resolveVisibleEndpoint(nodeId, nodeGroupChains, groupState) {
+function resolveVisibleEndpoint(nodeId, nodeGroupChains, groupState, pinnedNodeIds = null) {
+  if (pinnedNodeIds instanceof Set && pinnedNodeIds.has(nodeId)) return nodeId;
   const chain = nodeGroupChains.get(nodeId) || [];
   let outermost = null;
   for (const gId of chain)
@@ -348,7 +325,7 @@ function resolveVisibleEndpoint(nodeId, nodeGroupChains, groupState) {
   return outermost || nodeId;
 }
 
-function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState) {
+function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState, pinnedNodeIds = null) {
   const visibleNodeIds           = new Set();
   const visibleCollapsedGroupIds = [];
   const visibleExpandedGroupIds  = [];
@@ -364,7 +341,7 @@ function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState
     else                                  visibleExpandedGroupIds.push(g.id);
   }
   for (const node of nodes) {
-    const ep = resolveVisibleEndpoint(node.id, nodeGroupChains, groupState);
+    const ep = resolveVisibleEndpoint(node.id, nodeGroupChains, groupState, pinnedNodeIds);
     if (!ep || ep.startsWith("group:")) continue;
     visibleNodeIds.add(node.id);
   }
@@ -593,7 +570,7 @@ function findGraphEntryId(nodes, edges, rootNodeIds) {
   return nodes.slice().sort((a, b) => (a.source?.line || 0) - (b.source?.line || 0))[0]?.id;
 }
 
-function buildVisibleEndpointLayoutGraph(nodes, edges, entryId, visibility, nodeGroupChains, groupState, groupById) {
+function buildVisibleEndpointLayoutGraph(nodes, edges, entryId, visibility, nodeGroupChains, groupState, groupById, pinnedNodeIds = null) {
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
   const layoutNodesById = new Map();
   const layoutEdges = [];
@@ -627,8 +604,8 @@ function buildVisibleEndpointLayoutGraph(nodes, edges, entryId, visibility, node
   visibility.visibleCollapsedGroupIds.forEach((groupId) => addEndpointNode(`group:${groupId}`));
 
   for (const edge of edges) {
-    const from = resolveVisibleEndpoint(edge.from, nodeGroupChains, groupState);
-    const to = resolveVisibleEndpoint(edge.to, nodeGroupChains, groupState);
+    const from = resolveVisibleEndpoint(edge.from, nodeGroupChains, groupState, pinnedNodeIds);
+    const to = resolveVisibleEndpoint(edge.to, nodeGroupChains, groupState, pinnedNodeIds);
     if (!from || !to || from === to) continue;
     addEndpointNode(from);
     addEndpointNode(to);
@@ -638,7 +615,7 @@ function buildVisibleEndpointLayoutGraph(nodes, edges, entryId, visibility, node
     layoutEdges.push({ ...edge, from, to });
   }
 
-  const endpointEntryId = resolveVisibleEndpoint(entryId, nodeGroupChains, groupState);
+  const endpointEntryId = resolveVisibleEndpoint(entryId, nodeGroupChains, groupState, pinnedNodeIds);
   const layoutNodes = Array.from(layoutNodesById.values());
   return {
     nodes: layoutNodes,
@@ -653,11 +630,17 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   const edges     = simplifiedGraph.edges || [];
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
 
-  const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState);
+  const entryId  = findGraphEntryId(nodes, edges, simplifiedGraph.rootNodeIds);
+  const pinnedNodeIds = new Set();
+  if (entryId) pinnedNodeIds.add(entryId);
+  nodes.forEach((node) => {
+    if (node.metadata?.boundaryProxy) pinnedNodeIds.add(node.id);
+  });
+
+  const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState, pinnedNodeIds);
 
   // Find the topological root — works correctly at any drill depth even when
   // the subgraph has no explicit "entry" kind node.
-  const entryId  = findGraphEntryId(nodes, edges, simplifiedGraph.rootNodeIds);
   const prepared = new Map(nodes.map((n) => [n.id, prepareNode()]));
 
   // Pass 1: layout ALL nodes so hidden descendants still have coordinates for
@@ -675,6 +658,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     nodeGroupChains,
     groupState,
     groupById,
+    pinnedNodeIds,
   );
   const visiblePrepared = new Map(visibleLayoutGraph.nodes.map((n) => [n.id, prepareNode()]));
   const positions = new Map();
@@ -805,8 +789,8 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   const rfEdges      = [];
   const seenEdgeKeys = new Set();
   for (const edge of edges) {
-    const srcEndpoint = resolveVisibleEndpoint(edge.from, nodeGroupChains, groupState);
-    const tgtEndpoint = resolveVisibleEndpoint(edge.to,   nodeGroupChains, groupState);
+    const srcEndpoint = resolveVisibleEndpoint(edge.from, nodeGroupChains, groupState, pinnedNodeIds);
+    const tgtEndpoint = resolveVisibleEndpoint(edge.to,   nodeGroupChains, groupState, pinnedNodeIds);
     if (!srcEndpoint || !tgtEndpoint || srcEndpoint === tgtEndpoint) continue;
     if (!renderedNodeIds.has(srcEndpoint) || !renderedNodeIds.has(tgtEndpoint)) continue;
 
@@ -833,9 +817,12 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     const loopBody = fromKind === "loop" && !loopBack && !/done|else|exit/i.test(lower);
     const backArc  = !loopBack && !loopBody && fromKind === "break";
     const isArcEdge = loopBack || loopBody || backArc;
-    const color    = sourceIsGroup
-      ? groupKindColor(groupById.get(srcEndpoint.slice(6))?.kind)
-      : nodeKindColor(fromKind);
+    const syntheticLoopBack = !!edge.synthetic && loopBack;
+    const color    = syntheticLoopBack
+      ? (lower === "continue" ? NODE_COLOR.continue : NODE_COLOR.loop)
+      : sourceIsGroup
+        ? groupKindColor(groupById.get(srcEndpoint.slice(6))?.kind)
+        : nodeKindColor(fromKind);
 
     const sourceHandle = "center-s";
     const targetHandle = "center-t";
@@ -848,9 +835,33 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       targetHandle,
       label:        label || undefined,
       type:         "codemapEdge",
-      data:         { label, loopBack, loopBody, backArc, color, fromKind, sourceIsGroup, targetIsGroup },
+      data:         { label, loopBack, loopBody, backArc, color, fromKind, sourceIsGroup, targetIsGroup, synthetic: !!edge.synthetic },
       style:        { stroke: color + (isArcEdge ? "9f" : "4f"), strokeWidth: 1.4 },
     });
+  }
+
+  if (layoutMode !== "full" && rfNodes.length > 1) {
+    const connectedNodeIds = new Set();
+    rfEdges.forEach((edge) => {
+      connectedNodeIds.add(edge.source);
+      connectedNodeIds.add(edge.target);
+    });
+    const filteredNodes = rfNodes.filter((node) => {
+      if (connectedNodeIds.has(node.id)) return true;
+      if (node.id.startsWith("group:")) return true;
+      const sourceNode = nodesById.get(node.id);
+      if (!sourceNode) return true;
+      if (sourceNode.kind === "entry") return false;
+      if (sourceNode.metadata?.boundaryProxy) return false;
+      return true;
+    });
+    if (filteredNodes.length !== rfNodes.length) {
+      const filteredIds = new Set(filteredNodes.map((node) => node.id));
+      return {
+        rfNodes: filteredNodes,
+        rfEdges: rfEdges.filter((edge) => filteredIds.has(edge.source) && filteredIds.has(edge.target)),
+      };
+    }
   }
 
   return { rfNodes, rfEdges };
@@ -872,8 +883,7 @@ const CENTRE_HANDLE_STYLE = { opacity: 0, width: 1, height: 1, minWidth: 1, minH
 
 // ─── CodemapNode — regular node circle, chip text identical to flowchartView.js
 function CodemapNode({ id, data }) {
-  const { top, bottom, color, label, narration } = data;
-  const [annotationOpen, setAnnotationOpen] = useState(false);
+  const { top, bottom, color, label } = data;
   return React.createElement(
     React.Fragment, null,
     React.createElement(Handle, { id: "center-s", type: "source", position: Position.Top, style: CENTRE_HANDLE_STYLE, isConnectable: false }),
@@ -900,17 +910,6 @@ function CodemapNode({ id, data }) {
     },
       React.createElement("div", { style: { fontSize: "6.1px", fontFamily: "serif", color: color + "dd", lineHeight: 1, letterSpacing: "0.1px" } }, top),
       React.createElement("div", { style: { fontSize: "5.4px", fontFamily: "serif", color: color + "88", lineHeight: 1, letterSpacing: "0.2px" } }, bottom),
-      narration && React.createElement("button", {
-        type: "button",
-        className: `codemap-flow-annotation-chip${annotationOpen ? "" : " is-collapsed"}`,
-        title: narration,
-        onPointerDown: (event) => event.stopPropagation(),
-        onClick: (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          setAnnotationOpen((value) => !value);
-        },
-      }, annotationOpen ? narration : "note"),
     ),
   );
 }
@@ -1311,15 +1310,15 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, nar
   }, [callbacks.onDrilldownGroup, layoutMode]);
 
   // ── Full-mode independent collapse state ─────────────────────────────────
-  // Starts all-collapsed so users can expand one layer at a time inline.
-  // Re-entering "full" mode resets back to the one-layer-at-a-time view.
+  // "full" should show the full graph by default.
+  // Re-entering full mode resets back to fully expanded.
   const [fullModeGroupState, setFullModeGroupState] = useState(
-    () => new Map(groups.map((g) => [g.id, { collapsed: true }])),
+    () => new Map(groups.map((g) => [g.id, { collapsed: false }])),
   );
   const prevLayoutModeRef = useRef(initialLayoutMode);
   useEffect(() => {
     if (layoutMode === "full" && prevLayoutModeRef.current !== "full") {
-      setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: true }])));
+      setFullModeGroupState(new Map(groups.map((g) => [g.id, { collapsed: false }])));
     }
     prevLayoutModeRef.current = layoutMode;
   }, [layoutMode, groups]);
@@ -1398,6 +1397,7 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, nar
 
   const persistLayout = useCallback((nodeList) => {
     const snapshot = { nodes: {}, groups: {} };
+    const activeGroupState = layoutMode === "full" ? fullModeGroupState : groupState;
     if (layoutMode === "full") {
       nodeList.forEach((node) => {
         if (!node?.id || !node?.position) return;
@@ -1405,12 +1405,12 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, nar
       });
     }
     groups.forEach((g) => {
-      const state = groupState.get(g.id);
+      const state = activeGroupState.get(g.id);
       if (!state) return;
       snapshot.groups[g.id] = { collapsed: !!state.collapsed };
     });
     callbacks.onLayoutChanged?.(snapshot);
-  }, [groups, groupState, callbacks, layoutMode]);
+  }, [groups, groupState, fullModeGroupState, callbacks, layoutMode]);
 
   return React.createElement(
     "div", { className: "codemap-rf-shell" },
@@ -1459,7 +1459,12 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, nar
       React.createElement(MiniMap, {
         pannable: true,
         zoomable: true,
-        style: { background: "rgba(11, 14, 23, 0.84)", border: "1px solid #1f2640" },
+        style: {
+          width: 150,
+          height: 96,
+          background: "rgba(11, 14, 23, 0.84)",
+          border: "1px solid #1f2640",
+        },
         nodeColor: (node) => node?.data?.color || nodeKindColor(node?.data?.kind || "process"),
         maskColor: "rgba(10, 12, 18, 0.42)",
       }),

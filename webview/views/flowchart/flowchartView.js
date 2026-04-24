@@ -511,8 +511,12 @@ export function renderFlowchart(graph, ctx) {
     if (!fromRect || !toRect) continue;
     const fromKind = endpointKind(srcEndpoint, nodesById, groupById);
     const toKind = endpointKind(tgtEndpoint, nodesById, groupById);
+    const lowerLabel = String(edge.label || "").toLowerCase();
+    const syntheticLoopBack = !!edge.synthetic && (lowerLabel === "repeat" || lowerLabel === "continue") && toKind === "loop";
     const route = computeEdgeRoute({ label: edge.label || "", src: srcEndpoint, tgt: tgtEndpoint }, fromRect, toRect, fromKind, toKind, loopLaneRanks);
-    const color = theme.nodeColor[fromKind] || "#454a60";
+    const color = syntheticLoopBack
+      ? (lowerLabel === "continue" ? theme.nodeColor.continue : theme.nodeColor.loop)
+      : (theme.nodeColor[fromKind] || "#454a60");
 
     const geom = routeGeometry(route);
     const d = geom.d;
@@ -1328,14 +1332,14 @@ function simplifyAlphabetFlowGraph(graph) {
   // visible at the parent scope when the loop group is collapsed. The header is
   // identified as the loop-kind node with at least one incoming edge from outside
   // the group (i.e. it is the entry point, not a nested inner loop inside).
-  // Also promote one concrete body-entry node so the alphabet view keeps an
-  // explicit loop cycle: header -> body statement -> repeat/continue -> header.
+  // Prefer promoting a concrete body node that actually owns the loop-back edge;
+  // if no such visible node exists, keep the summary conservative instead of
+  // inventing a repeat/continue edge from the wrong source node.
   const incomingEdgeMap = new Map(nodes.map((n) => [n.id, []]));
   const outgoingEdgeMap = new Map(nodes.map((n) => [n.id, []]));
   dedupedEdges.forEach((e) => { if (incomingEdgeMap.has(e.to)) incomingEdgeMap.get(e.to).push(e.from); });
   dedupedEdges.forEach((e) => { if (outgoingEdgeMap.has(e.from)) outgoingEdgeMap.get(e.from).push(e); });
   const mutableGroups = new Map(baseGroups.map((group) => [group.id, { ...group, nodeIds: [...group.nodeIds] }]));
-  const representativeLoopEdges = [];
 
   function removePromotedNodes(groupId, promotedNodeIds) {
     let currentId = groupId;
@@ -1362,6 +1366,13 @@ function simplifyAlphabetFlowGraph(graph) {
           return (incomingEdgeMap.get(id) || []).some((fromId) => !nodeSet.has(fromId));
         }),
       );
+      const loopBackSourceIds = new Set(
+        mutableGroup.nodeIds.filter((id) => {
+          if (headerIds.has(id)) return false;
+          const outgoing = outgoingEdgeMap.get(id) || [];
+          return outgoing.some((edge) => edge.to !== id && headerIds.has(edge.to) && (edge.label === "repeat" || edge.label === "continue"));
+        }),
+      );
       const bodyEntryIds = new Set(
         mutableGroup.nodeIds.filter((id) => {
           if (headerIds.has(id)) return false;
@@ -1373,60 +1384,22 @@ function simplifyAlphabetFlowGraph(graph) {
       let promotedBodyId = null;
       if (bodyEntryIds.size) {
         promotedBodyId = mutableGroup.nodeIds.find((id) => bodyEntryIds.has(id)) || null;
-        if (promotedBodyId) {
-          const preferred = mutableGroup.nodeIds.find((id) => {
-            if (!bodyEntryIds.has(id)) return false;
-            const outgoing = outgoingEdgeMap.get(id) || [];
-            return outgoing.some((edge) => edge.to !== id && headerIds.has(edge.to) && (edge.label === "repeat" || edge.label === "continue"));
+        if (promotedBodyId && nodeKindMap.get(promotedBodyId) === "decision") {
+          const preferredConcreteLoopBack = mutableGroup.nodeIds.find((id) => {
+            if (!loopBackSourceIds.has(id)) return false;
+            const kind = nodeKindMap.get(id);
+            return kind !== "decision" && kind !== "continue" && kind !== "break" && kind !== "return";
           });
-          if (preferred) promotedBodyId = preferred;
+          if (preferredConcreteLoopBack) promotedBodyId = preferredConcreteLoopBack;
         }
       }
       if (!headerIds.size && !promotedBodyId) return group;
-      const headerId = headerIds.size ? Array.from(headerIds)[0] : null;
-      if (headerId && promotedBodyId) {
-        const existingDirectLoopBack = dedupedEdges.some(
-          (edge) =>
-            edge.from === promotedBodyId &&
-            edge.to === headerId &&
-            (edge.label === "repeat" || edge.label === "continue"),
-        );
-        if (!existingDirectLoopBack) {
-          const hiddenLoopBack = dedupedEdges.find(
-            (edge) =>
-              edge.to === headerId &&
-              edge.from !== promotedBodyId &&
-              nodeSet.has(edge.from) &&
-              (edge.label === "repeat" || edge.label === "continue"),
-          );
-          if (hiddenLoopBack) {
-            const loopBackLabel = String(hiddenLoopBack.label || "").trim().toLowerCase() === "continue"
-              ? "continue"
-              : "repeat";
-            representativeLoopEdges.push({
-              ...hiddenLoopBack,
-              id: `rep_${promotedBodyId}_${headerId}_${loopBackLabel}`,
-              from: promotedBodyId,
-              to: headerId,
-              label: loopBackLabel,
-              synthetic: true,
-            });
-          }
-        }
-      }
       const promotedNodeIds = new Set(headerIds);
       if (promotedBodyId) promotedNodeIds.add(promotedBodyId);
       removePromotedNodes(group.id, promotedNodeIds);
     });
 
   const visibleEdges = dedupedEdges.slice();
-  const visibleEdgeKeys = new Set(visibleEdges.map((edge) => `${edge.from}->${edge.to}::${edge.label || ""}`));
-  representativeLoopEdges.forEach((edge) => {
-    const key = `${edge.from}->${edge.to}::${edge.label || ""}`;
-    if (visibleEdgeKeys.has(key)) return;
-    visibleEdgeKeys.add(key);
-    visibleEdges.push(edge);
-  });
 
   const nextGroups = Array.from(mutableGroups.values())
     .map((group) => ({ ...group, nodeSet: new Set(group.nodeIds) }))

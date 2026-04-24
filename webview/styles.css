@@ -420,9 +420,9 @@ body[data-canvas-theme-mode="vscode"] .codemap-rf-canvas {
   top: 54px;
   right: 10px;
   z-index: 40;
-  width: 56px;
-  max-width: 56px;
-  max-height: 146px;
+  width: 50px;
+  max-width: 50px;
+  max-height: 132px;
   overflow-y: auto;
   overflow-x: hidden;
   border: 1px solid #1f2842;
@@ -430,12 +430,12 @@ body[data-canvas-theme-mode="vscode"] .codemap-rf-canvas {
   background: rgba(10, 12, 18, 0.84);
   backdrop-filter: blur(6px);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.24);
-  padding: 5px 4px;
+  padding: 4px 3px;
 }
 .codemap-rf-breadcrumbs {
   display: flex;
   align-items: stretch;
-  gap: 3px;
+  gap: 2px;
   overflow: visible;
 }
 .codemap-rf-breadcrumbs-vertical {
@@ -446,13 +446,13 @@ body[data-canvas-theme-mode="vscode"] .codemap-rf-canvas {
   background: rgba(17, 24, 42, 0.82);
   color: #8ea3d8;
   border-radius: 999px;
-  padding: 4px 3px;
+  padding: 3px 2px;
   min-width: 0;
   width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 8px;
+  font-size: 7px;
   line-height: 1;
   font-family: Consolas, monospace;
   text-align: center;
@@ -479,8 +479,8 @@ body[data-canvas-theme-mode="vscode"] .codemap-rf-canvas {
   .codemap-rf-groups {
     top: 52px;
     right: 8px;
-    width: 52px;
-    max-width: 52px;
+    width: 46px;
+    max-width: 46px;
   }
 }
 .react-flow__edge-text {
@@ -579,20 +579,17 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   padding: 12px 16px; font-size: 10px; z-index: 100; backdrop-filter: blur(8px);
 }
 #info-panel { left: 14px; max-width: 320px; }
-#legend     { left: 14px; max-width: 280px; }
+#legend     { left: 14px; max-width: 232px; padding: 10px 12px; }
 #legend #lg-items {
-  overflow: visible;
-}
-#legend.scrollable #lg-items {
-  max-height: 152px;
+  max-height: 82px;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 4px;
+  padding-right: 2px;
 }
-#legend.scrollable #lg-items::-webkit-scrollbar {
+#legend #lg-items::-webkit-scrollbar {
   width: 6px;
 }
-#legend.scrollable #lg-items::-webkit-scrollbar-thumb {
+#legend #lg-items::-webkit-scrollbar-thumb {
   background: #2f3650;
   border-radius: 999px;
 }
@@ -609,12 +606,13 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   border-top: 1px solid #181c28; padding-top: 6px;
 }
 .lg-item {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
-  color: #606680; font-size: 10px;
+  display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
+  color: #606680; font-size: 9px;
 }
-.lg-shape { width: 18px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+.lg-item:last-child { margin-bottom: 0; }
+.lg-shape { width: 16px; height: 10px; border-radius: 2px; flex-shrink: 0; }
 .lg-diamond {
-  width: 14px; height: 14px; transform: rotate(45deg);
+  width: 12px; height: 12px; transform: rotate(45deg);
   flex-shrink: 0; margin: 0 2px;
 }
 .lg-hex {
@@ -733,13 +731,23 @@ svg text { font-family: "Consolas", "Menlo", "Courier New", monospace; }
   border-color: #f7768e !important;
   box-shadow: 0 0 0 2px rgba(247, 118, 142, 0.34), 0 0 20px rgba(247, 118, 142, 0.52);
 }
-.runtime-breakpoint-hit {
-  animation: runtime-breakpoint-pulse 0.9s ease-out 1;
+.runtime-breakpoint-hit.codemap-rf-node,
+.react-flow__node.runtime-breakpoint-hit .codemap-rf-node {
+  animation: runtime-breakpoint-glow 0.9s ease-out 1;
 }
-@keyframes runtime-breakpoint-pulse {
-  0% { transform: scale(1); }
-  35% { transform: scale(1.04); }
-  100% { transform: scale(1); }
+@keyframes runtime-breakpoint-glow {
+  0% {
+    box-shadow: 0 0 0 1px rgba(247, 118, 142, 0.18), 0 0 10px rgba(247, 118, 142, 0.14);
+    opacity: 0.92;
+  }
+  35% {
+    box-shadow: 0 0 0 2px rgba(247, 118, 142, 0.38), 0 0 22px rgba(247, 118, 142, 0.6);
+    opacity: 1;
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgba(247, 118, 142, 0.34), 0 0 20px rgba(247, 118, 142, 0.52);
+    opacity: 1;
+  }
 }
 
 /* One-shot bright pulse when execution lands on a node with no traceable edge */
