@@ -1876,7 +1876,7 @@ def _best_source_node_for_call(
         kind = str(node.get("kind") or "")
         span = int((node.get("source") or {}).get("endLine", (node.get("source") or {}).get("line", 0)) or 0) - int((node.get("source") or {}).get("line", 0) or 0)
         scope_rank = 0 if metadata.get("scope") in {"expanded_function", "file_function_ref"} else 1
-        if label == "after loop":
+        if label in {"after loop", "•"}:
             kind_rank = 4
         elif kind in {"loop", "decision", "loop_else", "entry"}:
             kind_rank = 3

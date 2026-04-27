@@ -342,7 +342,6 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   <div class="section-title">Visualize</div>
   <button class="action" data-cmd="codemap.showWorkspaceGraph">Workspace Call Graph</button>
   <button class="action" data-cmd="codemap.narrateCurrentGraph" data-requires-narration="true">Narrate Current Graph</button>
-  <button class="action" data-cmd="codemap.exportScript" data-requires-narration="true">Export Narration Script</button>
 
   <details class="dropdown">
     <summary>Display Settings</summary>

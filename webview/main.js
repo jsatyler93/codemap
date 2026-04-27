@@ -31,7 +31,6 @@ const execBtn    = document.getElementById("btn-exec");
 const stepBtn    = document.getElementById("btn-step");
 const aiToggle   = document.getElementById("toggle-ai");
 const functionCallsToggle = document.getElementById("toggle-function-calls");
-const probeInteractToggle = document.getElementById("toggle-probe-interact");
 const narrateBtn = document.getElementById("btn-narrate");
 const resetBtn   = document.getElementById("btn-reset");
 const clearBtn   = document.getElementById("btn-clear");
@@ -176,10 +175,6 @@ function onNodeDblClick(n) {
 function applyNarrationAvailability() {
   const enabled = uiState.narrationEnabled !== false;
   if (aiToggle) aiToggle.checked = enabled;
-  if (probeInteractToggle) {
-    probeInteractToggle.disabled = !enabled;
-    if (!enabled) probeInteractToggle.checked = false;
-  }
   if (narrateBtn) {
     narrateBtn.hidden = !enabled;
     narrateBtn.disabled = !enabled;
@@ -196,8 +191,7 @@ function applyNarrationAvailability() {
 }
 
 function applyProbeOverlayInteraction() {
-  const enabled = uiState.narrationEnabled !== false && !!probeInteractToggle?.checked;
-  debugOverlay.setInteractive(enabled);
+  debugOverlay.setInteractive(false);
 }
 
 function narrationByNodeId() {
@@ -1046,10 +1040,6 @@ overlayModernToggle?.addEventListener("change", () => {
   if (currentGraph) {
     renderGraph(currentGraph, { preserveView: true });
   }
-});
-
-probeInteractToggle?.addEventListener("change", () => {
-  applyProbeOverlayInteraction();
 });
 
 collapseGroupsBtn?.addEventListener("click", () => {

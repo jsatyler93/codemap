@@ -321,7 +321,6 @@ export class GraphWebviewProvider {
     <button class="btn step" id="btn-step">&#9193; step-by-step</button>
     <label class="tick"><input id="toggle-ai" type="checkbox" checked /> AI</label>
     <label class="tick"><input id="toggle-function-calls" type="checkbox" checked /> function calls</label>
-    <label class="tick"><input id="toggle-probe-interact" type="checkbox" /> widgets</label>
     <button class="btn" id="btn-narrate">narrate</button>
     <button class="btn" id="btn-reset">reset</button>
     <button class="btn" id="btn-clear">clear</button>

@@ -1209,42 +1209,47 @@ function CodemapEdge({ id, sourceX, sourceY, targetX, targetY, style, data }) {
   } else {
     const dx = targetX - sourceX;
     const dy = targetY - sourceY;
+    const d  = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ux = dx / d;
+    const uy = dy / d;
+    const nx = -uy;
+    const ny = ux;
     const decisionYes = fromKind === "decision" && /yes|true|then|ok|body/.test(lower);
     const decisionNo  = fromKind === "decision" && /no|false|else|done|exit/.test(lower);
 
+    const pointAt = (t) => ({
+      x: sourceX + dx * t,
+      y: sourceY + dy * t,
+    });
+
     if (decisionYes) {
-      const startX = sourceX;
-      const startY = sourceY;
-      const endX   = targetX;
-      const endY   = targetY;
-      edgePath = `M ${startX},${startY} L ${endX},${endY}`;
-      labelX  = (startX + endX) / 2;
-      labelY  = startY - 6;
-      arrowX  = labelX;
-      arrowY  = startY;
-      arrowUx = 1;
-      arrowUy = 0;
+      const labelPoint = pointAt(0.53);
+      const arrowPoint = pointAt(0.58);
+      edgePath = `M ${sourceX},${sourceY} L ${targetX},${targetY}`;
+      labelX  = labelPoint.x - nx * 9;
+      labelY  = labelPoint.y - ny * 9;
+      arrowX  = arrowPoint.x;
+      arrowY  = arrowPoint.y;
+      arrowUx = ux;
+      arrowUy = uy;
     } else if (decisionNo) {
-      const startX = sourceX;
-      const startY = sourceY;
-      const endX   = targetX;
-      const endY   = targetY;
-      edgePath = `M ${startX},${startY} L ${endX},${endY}`;
-      labelX  = startX + 10;
-      labelY  = (startY + endY) / 2 - 4;
-      arrowX  = startX;
-      arrowY  = (startY + endY) / 2;
-      arrowUx = 0;
-      arrowUy = 1;
+      const labelPoint = pointAt(0.53);
+      const arrowPoint = pointAt(0.58);
+      edgePath = `M ${sourceX},${sourceY} L ${targetX},${targetY}`;
+      labelX  = labelPoint.x + nx * 9;
+      labelY  = labelPoint.y + ny * 9;
+      arrowX  = arrowPoint.x;
+      arrowY  = arrowPoint.y;
+      arrowUx = ux;
+      arrowUy = uy;
     } else {
-      const d  = Math.sqrt(dx * dx + dy * dy) || 1;
       edgePath = `M ${sourceX},${sourceY} L ${targetX},${targetY}`;
       labelX  = (sourceX + targetX) / 2;
       labelY  = (sourceY + targetY) / 2;
       arrowX  = labelX;
       arrowY  = labelY;
-      arrowUx = dx / d;
-      arrowUy = dy / d;
+      arrowUx = ux;
+      arrowUy = uy;
     }
   }
 
