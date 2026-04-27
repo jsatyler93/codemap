@@ -32,6 +32,7 @@ const MODULE_SUMMARY_H = 56;
 const NODE_CIRCLE_D = 36;
 const MODULE_RANK_SEP = 200;
 const MODULE_NODE_SEP = 84;
+const CALL_GRAPH_LAYOUT_VERSION = 2;
 const CALL_EDGE_RESOLVED_COLOR = "#7aa7ff";
 const CALL_EDGE_UNCERTAIN_COLOR = "#ffb347";
 
@@ -480,6 +481,77 @@ function applyCallGraphForceLayout(moduleOrder, moduleNodes, nodePos, edges, for
   }
 }
 
+function orderedLaneOffsets(count) {
+  if (count <= 1) return [0];
+  if (count === 2) return [-0.55, 0.55];
+  if (count <= 4) return [0, -1.05, 1.05, 0.45];
+  if (count <= 8) return [0, -1.22, 1.22, -0.45, 0.45, -0.82, 0.82, 0];
+  return [0, -1.62, 1.62, -0.68, 0.68, -1.16, 1.16, -0.26, 0.26, -1.9, 1.9];
+}
+
+function placeOrderedSpread(items, nodePos, centerX, topY, options = {}) {
+  if (!items.length) return topY;
+  const visible = items.filter((item) => nodePos.has(item.id));
+  if (!visible.length) return topY;
+  const maxW = Math.max(...visible.map((item) => nodePos.get(item.id)?.w || NODE_CIRCLE_D));
+  const maxH = Math.max(...visible.map((item) => nodePos.get(item.id)?.h || NODE_CIRCLE_D));
+  const laneStep = options.laneStep ?? (maxW > NODE_CIRCLE_D * 2 ? 130 : 58);
+  const rowGap = options.rowGap ?? Math.max(maxH + 18, 50);
+  const offsets = orderedLaneOffsets(visible.length);
+  let bottom = topY;
+  visible.forEach((item, index) => {
+    const pos = nodePos.get(item.id);
+    if (!pos) return;
+    const offset = offsets[index % offsets.length];
+    const taper = visible.length > 8 ? Math.sin(((index + 1) / (visible.length + 1)) * Math.PI) : 1;
+    pos.x = centerX + offset * laneStep * (0.72 + taper * 0.28) - pos.w / 2;
+    pos.y = topY + index * rowGap;
+    bottom = Math.max(bottom, pos.y + pos.h);
+  });
+  return bottom;
+}
+
+function applyBoxAwareInternalLayout(moduleOrder, moduleNodes, modulePos, classGroupByNode, classGroupMap, classCollapsed, nodePos, isNodeVisible) {
+  const placed = new Set();
+  for (const mod of moduleOrder) {
+    const box = modulePos.get(mod);
+    if (!box) continue;
+    const items = moduleNodes.get(mod) || [];
+    const centerX = box.x + box.w / 2;
+    let cursorY = box.y + MOD_PAD_TOP + 6;
+    let standalone = [];
+
+    const flushStandalone = () => {
+      if (!standalone.length) return;
+      const bottom = placeOrderedSpread(standalone, nodePos, centerX, cursorY, { laneStep: 72, rowGap: 62 });
+      cursorY = bottom + 26;
+      standalone = [];
+    };
+
+    for (const item of items) {
+      if (!isNodeVisible(item.id) || placed.has(item.id)) continue;
+      const groupId = classGroupByNode.get(item.id);
+      const group = groupId ? classGroupMap.get(groupId) : null;
+      const expandedClassGroup = group && !classCollapsed.get(groupId);
+      if (expandedClassGroup && item.id !== group.ownerId) continue;
+      if (expandedClassGroup) {
+        flushStandalone();
+        const members = group.memberIds
+          .map((memberId) => items.find((candidate) => candidate.id === memberId))
+          .filter((member) => member && isNodeVisible(member.id));
+        const classCenterX = centerX + (items.length > 8 ? 24 : 0);
+        const bottom = placeOrderedSpread(members, nodePos, classCenterX, cursorY, { laneStep: 64, rowGap: 56 });
+        members.forEach((member) => placed.add(member.id));
+        cursorY = bottom + 34;
+        continue;
+      }
+      standalone.push(item);
+      placed.add(item.id);
+    }
+    flushStandalone();
+  }
+}
+
 function pickAnchor(source, target, laneOffset = 0) {
   const sourceCenterX = source.x + source.w / 2;
   const sourceCenterY = source.y + source.h / 2;
@@ -554,11 +626,13 @@ function createInitialState(graph, layoutSnapshot) {
   const classCollapsed = new Map(classGroups.map((group) => [group.id, !!savedGroups[group.id]?.collapsed]));
   const nodeCircle = new Map(nodes.map((node) => [node.id, hasPersistedNodeCircleState ? !!savedNodes[node.id]?.circleCollapsed : true]));
   const nodePositions = new Map();
-  Object.entries(savedNodes).forEach(([nodeId, saved]) => {
-    if (typeof saved?.x === "number" && typeof saved?.y === "number") {
-      nodePositions.set(nodeId, { x: saved.x, y: saved.y });
-    }
-  });
+  if (layoutSnapshot?.layoutVersion === CALL_GRAPH_LAYOUT_VERSION) {
+    Object.entries(savedNodes).forEach(([nodeId, saved]) => {
+      if (typeof saved?.x === "number" && typeof saved?.y === "number") {
+        nodePositions.set(nodeId, { x: saved.x, y: saved.y });
+      }
+    });
+  }
   return {
     moduleCollapsed,
     classCollapsed,
@@ -570,7 +644,7 @@ function createInitialState(graph, layoutSnapshot) {
 }
 
 function captureLayout(viewState) {
-  const snapshot = { nodes: {}, groups: {} };
+  const snapshot = { layoutVersion: CALL_GRAPH_LAYOUT_VERSION, nodes: {}, groups: {} };
   viewState.nodePositions.forEach((pos, nodeId) => {
     snapshot.nodes[nodeId] = { x: pos.x, y: pos.y, circleCollapsed: !!viewState.nodeCircle.get(nodeId) };
   });
@@ -692,13 +766,6 @@ function buildScene(graph, viewState, uiState) {
     });
   });
 
-  viewState.nodePositions.forEach((saved, nodeId) => {
-    const pos = nodePos.get(nodeId);
-    if (!pos) return;
-    pos.x = saved.x;
-    pos.y = saved.y;
-  });
-
   function expandedNodeSize(node) {
     const indent = node.kind === "method" && node.className ? METHOD_INDENT : 0;
     return { w: NODE_W - indent, h: NODE_H };
@@ -720,7 +787,62 @@ function buildScene(graph, viewState, uiState) {
   }
 
   nodes.forEach((node) => applyNodeShapeMetrics(node.id));
-  const hasManualLayout = viewState.nodePositions.size > 0;
+  const fixedNodeIds = new Set(viewState.nodePositions.keys());
+
+  function computeModuleBounds(mod) {
+    if (isModuleCollapsed(mod)) return computeCollapsedModuleBounds(moduleMembers.get(mod) || [], nodePos);
+    return computeModuleBoundsForItems((moduleMembers.get(mod) || []).filter((nodeId) => isNodeVisible(nodeId)), nodePos);
+  }
+
+  function refreshModuleBounds() {
+    moduleOrder.forEach((mod) => {
+      const bounds = computeModuleBounds(mod);
+      const box = modulePos.get(mod);
+      if (!bounds || !box) return;
+      box.x = bounds.x;
+      box.y = bounds.y;
+      box.w = bounds.w;
+      box.h = bounds.h;
+    });
+  }
+
+  applyBoxAwareInternalLayout(
+    moduleOrder,
+    moduleNodes,
+    modulePos,
+    classGroupByNode,
+    classGroupMap,
+    viewState.classCollapsed,
+    nodePos,
+    isNodeVisible,
+  );
+  refreshModuleBounds();
+  const previousModuleOrigins = new Map(moduleOrder.map((mod) => {
+    const box = modulePos.get(mod);
+    return [mod, box ? { x: box.x, y: box.y } : { x: 0, y: 0 }];
+  }));
+  applyModuleDagreLayout(moduleOrder, modulePos, edges, nodeModuleLookup);
+  moduleOrder.forEach((mod) => {
+    const before = previousModuleOrigins.get(mod);
+    const box = modulePos.get(mod);
+    if (!before || !box) return;
+    const dx = box.x - before.x;
+    const dy = box.y - before.y;
+    (moduleMembers.get(mod) || []).forEach((nodeId) => {
+      const pos = nodePos.get(nodeId);
+      if (!pos) return;
+      pos.x += dx;
+      pos.y += dy;
+    });
+  });
+  viewState.nodePositions.forEach((saved, nodeId) => {
+    const pos = nodePos.get(nodeId);
+    if (!pos) return;
+    pos.x = saved.x;
+    pos.y = saved.y;
+  });
+  refreshModuleBounds();
+
   const collisionAnchors = new Map(Array.from(nodePos.entries()).map(([nodeId, pos]) => [nodeId, { x: pos.x, y: pos.y }]));
 
   function visibleNodeIds() {
@@ -790,24 +912,10 @@ function buildScene(graph, viewState, uiState) {
     }
   }
 
-  if (!hasManualLayout) {
-    resolveSeparation();
-  }
+  resolveSeparation(fixedNodeIds);
+  refreshModuleBounds();
 
-  function computeModuleBounds(mod) {
-    if (isModuleCollapsed(mod)) return computeCollapsedModuleBounds(moduleMembers.get(mod) || [], nodePos);
-    return computeModuleBoundsForItems((moduleMembers.get(mod) || []).filter((nodeId) => isNodeVisible(nodeId)), nodePos);
-  }
-
-  moduleOrder.forEach((mod) => {
-    const bounds = computeModuleBounds(mod);
-    const box = modulePos.get(mod);
-    if (!bounds || !box) return;
-    box.x = bounds.x;
-    box.y = bounds.y;
-    box.w = bounds.w;
-    box.h = bounds.h;
-  });
+  refreshModuleBounds();
 
   const connCount = {};
   nodes.forEach((node) => { connCount[node.id] = { out: 0, in_: 0 }; });
@@ -866,7 +974,7 @@ function buildScene(graph, viewState, uiState) {
       fromMod,
       toMod,
       sameMod,
-      ambientCount: sameMod ? 1 : 2,
+      ambientCount: 3,
     });
   });
   assignEdgeSpread(edgeRecords);
@@ -1324,6 +1432,8 @@ function CallClassFrameNode({ data }) {
 
 function CallGraphEdge({ id, style, data }) {
   const color = data?.color || "#7aa2f7";
+  const particleCount = Math.max(3, data?.ambientCount || 0);
+  const particleOpacity = data.dimmed ? 0 : 1;
   const s = 5;
   const arrowUx = data?.arrowUx || 1;
   const arrowUy = data?.arrowUy || 0;
@@ -1357,18 +1467,30 @@ function CallGraphEdge({ id, style, data }) {
       fill: color + (data.dimmed ? "18" : data.highlighted ? "cc" : "88"),
       pointerEvents: "none",
     }),
-    ...Array.from({ length: data.ambientCount || 0 }).map((_, index) => React.createElement("circle", {
+    ...Array.from({ length: particleCount }).map((_, index) => React.createElement("g", {
       key: `${id}:amb:${index}`,
-      r: 1.2,
-      fill: color,
-      opacity: data.dimmed ? 0 : 0.3,
+      opacity: particleOpacity,
       pointerEvents: "none",
-    }, React.createElement("animateMotion", {
-      dur: `${index === 0 ? 7.4 : 8.2}s`,
-      begin: `${index * 0.7}s`,
-      repeatCount: "indefinite",
-      path: data.path,
-    }))),
+    },
+      React.createElement("circle", {
+        r: 3.1,
+        fill: color,
+        opacity: 0.12,
+      }),
+      React.createElement("circle", {
+        r: 1.9,
+        fill: "#eef3ff",
+        stroke: color + "b8",
+        strokeWidth: 0.82,
+        opacity: 0.82,
+      }),
+      React.createElement("animateMotion", {
+        dur: `${13.4 + (index % 3) * 0.95}s`,
+        begin: `${index * 1.02}s`,
+        repeatCount: "indefinite",
+        path: data.path,
+      }),
+    )),
   );
 }
 
