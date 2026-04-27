@@ -31,6 +31,9 @@ const NODE_COLOR = {
   entry:     "#9ece6a",
   return:    "#9ece6a",
   exit:      "#9ece6a",
+  function:  "#f6c177",
+  method:    "#f6c177",
+  class:     "#7dcfff",
   decision:  "#e0af68",
   loop:      "#7dcfff",
   break:     "#ff9e64",
@@ -41,7 +44,39 @@ const NODE_COLOR = {
   output:    "#73daca",
   error:     "#f7768e",
 };
+const CALL_EDGE_RESOLVED_COLOR = "#7aa7ff";
+const CALL_EDGE_UNCERTAIN_COLOR = "#ffb347";
 function nodeKindColor(kind) { return NODE_COLOR[kind] || NODE_COLOR.process; }
+
+function callResolutionRank(resolution) {
+  if (resolution === "resolved") return 2;
+  if (resolution === "likely") return 1;
+  return 0;
+}
+
+function bestCallResolutionForNode(nodeId, edges) {
+  let best = null;
+  let bestRank = -1;
+  for (const edge of edges) {
+    if (edge.kind !== "calls" || edge.to !== nodeId) continue;
+    const resolution = edge.resolution || "unresolved";
+    const rank = callResolutionRank(resolution);
+    if (rank > bestRank) {
+      best = resolution;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+function callNodeColor(node, edges) {
+  const scope = node?.metadata?.scope;
+  if (scope !== "file_function_ref" && scope !== "file_call_graph_ref" && scope !== "function_call_graph_ref") return null;
+  const resolution = bestCallResolutionForNode(node.id, edges);
+  if (resolution === "resolved") return CALL_EDGE_RESOLVED_COLOR;
+  if (resolution === "likely" || resolution === "unresolved") return CALL_EDGE_UNCERTAIN_COLOR;
+  return nodeKindColor(node.kind);
+}
 
 function isLoopGroupKind(kind) { return kind === "loop" || kind === "loop_body"; }
 
@@ -75,6 +110,9 @@ function abbreviateChipText(text) {
 
 function nodeChipText(node) {
   const primary = primaryNodeLine(node);
+  if (node.kind === "function") return { top: "fn",  bottom: abbreviateChipText(primary.replace(/\(\)$/, "") || "call") };
+  if (node.kind === "method")   return { top: "mth", bottom: abbreviateChipText(primary.replace(/\(\)$/, "") || "call") };
+  if (node.kind === "class")    return { top: "cls", bottom: abbreviateChipText(primary || "class") };
   if (node.kind === "entry")    return { top: "fn",   bottom: abbreviateChipText(primary || "enter") };
   if (node.kind === "return")   return { top: "ret",  bottom: abbreviateChipText(primary.replace(/^return\s+/i, "") || "value") };
   if (node.kind === "decision") return { top: "if",   bottom: abbreviateChipText(primary.replace(/^if\s+/i, "").replace(/\?$/, "") || "cond") };
@@ -361,6 +399,54 @@ function computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState
 //   • Merge point → min(predecessor X) so branches always converge back to main column.
 function prepareNode() { return { h: NODE_MIN_H }; }
 
+function isFileCallLaneNode(node) {
+  const scope = node?.metadata?.scope;
+  return scope === "file_function_ref" || scope === "file_call_graph_ref" || scope === "function_call_graph_ref";
+}
+
+function isFunctionCallLayerNode(node) {
+  const scope = node?.metadata?.scope;
+  return scope === "file_function_ref" || scope === "file_call_graph_ref" || scope === "function_call_graph_ref";
+}
+
+function isFunctionCallLayerEdge(edge) {
+  return edge?.kind === "calls" || edge?.metadata?.scope === "file_call_graph_flow" || edge?.metadata?.scope === "function_call_graph_flow";
+}
+
+function filterFunctionCallLayer(graph, showFunctionCalls) {
+  if (showFunctionCalls !== false) return graph;
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph?.edges) ? graph.edges : [];
+  const hiddenNodeIds = new Set(nodes.filter(isFunctionCallLayerNode).map((node) => node.id));
+  return {
+    ...graph,
+    nodes: nodes.filter((node) => !hiddenNodeIds.has(node.id)),
+    edges: edges.filter((edge) => !isFunctionCallLayerEdge(edge) && !hiddenNodeIds.has(edge.from) && !hiddenNodeIds.has(edge.to)),
+  };
+}
+
+function enforceLeftCallLaneIndentation(positions, nodes, edges, callIndent) {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const callEdges = edges.filter((edge) => edge.kind === "calls");
+  if (!callEdges.length) return;
+
+  for (let pass = 0; pass < nodes.length; pass++) {
+    let changed = false;
+    for (const edge of callEdges) {
+      const sourcePos = positions.get(edge.from);
+      const targetPos = positions.get(edge.to);
+      const targetNode = nodesById.get(edge.to);
+      if (!sourcePos || !targetPos || !isFileCallLaneNode(targetNode)) continue;
+      const desiredX = sourcePos.x - callIndent;
+      if (targetPos.x > desiredX) {
+        targetPos.x = desiredX;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
 function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, visibleNodeIds = null) {
   const visible   = visibleNodeIds instanceof Set ? visibleNodeIds : new Set(nodes.map((n) => n.id));
   const nodesById = new Map(nodes.map((n) => [n.id, n]));
@@ -501,11 +587,25 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
     if (!outs.length) continue;
 
     if (node?.kind === "loop") {
-      const bodyEdge = outs.find((e) => !/done|else|exit/i.test(String(e.label || "")) && nodesById.get(e.to)?.kind !== "loop_else");
-      const exitEdge = outs.find((e) => e !== bodyEdge);
+      const callOuts = outs.filter((e) => e.kind === "calls");
+      const flowOuts = outs.filter((e) => e.kind !== "calls");
+      const bodyEdge = flowOuts.find((e) => !/done|else|exit/i.test(String(e.label || "")) && nodesById.get(e.to)?.kind !== "loop_else");
+      const exitEdge = flowOuts.find((e) => e !== bodyEdge && /done|else|exit/i.test(String(e.label || "")));
       if (bodyEdge) place(bodyEdge.to, c.x + BRANCH_X, c.y);
       if (exitEdge) place(exitEdge.to, c.x, c.y + V_STEP);
-      outs.forEach((e) => { if (e !== bodyEdge && e !== exitEdge) place(e.to, c.x, c.y + V_STEP); });
+      flowOuts.forEach((e, i) => {
+        if (e === bodyEdge || e === exitEdge) return;
+        place(e.to, c.x, c.y + V_STEP * (i + 1));
+      });
+
+      const CALL_INDENT = BRANCH_X * 5;
+      const sortedCalls = callOuts.slice().sort((a, b) => {
+        const aResolved = (a.resolution || "unresolved") === "resolved" ? 1 : 0;
+        const bResolved = (b.resolution || "unresolved") === "resolved" ? 1 : 0;
+        if (aResolved !== bResolved) return bResolved - aResolved;
+        return Number(nodesById.get(a.to)?.source?.line || 0) - Number(nodesById.get(b.to)?.source?.line || 0);
+      });
+      sortedCalls.forEach((e, i) => place(e.to, c.x - CALL_INDENT, c.y + V_STEP * i));
       continue;
     }
 
@@ -520,10 +620,25 @@ function applyFlowAlphabetLayout(positions, nodes, edges, prepared, entryId, vis
       continue;
     }
 
-    // Regular node — successors go below, sorted by source line
-    const sorted = outs.slice().sort((a, b) =>
+    // Regular node — partition successors:
+    //   • `calls` edges → route HORIZONTALLY into a dedicated mirrored call
+    //     lane on the LEFT, so call-graph refs stay separate from the file's
+    //     main execution spine while preserving the same indentation depth.
+    //   • All other edges → stack DOWNWARD in source-line order (sequential).
+    const callOuts = outs.filter((e) => e.kind === "calls");
+    const flowOuts = outs.filter((e) => e.kind !== "calls");
+    const sortedFlow = flowOuts.slice().sort((a, b) =>
       Number(nodesById.get(a.to)?.source?.line || 0) - Number(nodesById.get(b.to)?.source?.line || 0));
-    sorted.forEach((e, i) => place(e.to, c.x, c.y + V_STEP * (i + 1)));
+    sortedFlow.forEach((e, i) => place(e.to, c.x, c.y + V_STEP * (i + 1)));
+
+    const CALL_INDENT = BRANCH_X * 5;
+    const sortedCalls = callOuts.slice().sort((a, b) => {
+      const aResolved = (a.resolution || "unresolved") === "resolved" ? 1 : 0;
+      const bResolved = (b.resolution || "unresolved") === "resolved" ? 1 : 0;
+      if (aResolved !== bResolved) return bResolved - aResolved;
+      return Number(nodesById.get(a.to)?.source?.line || 0) - Number(nodesById.get(b.to)?.source?.line || 0);
+    });
+    sortedCalls.forEach((e, i) => place(e.to, c.x - CALL_INDENT, c.y + V_STEP * i));
   }
 }
 
@@ -636,6 +751,11 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
   nodes.forEach((node) => {
     if (node.metadata?.boundaryProxy) pinnedNodeIds.add(node.id);
   });
+  edges.forEach((edge) => {
+    if (edge.kind !== "calls") return;
+    if (nodesById.has(edge.from)) pinnedNodeIds.add(edge.from);
+    if (nodesById.has(edge.to)) pinnedNodeIds.add(edge.to);
+  });
 
   const visibility = computeVisibility(nodes, groups, groupById, nodeGroupChains, groupState, pinnedNodeIds);
 
@@ -669,6 +789,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     visiblePrepared,
     visibleLayoutGraph.entryId,
   );
+  enforceLeftCallLaneIndentation(positions, visibleLayoutGraph.nodes, visibleLayoutGraph.edges, 110 * 5);
 
   // Collapsed group positions — loop body chips go to the right of the loop node (flowchartView.js rule).
   // Use visible positions when possible so grouped mode follows the visible
@@ -729,7 +850,7 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     if (!visibility.visibleNodeIds.has(node.id)) continue;
     const pos = positions.get(node.id);
     if (!pos) continue;
-    const color           = nodeKindColor(node.kind);
+    const color           = callNodeColor(node, edges) || nodeKindColor(node.kind);
     const { top, bottom } = nodeChipText(node);
     rfNodes.push({
       id:   node.id,
@@ -817,12 +938,15 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
     const loopBody = fromKind === "loop" && !loopBack && !/done|else|exit/i.test(lower);
     const backArc  = !loopBack && !loopBody && fromKind === "break";
     const isArcEdge = loopBack || loopBody || backArc;
+    const isCallEdge = edge.kind === "calls";
     const syntheticLoopBack = !!edge.synthetic && loopBack;
     const color    = syntheticLoopBack
       ? (lower === "continue" ? NODE_COLOR.continue : NODE_COLOR.loop)
-      : sourceIsGroup
-        ? groupKindColor(groupById.get(srcEndpoint.slice(6))?.kind)
-        : nodeKindColor(fromKind);
+      : isCallEdge
+        ? ((edge.resolution || "unresolved") === "resolved" ? CALL_EDGE_RESOLVED_COLOR : CALL_EDGE_UNCERTAIN_COLOR)
+        : sourceIsGroup
+          ? groupKindColor(groupById.get(srcEndpoint.slice(6))?.kind)
+          : nodeKindColor(fromKind);
 
     const sourceHandle = "center-s";
     const targetHandle = "center-t";
@@ -835,8 +959,12 @@ function buildReactFlowGraph(simplifiedGraph, groupState, groupById, groups, nod
       targetHandle,
       label:        label || undefined,
       type:         "codemapEdge",
-      data:         { label, loopBack, loopBody, backArc, color, fromKind, sourceIsGroup, targetIsGroup, synthetic: !!edge.synthetic },
-      style:        { stroke: color + (isArcEdge ? "9f" : "4f"), strokeWidth: 1.4 },
+      data:         { label, loopBack, loopBody, backArc, color, fromKind, sourceIsGroup, targetIsGroup, synthetic: !!edge.synthetic, isCallEdge },
+      style:        {
+        stroke:           color + (isArcEdge ? "9f" : isCallEdge ? "cf" : "4f"),
+        strokeWidth:      isCallEdge ? 1.8 : 1.4,
+        strokeDasharray:  isCallEdge && (edge.resolution || "unresolved") !== "resolved" ? "6 4" : undefined,
+      },
     });
   }
 
@@ -1251,8 +1379,9 @@ function FitViewOnMount({ preserveView, graph }) {
 }
 
 // ─── FlowchartGraph — main React component ───────────────────────────────────
-function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, narrationByNodeId = {} }) {
-  const simplifiedGraph  = useMemo(() => simplifyAlphabetFlowGraph(graph), [graph]);
+function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, showFunctionCalls = true, narrationByNodeId = {} }) {
+  const displayGraph     = useMemo(() => filterFunctionCallLayer(graph, showFunctionCalls), [graph, showFunctionCalls]);
+  const simplifiedGraph  = useMemo(() => simplifyAlphabetFlowGraph(displayGraph), [displayGraph]);
   const groups           = useMemo(() => normalizeGroups(simplifiedGraph.metadata?.groups || []), [simplifiedGraph]);
   const groupById        = useMemo(() => new Map(groups.map((g) => [g.id, g])),  [groups]);
   const groupDepth       = useMemo(() => buildGroupDepthMap(groups),              [groups]);
@@ -1469,7 +1598,7 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, nar
         maskColor: "rgba(10, 12, 18, 0.42)",
       }),
       React.createElement(CaptureFlowApi, null),
-      React.createElement(FitViewOnMount, { preserveView, graph }),
+      React.createElement(FitViewOnMount, { preserveView, graph: displayGraph }),
     ),
     layoutMode === "grouped" && React.createElement(GroupHierarchyOverlay, {
       groups,
@@ -1482,7 +1611,7 @@ function FlowchartGraph({ graph, callbacks, preserveView, initialLayoutMode, nar
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 export function renderFlowchartReactFlow(graph, options = {}) {
-  const { mount, callbacks = {}, preserveView = false, layoutSnapshot = null, flowchartViewMode = "grouped", narrationByNodeId = {} } = options;
+  const { mount, callbacks = {}, preserveView = false, layoutSnapshot = null, flowchartViewMode = "grouped", showFunctionCalls = true, narrationByNodeId = {} } = options;
   if (!mount) return null;
 
   if (!flowHost) {
@@ -1503,6 +1632,7 @@ export function renderFlowchartReactFlow(graph, options = {}) {
         callbacks: { ...callbacks, layoutSnapshot },
         preserveView,
         initialLayoutMode: flowchartViewMode,
+        showFunctionCalls,
         narrationByNodeId,
       }),
     ),

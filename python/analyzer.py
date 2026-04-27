@@ -233,7 +233,30 @@ class FileExtractor(ast.NodeVisitor):
             if isinstance(stmt, (ast.Import, ast.ImportFrom)):
                 self._record_import(stmt)
             self.visit(stmt)
+        self.symbols[module_id]["calls"] = self._collect_module_calls(tree)
         self.symbols[module_id]["imports"] = self.imports
+
+    def _collect_module_calls(self, tree: ast.Module) -> List[CallSiteDict]:
+        calls: List[CallSiteDict] = []
+
+        def walk(node: ast.AST) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                return
+            if isinstance(node, ast.Call):
+                calls.append({
+                    "text": call_text(node.func),
+                    "line": getattr(node, "lineno", 0),
+                    "column": call_lookup_column(node.func),
+                    "resolution": "unresolved",
+                    "resolutionSource": "unresolved",
+                    "confidence": "low",
+                })
+            for child in ast.iter_child_nodes(node):
+                walk(child)
+
+        for stmt in tree.body:
+            walk(stmt)
+        return calls
 
     def _record_import(self, node: ast.AST) -> None:
         if isinstance(node, ast.Import):
@@ -584,7 +607,7 @@ def resolve_calls(symbols: SymbolMap, modules: ModuleMap) -> None:
             class_methods[sid] = mmap
 
     for sym in symbols.values():
-        if sym["kind"] not in ("function", "method"):
+        if sym["kind"] not in ("function", "method", "module"):
             continue
         mod = sym["module"]
         locals_map = module_locals.get(mod, {})
@@ -771,7 +794,7 @@ def try_jedi_upgrade(symbols: SymbolMap, files: List[str], project_root: str) ->
     # symbol_id -> set of (module, qualified_name) variants for matching.
     upgraded = 0
     for sym in symbols.values():
-        if sym["kind"] not in ("function", "method"):
+        if sym["kind"] not in ("function", "method", "module"):
             continue
         for call in sym["calls"]:
             if call["resolution"] == "resolved":
@@ -860,7 +883,7 @@ def index_files(files: List[str], root: str, use_jedi: bool = True) -> Dict[str,
         "jedi": 0,
     }
     for sym in symbols.values():
-        if sym["kind"] not in ("function", "method"):
+        if sym["kind"] not in ("function", "method", "module"):
             continue
         for call in sym["calls"]:
             call_summary["total"] += 1

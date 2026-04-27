@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { UiStateView } from "../messaging/protocol";
 
 const SHOW_EVIDENCE_KEY = "codemap.showEvidence";
+const SHOW_FUNCTION_CALLS_KEY = "codemap.showFunctionCalls";
 const NARRATION_ENABLED_KEY = "codemap.narrationEnabled";
 const FLOWCHART_VIEW_MODE_KEY = "codemap.flowchartViewMode";
 const CANVAS_BRIGHTNESS_KEY = "codemap.canvasBrightness";
@@ -20,6 +21,11 @@ interface ExecuteCommandMessage {
 
 interface ToggleEvidenceMessage {
   type: "toggleEvidence";
+  enabled: boolean;
+}
+
+interface ToggleFunctionCallsMessage {
+  type: "toggleFunctionCalls";
   enabled: boolean;
 }
 
@@ -47,7 +53,7 @@ interface ReadyMessage {
   type: "ready";
 }
 
-type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | ToggleNarrationMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | SetCanvasThemeModeMessage | ReadyMessage;
+type ActionsInbound = ExecuteCommandMessage | ToggleEvidenceMessage | ToggleFunctionCallsMessage | ToggleNarrationMessage | SetFlowchartViewModeMessage | SetCanvasBrightnessMessage | SetCanvasThemeModeMessage | ReadyMessage;
 
 /**
  * Sidebar actions panel: buttons that trigger CodeMap commands plus a small
@@ -60,6 +66,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private lastSummary: { checked: number; total: number } = { checked: 0, total: 0 };
   private showEvidence: boolean;
+  private showFunctionCalls: boolean;
   private narrationEnabled: boolean;
   private flowchartViewMode: "grouped" | "full";
   private canvasBrightness: number;
@@ -70,6 +77,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     private readonly onUiStateChanged: (state: UiStateView) => void,
   ) {
     this.showEvidence = context.workspaceState.get<boolean>(SHOW_EVIDENCE_KEY, false);
+    this.showFunctionCalls = context.workspaceState.get<boolean>(SHOW_FUNCTION_CALLS_KEY, true);
     this.narrationEnabled = context.workspaceState.get<boolean>(NARRATION_ENABLED_KEY, true);
     this.flowchartViewMode = context.workspaceState.get<"grouped" | "full">(FLOWCHART_VIEW_MODE_KEY, "grouped");
     this.canvasBrightness = clampCanvasBrightness(context.workspaceState.get<number>(CANVAS_BRIGHTNESS_KEY, 1.0));
@@ -87,6 +95,11 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === "toggleEvidence") {
         this.showEvidence = !!msg.enabled;
         void this.context.workspaceState.update(SHOW_EVIDENCE_KEY, this.showEvidence);
+        this.postUiState();
+        this.onUiStateChanged(this.getUiState());
+      } else if (msg.type === "toggleFunctionCalls") {
+        this.showFunctionCalls = !!msg.enabled;
+        void this.context.workspaceState.update(SHOW_FUNCTION_CALLS_KEY, this.showFunctionCalls);
         this.postUiState();
         this.onUiStateChanged(this.getUiState());
       } else if (msg.type === "toggleNarration") {
@@ -142,6 +155,17 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     return this.narrationEnabled;
   }
 
+  isFunctionCallsEnabled(): boolean {
+    return this.showFunctionCalls;
+  }
+
+  setShowFunctionCalls(enabled: boolean): void {
+    this.showFunctionCalls = enabled;
+    void this.context.workspaceState.update(SHOW_FUNCTION_CALLS_KEY, this.showFunctionCalls);
+    this.postUiState();
+    this.onUiStateChanged(this.getUiState());
+  }
+
   setNarrationEnabled(enabled: boolean): void {
     this.narrationEnabled = enabled;
     void this.context.workspaceState.update(NARRATION_ENABLED_KEY, this.narrationEnabled);
@@ -152,6 +176,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
   getUiState(): UiStateView {
     return {
       showEvidence: this.showEvidence,
+      showFunctionCalls: this.showFunctionCalls,
       narrationEnabled: this.narrationEnabled,
       repelStrength: DEFAULT_REPEL_STRENGTH,
       attractStrength: DEFAULT_ATTRACT_STRENGTH,
@@ -323,6 +348,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
     <summary>Display Settings</summary>
     <div class="dropdown-content">
       <label class="toggle"><input id="toggle-narration" type="checkbox" checked /> Enable Copilot Narration</label>
+      <label class="toggle"><input id="toggle-function-calls" type="checkbox" checked /> Show Function Calls</label>
       <div class="slider-block" id="flowchart-view-block" style="display:none;">
         <div class="slider-row" style="margin-bottom:4px"><span>Flowchart View</span></div>
         <div class="preset-row" style="margin-top:0;margin-bottom:0;">
@@ -348,6 +374,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const evidenceToggle = document.getElementById('toggle-evidence');
+  const functionCallsToggle = document.getElementById('toggle-function-calls');
   const narrationToggle = document.getElementById('toggle-narration');
   const flowchartViewBlock = document.getElementById('flowchart-view-block');
   const fvButtons = document.querySelectorAll('[data-fv]');
@@ -364,6 +391,9 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
 
   evidenceToggle.addEventListener('change', () => {
     vscode.postMessage({ type: 'toggleEvidence', enabled: evidenceToggle.checked });
+  });
+  functionCallsToggle.addEventListener('change', () => {
+    vscode.postMessage({ type: 'toggleFunctionCalls', enabled: functionCallsToggle.checked });
   });
   narrationToggle.addEventListener('change', () => {
     vscode.postMessage({ type: 'toggleNarration', enabled: narrationToggle.checked });
@@ -430,6 +460,7 @@ export class ActionsViewProvider implements vscode.WebviewViewProvider {
         msg.checked + ' / ' + msg.total + ' files selected';
     } else if (msg.type === 'uiState') {
       evidenceToggle.checked = !!msg.showEvidence;
+      functionCallsToggle.checked = msg.showFunctionCalls !== false;
       setNarrationEnabled(msg.narrationEnabled !== false);
       const fvm = msg.flowchartViewMode || 'grouped';
       setActiveFvButton(fvm);

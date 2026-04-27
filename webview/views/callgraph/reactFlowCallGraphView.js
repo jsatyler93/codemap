@@ -32,6 +32,8 @@ const MODULE_SUMMARY_H = 56;
 const NODE_CIRCLE_D = 36;
 const MODULE_RANK_SEP = 200;
 const MODULE_NODE_SEP = 84;
+const CALL_EDGE_RESOLVED_COLOR = "#7aa7ff";
+const CALL_EDGE_UNCERTAIN_COLOR = "#ffb347";
 
 const HANDLE_STYLE = {
   opacity: 0,
@@ -124,6 +126,11 @@ function clamp(value, min, max) {
 function clamp01(value) {
   if (!Number.isFinite(value)) return 0.35;
   return Math.max(0, Math.min(1, value));
+}
+
+function cubicDerivative(p0, p1, p2, p3, t) {
+  const mt = 1 - t;
+  return 3 * mt * mt * (p1 - p0) + 6 * mt * t * (p2 - p1) + 3 * t * t * (p3 - p2);
 }
 
 function average(values) {
@@ -488,6 +495,13 @@ function pickAnchor(source, target, laneOffset = 0) {
   return { x: sourceCenterX + laneOffset, y: source.y, dx: 0, dy: -1 };
 }
 
+function dominantDirection(dx, dy) {
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return { dx: dx >= 0 ? 1 : -1, dy: 0 };
+  }
+  return { dx: 0, dy: dy >= 0 ? 1 : -1 };
+}
+
 function assignEdgeSpread(edgeRecords) {
   const bySource = new Map();
   const byTarget = new Map();
@@ -846,7 +860,9 @@ function buildScene(graph, viewState, uiState) {
       tgt: tgtId,
       label: edge.label || "",
       resolution: edge.resolution || "",
-      color: moduleColor(fromMod || ""),
+      color: edge.resolution === "resolved" || !edge.resolution
+        ? CALL_EDGE_RESOLVED_COLOR
+        : CALL_EDGE_UNCERTAIN_COLOR,
       fromMod,
       toMod,
       sameMod,
@@ -860,28 +876,28 @@ function buildScene(graph, viewState, uiState) {
     if (!sp || !tp) return;
     const sourceLane = (edge.sourceLaneOffset || 0) + (edge.bundleLaneOffset || 0);
     const targetLane = (edge.targetLaneOffset || 0) - (edge.bundleLaneOffset || 0);
-    const sourceAnchor = pickAnchor(sp, tp, sourceLane * 0.28);
-    const targetAnchor = pickAnchor(tp, sp, targetLane * 0.28);
-    const sx = sourceAnchor.x;
-    const sy = sourceAnchor.y;
-    const tx = targetAnchor.x;
-    const ty = targetAnchor.y;
+    const sx = sp.x + sp.w / 2;
+    const sy = sp.y + sp.h / 2;
+    const tx = tp.x + tp.w / 2;
+    const ty = tp.y + tp.h / 2;
     const dx = tx - sx;
     const dy = ty - sy;
     const distance = Math.max(1, Math.hypot(dx, dy));
     const nx = -dy / distance;
     const ny = dx / distance;
+    const sourceDir = dominantDirection(dx, dy);
+    const targetDir = dominantDirection(-dx, -dy);
     const bend = Math.max(42, Math.min(edge.sameMod ? 176 : 152, distance * (edge.sameMod ? 0.55 : 0.4)));
     const sway = edge.sameMod
       ? sourceLane * 0.55 + (Math.abs(dy) < 40 ? 18 * (sx <= tx ? -1 : 1) : 0)
       : sourceLane;
-    const c1x = sx + sourceAnchor.dx * bend + nx * sway;
-    const c1y = sy + sourceAnchor.dy * bend + ny * sway;
-    const c2x = tx + targetAnchor.dx * bend + nx * sway;
-    const c2y = ty + targetAnchor.dy * bend + ny * sway;
+    const c1x = sx + sourceDir.dx * bend + nx * sway;
+    const c1y = sy + sourceDir.dy * bend + ny * sway;
+    const c2x = tx + targetDir.dx * bend + nx * sway;
+    const c2y = ty + targetDir.dy * bend + ny * sway;
     const mid = cubicPt(sx, sy, c1x, c1y, c2x, c2y, tx, ty, 0.5);
-    const tangentX = tx - c2x;
-    const tangentY = ty - c2y;
+    const tangentX = cubicDerivative(sx, c1x, c2x, tx, 0.5);
+    const tangentY = cubicDerivative(sy, c1y, c2y, ty, 0.5);
     const tangentLength = Math.max(1, Math.hypot(tangentX, tangentY));
     edge.sx = sx;
     edge.sy = sy;
@@ -894,8 +910,8 @@ function buildScene(graph, viewState, uiState) {
     edge.path = `M${sx},${sy} C${c1x},${c1y} ${c2x},${c2y} ${tx},${ty}`;
     edge.labelX = mid.x + nx * 8;
     edge.labelY = mid.y + ny * 8 - 4;
-    edge.arrowX = tx;
-    edge.arrowY = ty;
+    edge.arrowX = mid.x;
+    edge.arrowY = mid.y;
     edge.arrowUx = tangentX / tangentLength;
     edge.arrowUy = tangentY / tangentLength;
   });
@@ -1039,14 +1055,14 @@ function buildScene(graph, viewState, uiState) {
     const highlighted = selectedEdgeIndexes ? selectedEdgeIndexes.has(index) : false;
     const dimmed = selectedEdgeIndexes ? !highlighted : false;
     const alpha = highlighted
-      ? "cc"
+      ? "ee"
       : dimmed
-        ? "08"
+        ? "12"
         : edge.resolution === "unresolved"
-          ? "18"
+          ? "8c"
           : edge.resolution === "likely"
-            ? "55"
-            : "80";
+            ? "b8"
+            : "dc";
     return {
       id: edge.id,
       source: edge.src,
@@ -1061,7 +1077,7 @@ function buildScene(graph, viewState, uiState) {
       },
       style: {
         stroke: edge.color + alpha,
-        strokeWidth: highlighted ? 2.5 : dimmed ? 0.5 : 1,
+        strokeWidth: highlighted ? 2.8 : dimmed ? 0.8 : 1.8,
       },
       selectable: false,
     };
@@ -1319,14 +1335,13 @@ function CallGraphEdge({ id, style, data }) {
   const base1Y = data.arrowY - s * 0.7 * arrowUy + s * 0.55 * py;
   const base2X = data.arrowX - s * 0.7 * arrowUx - s * 0.55 * px;
   const base2Y = data.arrowY - s * 0.7 * arrowUy - s * 0.55 * py;
-  const dash = data.resolution === "likely" ? "3 3" : data.resolution === "unresolved" ? "1 4" : undefined;
   return React.createElement(
     React.Fragment,
     null,
     React.createElement(BaseEdge, {
       id,
       path: data.path,
-      style: { ...style, strokeDasharray: dash },
+      style,
     }),
     data.label && React.createElement("text", {
       x: data.labelX,

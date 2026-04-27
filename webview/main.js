@@ -30,6 +30,7 @@ const statsEl    = document.getElementById("stats");
 const execBtn    = document.getElementById("btn-exec");
 const stepBtn    = document.getElementById("btn-step");
 const aiToggle   = document.getElementById("toggle-ai");
+const functionCallsToggle = document.getElementById("toggle-function-calls");
 const probeInteractToggle = document.getElementById("toggle-probe-interact");
 const narrateBtn = document.getElementById("btn-narrate");
 const resetBtn   = document.getElementById("btn-reset");
@@ -51,7 +52,7 @@ const canvas = makeSvgCanvas(canvasEl);
 let current = null; // { edgeRecords, nodeRect, nodes, initialView }
 let currentGraph = null;
 let time = 0;
-let uiState = { showEvidence: false, narrationEnabled: true, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false, canvasBrightness: 1.0, canvasThemeMode: "codemap" };
+let uiState = { showEvidence: false, showFunctionCalls: true, narrationEnabled: true, repelStrength: 0.45, attractStrength: 0.32, ambientRepelStrength: 0.18, cohesionStrength: 0.34, layoutMode: "lanes", treeView: false, canvasBrightness: 1.0, canvasThemeMode: "codemap" };
 let overlayPrefs = { showLegacyOverlay: true, showModernOverlay: true };
 let lastStepParticleAt = 0;
 let pendingUiStateRender = null;
@@ -704,6 +705,7 @@ function renderGraph(graph, options = {}) {
         preserveView: !!options.preserveView,
         layoutSnapshot: ctx.layoutSnapshot,
         flowchartViewMode: uiState.flowchartViewMode || "grouped",
+        showFunctionCalls: uiState.showFunctionCalls !== false,
         narrationByNodeId: narrationByNodeId(),
         callbacks: {
           onNodeClick,
@@ -965,6 +967,7 @@ window.addEventListener("message", (event) => {
     debugOverlay.flashNode(msg.nodeId);
   } else if (msg && msg.type === "setUiState") {
     uiState = { ...uiState, ...(msg.state || {}) };
+    if (functionCallsToggle) functionCallsToggle.checked = uiState.showFunctionCalls !== false;
     const bv = typeof uiState.canvasBrightness === "number" ? uiState.canvasBrightness : 1.0;
     canvasEl.style.filter = bv === 1.0 ? "" : `brightness(${bv})`;
     applyCanvasThemeMode();
@@ -1025,6 +1028,10 @@ narrateBtn?.addEventListener("click", () => {
 
 aiToggle?.addEventListener("change", () => {
   vscode.postMessage({ type: "toggleAiAssistance", enabled: aiToggle.checked });
+});
+
+functionCallsToggle?.addEventListener("change", () => {
+  vscode.postMessage({ type: "toggleFunctionCalls", enabled: functionCallsToggle.checked });
 });
 
 overlayLegacyToggle?.addEventListener("change", () => {

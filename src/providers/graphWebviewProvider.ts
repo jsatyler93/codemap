@@ -25,6 +25,7 @@ export class GraphWebviewProvider {
   private flowchartLayerStack: LayerStackEntry[] = [];
   private uiState: UiStateView = {
     showEvidence: false,
+    showFunctionCalls: true,
     narrationEnabled: true,
     repelStrength: 0.45,
     attractStrength: 0.32,
@@ -45,6 +46,7 @@ export class GraphWebviewProvider {
     private readonly onRequestNarration: (kind?: "trace" | "flowchart", regenerate?: boolean) => void,
     private readonly onRequestExportNarration: () => void,
     private readonly onToggleAiAssistance: (enabled: boolean) => void,
+    private readonly onToggleFunctionCalls: (enabled: boolean) => void,
     private readonly onRegenerateProbes: (nodeId: string) => void,
     private readonly onDismissProbe: (probeId: string) => void,
   ) {}
@@ -82,6 +84,8 @@ export class GraphWebviewProvider {
           this.onRequestExportNarration();
         } else if (msg.type === "toggleAiAssistance") {
           this.onToggleAiAssistance(msg.enabled);
+        } else if (msg.type === "toggleFunctionCalls") {
+          this.onToggleFunctionCalls(msg.enabled);
         } else if (msg.type === "regenerateProbes") {
           this.onRegenerateProbes(msg.nodeId);
         } else if (msg.type === "dismissProbe") {
@@ -316,6 +320,7 @@ export class GraphWebviewProvider {
     <button class="btn exec" id="btn-exec">&#9654; auto trace</button>
     <button class="btn step" id="btn-step">&#9193; step-by-step</button>
     <label class="tick"><input id="toggle-ai" type="checkbox" checked /> AI</label>
+    <label class="tick"><input id="toggle-function-calls" type="checkbox" checked /> function calls</label>
     <label class="tick"><input id="toggle-probe-interact" type="checkbox" /> widgets</label>
     <button class="btn" id="btn-narrate">narrate</button>
     <button class="btn" id="btn-reset">reset</button>

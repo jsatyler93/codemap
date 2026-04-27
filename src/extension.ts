@@ -3,7 +3,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
-import { buildFlowchartFor, buildIdlFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
+import { buildFileFlowchartFor, buildFlowchartFor, buildIdlFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
 import { JavaScriptWorkspaceIndexer } from "./javascript/analysis/javascriptWorkspaceIndexer";
 import { buildJavaScriptFlowchartFor } from "./javascript/analysis/javascriptFlowchartBuilder";
 import { IdlWorkspaceIndexer } from "./idl/analysis/idlWorkspaceIndexer";
@@ -11,7 +11,7 @@ import { DebugSyncService, RuntimeFrame } from "./live/debugSync";
 import { NavigationController } from "./navigation/navigationController";
 import { ActionsViewProvider } from "./providers/actionsViewProvider";
 import { FileTreeProvider } from "./providers/fileTreeProvider";
-import { buildWorkspaceGraph } from "./python/analysis/pythonCallGraphBuilder";
+import { buildFileCallGraph, buildWorkspaceGraph } from "./python/analysis/pythonCallGraphBuilder";
 import { GraphDocument } from "./python/model/graphTypes";
 import { computeModuleColorMap } from "./python/analysis/hierarchicalGraphBuilder";
 import { resolveNarrationModel } from "./ai/copilotBridge";
@@ -172,6 +172,9 @@ export function activate(context: vscode.ExtensionContext): void {
         provider.clearDebugProbes();
       }
     },
+    (enabled) => {
+      actionsViewProvider.setShowFunctionCalls(enabled);
+    },
     (nodeId) => {
       const graph = provider.getCurrentGraph();
       if (!graph || !lastRuntimeFrame) return;
@@ -289,6 +292,12 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!file) return;
       lastCommand = () => runShowFileGraph(file);
       await runShowFileGraph(file);
+    }),
+    vscode.commands.registerCommand("codemap.showFileFlowchart", async (resource?: vscode.Uri) => {
+      const file = await resolveTargetSourceFile(resource);
+      if (!file) return;
+      lastCommand = () => runShowFileFlowchart(file);
+      await runShowFileFlowchart(file);
     }),
     vscode.commands.registerCommand("codemap.refresh", async () => {
       const preferred = preferredWorkspaceLanguage(fileTreeProvider.getCheckedFiles(), vscode.window.activeTextEditor?.document.uri.fsPath);
@@ -661,6 +670,12 @@ export function activate(context: vscode.ExtensionContext): void {
         language === "javascript" ? "file-graph-js" : language === "idl" ? "file-graph-idl" : "file-graph",
       );
 
+      if (language === "python") {
+        const graph = buildFileCallGraph(analysis, file, computeModuleColorMap(analysis));
+        presentGraph(graph);
+        return;
+      }
+
       const workspaceGraph = buildWorkspaceGraph(analysis, computeModuleColorMap(analysis));
       const target = normalizePath(file);
       const fileNodeSet = new Set<string>();
@@ -715,6 +730,32 @@ export function activate(context: vscode.ExtensionContext): void {
         },
       };
 
+      presentGraph(graph);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function runShowFileFlowchart(file: string): Promise<void> {
+    try {
+      const language = languageForPath(file);
+      if (language !== "python") {
+        vscode.window.showWarningMessage("CodeMap: file flowcharts are currently available for Python files.");
+        return;
+      }
+      const analysis = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
+        () => pythonIndexer.getAnalysis(),
+      );
+      logAnalysis(analysis, "file-flowchart");
+      const graph = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: "CodeMap: building file flowchart..." },
+        () => buildFileFlowchartFor(context.extensionPath, file, analysis),
+      );
+      if (!graph.nodes?.length) {
+        vscode.window.showInformationMessage(`CodeMap: no file flowchart available for ${path.basename(file)}.`);
+        return;
+      }
       presentGraph(graph);
     } catch (e) {
       showError(e);

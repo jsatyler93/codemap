@@ -208,6 +208,19 @@ export async function buildFlowchartFor(
   });
 }
 
+export async function buildFileFlowchartFor(
+  extensionPath: string,
+  file: string,
+  analysis?: PyAnalysisResult,
+): Promise<GraphDocument> {
+  return runPythonHelper<GraphDocument>(extensionPath, "flowchart.py", {
+    file,
+    line: 1,
+    scope: "file",
+    analysis,
+  });
+}
+
 export async function buildIdlFlowchartFor(
   extensionPath: string,
   file: string,

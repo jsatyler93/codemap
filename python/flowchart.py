@@ -5,6 +5,9 @@ Reads JSON on stdin: { "file": "...", "line": N }
 Locates the innermost function/method whose body contains line N and emits a
 flowchart GraphDocument JSON describing its control flow.
 
+If invoked with { "scope": "file" }, emits a module-level flowchart for the
+file's top-level execution path.
+
 Granularity rule (per plan):
   - Linear runs of simple statements collapse into one 'process' or 'compute'.
   - if/elif/else  -> decision diamonds with control_flow edges.
@@ -118,25 +121,37 @@ class FlowBuilder:
         line: int,
         detail: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        end_line: Optional[int] = None,
     ) -> str:
         nid = self._id(kind)
+        source = {"file": self.file_path, "line": line}
+        if end_line is not None and end_line != line:
+            source["endLine"] = end_line
         self.nodes.append({
             "id": nid,
             "kind": kind,
             "label": label,
             "detail": detail,
-            "source": {"file": self.file_path, "line": line},
+            "source": source,
             "metadata": metadata or {},
         })
         return nid
 
-    def _add_edge(self, src: str, dst: str, label: str = "") -> None:
+    def _add_edge(
+        self,
+        src: str,
+        dst: str,
+        label: str = "",
+        kind: str = "control_flow",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.edges.append({
             "id": f"e_{src}_{dst}_{len(self.edges)}",
             "from": src,
             "to": dst,
-            "kind": "control_flow",
+            "kind": kind,
             "label": label,
+            "metadata": metadata or {},
         })
 
     def _begin_group(self, kind: str, label: str, line: int) -> Dict[str, Any]:
@@ -202,7 +217,7 @@ class FlowBuilder:
             )
             self._add_edge(terminal.fallthrough, ret)
         self._end_group(body_group, body_start)
-        return ({
+        graph = {
             "graphType": "flowchart",
             "title": f"{name}()",
             "subtitle": f"{self.file_path}:{func.lineno}",
@@ -215,7 +230,67 @@ class FlowBuilder:
                 "returnType": self.return_type,
                 "groups": self.groups,
             },
-        }, name)
+        }
+        _embed_function_call_graph_flow(graph, self.file_path, self.symbol, self.symbols_by_id)
+        return (graph, name)
+
+    def build_file(self, tree: ast.Module) -> GraphDoc:
+        name = os.path.basename(self.file_path)
+        function_defs = _collect_function_defs(tree)
+        executable_stmts = [
+            stmt
+            for stmt in tree.body
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        self.var_types = _collect_local_types_from_statements(
+            executable_stmts,
+            self.call_return_types,
+            self.call_return_types_by_text,
+            self.member_return_types,
+            self.attribute_types,
+        )
+        entry = self._add_node(
+            "entry",
+            name,
+            1,
+            detail="module execution",
+            metadata={
+                "displayLines": ["file", name],
+                "scope": "file",
+            },
+        )
+        body_group = self._begin_group("file_body", f"{name} top level", 1)
+        body_start = len(self.nodes)
+        terminal = self._build_block(executable_stmts, entry)
+        if terminal.fallthrough is not None:
+            end_line = max((getattr(stmt, "end_lineno", getattr(stmt, "lineno", 1)) for stmt in executable_stmts), default=1)
+            done = self._add_node(
+                "return",
+                "end of file",
+                end_line,
+                metadata={"displayLines": ["end of file"]},
+            )
+            self._add_edge(terminal.fallthrough, done)
+        self._end_group(body_group, body_start)
+        graph = {
+            "graphType": "flowchart",
+            "title": f"File flowchart: {name}",
+            "subtitle": self.file_path,
+            "nodes": self.nodes,
+            "edges": self.edges,
+            "rootNodeIds": [entry],
+            "metadata": {
+                "function": name,
+                "scope": "file",
+                "language": "python",
+                "groups": self.groups,
+                "expandedFunctions": [],
+            },
+        }
+        _add_function_reference_nodes(graph, self.file_path, function_defs, self.symbols_by_id)
+        _connect_local_call_edges(graph, tree, self.file_path, function_defs, self.symbols_by_id)
+        _embed_call_graph_flow(graph, self.file_path, self.symbols_by_id)
+        return graph
 
     # Build a block of statements. Returns the id of the last node, or None
     # if control does not fall through (return/raise/break/continue).
@@ -238,6 +313,7 @@ class FlowBuilder:
                 label,
                 run[0].lineno,
                 metadata={"typeLabel": type_label} if type_label else None,
+                end_line=max(getattr(stmt, "end_lineno", getattr(stmt, "lineno", run[0].lineno)) for stmt in run),
             )
             if last is not None:
                 self._add_edge(last, nid)
@@ -578,6 +654,14 @@ def _is_compute(stmt: ast.stmt) -> bool:
 def _short(node: Optional[ast.AST]) -> str:
     if node is None:
         return ""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        params = ", ".join(arg.arg for arg in list(node.args.posonlyargs) + list(node.args.args))
+        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+        return f"define {prefix} {node.name}({params})"
+    if isinstance(node, ast.ClassDef):
+        bases = ", ".join(_short(base) for base in node.bases)
+        suffix = f"({bases})" if bases else ""
+        return f"define class {node.name}{suffix}"
     try:
         text = ast.unparse(node)
     except Exception:
@@ -790,13 +874,29 @@ def _collect_local_types(
     member_return_types: Dict[Tuple[str, str], str],
     attribute_types: Dict[Tuple[str, str], str],
 ) -> Dict[str, str]:
+    return _collect_local_types_from_statements(
+        func.body,
+        call_return_types,
+        call_return_types_by_text,
+        member_return_types,
+        attribute_types,
+    )
+
+
+def _collect_local_types_from_statements(
+    statements: List[ast.stmt],
+    call_return_types: Dict[Tuple[int, int], str],
+    call_return_types_by_text: Dict[Tuple[int, str], str],
+    member_return_types: Dict[Tuple[str, str], str],
+    attribute_types: Dict[Tuple[str, str], str],
+) -> Dict[str, str]:
     collector = _LocalTypeCollector(
         call_return_types,
         call_return_types_by_text,
         member_return_types,
         attribute_types,
     )
-    for stmt in func.body:
+    for stmt in statements:
         collector.visit(stmt)
     return collector.types
 
@@ -1263,6 +1363,548 @@ def _find_analysis_symbol(
     return candidates[0]
 
 
+def _find_analysis_symbol_by_start(
+    symbols_by_id: Dict[str, Dict[str, Any]],
+    file_path: str,
+    start_line: int,
+) -> Optional[Dict[str, Any]]:
+    file_norm = os.path.normcase(os.path.abspath(file_path))
+    for symbol in symbols_by_id.values():
+        if symbol.get("kind") not in {"function", "method"}:
+            continue
+        symbol_file = symbol.get("file")
+        if not symbol_file or os.path.normcase(os.path.abspath(symbol_file)) != file_norm:
+            continue
+        source = symbol.get("source") or {}
+        if int(source.get("line", 0) or 0) == start_line:
+            return symbol
+    return None
+
+
+def _collect_function_defs(tree: ast.Module) -> List[Dict[str, Any]]:
+    defs: List[Dict[str, Any]] = []
+
+    def visit_statements(statements: List[ast.stmt], prefix: str = "") -> None:
+        for stmt in statements:
+            if isinstance(stmt, ast.ClassDef):
+                class_prefix = f"{prefix}{stmt.name}."
+                visit_statements(stmt.body, class_prefix)
+                continue
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualname = f"{prefix}{stmt.name}"
+                defs.append({
+                    "key": f"{stmt.lineno}:{qualname}",
+                    "name": stmt.name,
+                    "qualname": qualname,
+                    "node": stmt,
+                    "line": stmt.lineno,
+                    "endLine": getattr(stmt, "end_lineno", stmt.lineno),
+                })
+                visit_statements(stmt.body, f"{qualname}.")
+
+    visit_statements(tree.body)
+    return defs
+
+
+def _add_function_reference_nodes(
+    graph: GraphDoc,
+    file_path: str,
+    function_defs: List[Dict[str, Any]],
+    symbols_by_id: Dict[str, Dict[str, Any]],
+) -> None:
+    metadata = graph.setdefault("metadata", {})
+    entry_by_key: Dict[str, str] = {}
+    symbol_entry_by_id: Dict[str, str] = {}
+
+    for index, info in enumerate(function_defs):
+        symbol = _find_analysis_symbol_by_start(symbols_by_id, file_path, int(info["line"]))
+        kind = symbol.get("kind") if symbol and symbol.get("kind") in {"function", "method"} else ("method" if "." in info["qualname"] else "function")
+        node_id = f"fnref_{index + 1}"
+        graph["nodes"].append({
+            "id": node_id,
+            "kind": kind,
+            "label": info["name"],
+            "detail": info["qualname"],
+            "source": {
+                "file": file_path,
+                "line": int(info["line"]),
+                "endLine": int(info["endLine"]),
+            },
+            "metadata": {
+                "scope": "file_function_ref",
+                "function": info["qualname"],
+                "displayLines": [f"{info['name']}()"],
+                "docSummary": (symbol or {}).get("docSummary"),
+                "isAsync": bool(getattr(info["node"], "name", None) and isinstance(info["node"], ast.AsyncFunctionDef)),
+                "symbolId": (symbol or {}).get("id"),
+            },
+        })
+        entry_by_key[info["key"]] = node_id
+        if symbol and symbol.get("id"):
+            symbol_entry_by_id[str(symbol["id"])] = node_id
+        metadata.setdefault("expandedFunctions", []).append({
+            "key": info["key"],
+            "name": info["name"],
+            "qualname": info["qualname"],
+            "line": info["line"],
+            "entryNodeId": node_id,
+            "symbolId": (symbol or {}).get("id"),
+        })
+
+    metadata["functionEntries"] = entry_by_key
+    metadata["functionSymbolEntries"] = symbol_entry_by_id
+    metadata["functionExits"] = {}
+
+
+def _connect_local_call_edges(
+    graph: GraphDoc,
+    tree: ast.Module,
+    file_path: str,
+    function_defs: List[Dict[str, Any]],
+    symbols_by_id: Dict[str, Dict[str, Any]],
+) -> None:
+    metadata = graph.setdefault("metadata", {})
+    entry_by_key = metadata.get("functionEntries") or {}
+    if not entry_by_key:
+        return
+
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    by_line: Dict[int, Dict[str, Any]] = {}
+    for info in function_defs:
+        by_name.setdefault(info["name"], []).append(info)
+        by_line[int(info["line"])] = info
+
+    analysis_targets = _analysis_call_targets_by_location(symbols_by_id, file_path, by_line)
+    calls = _collect_call_sites(tree)
+    added: set[Tuple[str, str, int, int]] = set()
+    for call in calls:
+        info = analysis_targets.get((call["line"], call["column"])) or _resolve_static_call_target(call["node"], by_name)
+        if not info:
+            continue
+        target_id = entry_by_key.get(info["key"])
+        if not target_id:
+            continue
+        source_node = _best_source_node_for_call(graph.get("nodes", []), file_path, call["line"], target_id)
+        if not source_node:
+            continue
+        edge_key = (source_node["id"], target_id, call["line"], call["column"])
+        if edge_key in added:
+            continue
+        added.add(edge_key)
+        graph["edges"].append({
+            "id": f"e_call_{source_node['id']}_{target_id}_{len(graph['edges'])}",
+            "from": source_node["id"],
+            "to": target_id,
+            "kind": "calls",
+            "label": f"calls {info['name']}()",
+            "resolution": "resolved",
+            "metadata": {
+                "line": call["line"],
+                "column": call["column"],
+                "targetFunction": info["qualname"],
+            },
+        })
+
+
+def _embed_call_graph_flow(
+    graph: GraphDoc,
+    file_path: str,
+    symbols_by_id: Dict[str, Dict[str, Any]],
+) -> None:
+    if not symbols_by_id:
+        return
+
+    file_norm = os.path.normcase(os.path.abspath(file_path))
+    metadata = graph.setdefault("metadata", {})
+    function_symbol_entries = {
+        str(key): str(value)
+        for key, value in (metadata.get("functionSymbolEntries") or {}).items()
+        if key and value
+    }
+    local_symbols = [
+        symbol
+        for symbol in symbols_by_id.values()
+        if symbol.get("file") and os.path.normcase(os.path.abspath(symbol["file"])) == file_norm
+    ]
+    if not local_symbols:
+        return
+
+    existing_pairs = {(edge.get("from"), edge.get("to")) for edge in graph.get("edges", [])}
+    nodes_by_id = {node.get("id"): node for node in graph.get("nodes", [])}
+    call_ref_by_symbol_id: Dict[str, str] = {}
+    external_ref_by_target: Dict[str, str] = {}
+    call_graph_nodes: List[str] = []
+
+    def add_call_ref_for_symbol(symbol: Dict[str, Any]) -> Optional[str]:
+        symbol_id = str(symbol.get("id") or "")
+        if not symbol_id:
+            return None
+        local_ref = function_symbol_entries.get(symbol_id)
+        if local_ref:
+            return local_ref
+        if symbol.get("kind") == "module":
+            return None
+        existing = call_ref_by_symbol_id.get(symbol_id)
+        if existing:
+            return existing
+        node_id = f"callref_{len(call_ref_by_symbol_id) + 1}"
+        kind = symbol.get("kind") if symbol.get("kind") in {"function", "method", "class"} else "function"
+        source = dict(symbol.get("source") or {})
+        if not source and symbol.get("file"):
+            source = {"file": symbol.get("file"), "line": 1}
+        graph["nodes"].append({
+            "id": node_id,
+            "kind": kind,
+            "label": symbol.get("name") or symbol.get("qualifiedName") or symbol_id,
+            "detail": symbol.get("qualifiedName") or symbol_id,
+            "module": symbol.get("module"),
+            "source": source,
+            "metadata": {
+                "scope": "file_call_graph_ref",
+                "symbolId": symbol_id,
+                "docSummary": symbol.get("docSummary"),
+                "displayLines": [f"{symbol.get('name') or symbol_id}()" if kind in {"function", "method"} else str(symbol.get("name") or symbol_id)],
+                "crossFile": True,
+            },
+        })
+        call_ref_by_symbol_id[symbol_id] = node_id
+        call_graph_nodes.append(node_id)
+        return node_id
+
+    def add_external_ref(target_text: str) -> str:
+        target_text = target_text.strip()
+        existing = external_ref_by_target.get(target_text)
+        if existing:
+            return existing
+        parts = [part for part in target_text.split(".") if part]
+        label = parts[-1] if parts else target_text
+        module_name = ".".join(parts[:-1]) if len(parts) > 1 else "external"
+        node_id = f"extcall_{len(external_ref_by_target) + 1}"
+        graph["nodes"].append({
+            "id": node_id,
+            "kind": "function",
+            "label": label,
+            "detail": target_text,
+            "module": module_name,
+            "metadata": {
+                "scope": "file_call_graph_ref",
+                "external": True,
+                "externalTarget": target_text,
+                "displayLines": [f"{label}()"],
+                "docSummary": "External dependency",
+            },
+        })
+        external_ref_by_target[target_text] = node_id
+        call_graph_nodes.append(node_id)
+        return node_id
+
+    def source_node_for_call(symbol: Dict[str, Any], call: Dict[str, Any], target_id: str) -> Optional[str]:
+        symbol_id = str(symbol.get("id") or "")
+        if symbol.get("kind") in {"function", "method"} and symbol_id in function_symbol_entries:
+            return function_symbol_entries[symbol_id]
+        source_node = _best_source_node_for_call(
+            graph.get("nodes", []),
+            file_path,
+            int(call.get("line", 0) or 0),
+            target_id,
+        )
+        if source_node:
+            return str(source_node.get("id"))
+        root_ids = graph.get("rootNodeIds") or []
+        return str(root_ids[0]) if root_ids else None
+
+    def add_call_edge(source_id: str, target_id: str, call: Dict[str, Any], target_label: str, target_kind: str) -> None:
+        if source_id == target_id or (source_id, target_id) in existing_pairs:
+            return
+        existing_pairs.add((source_id, target_id))
+        graph["edges"].append({
+            "id": f"e_callgraph_{source_id}_{target_id}_{len(graph['edges'])}",
+            "from": source_id,
+            "to": target_id,
+            "kind": "calls",
+            "label": f"calls {target_label}()" if target_kind in {"function", "method"} else f"uses {target_label}",
+            "resolution": call.get("resolution", "unresolved"),
+            "metadata": {
+                "line": call.get("line"),
+                "column": call.get("column"),
+                "callText": call.get("text"),
+                "resolutionSource": call.get("resolutionSource"),
+                "confidence": call.get("confidence"),
+                "scope": "file_call_graph_flow",
+            },
+        })
+
+    for symbol in local_symbols:
+        if symbol.get("kind") not in {"module", "function", "method"}:
+            continue
+        for call in symbol.get("calls", []) or []:
+            target_id: Optional[str] = None
+            target_label = str(call.get("text") or "call")
+            target_kind = "function"
+            resolved_to = call.get("resolvedTo")
+            if resolved_to:
+                target_symbol = symbols_by_id.get(resolved_to)
+                if not target_symbol:
+                    continue
+                target_id = add_call_ref_for_symbol(target_symbol)
+                target_label = str(target_symbol.get("name") or target_label)
+                target_kind = str(target_symbol.get("kind") or "function")
+            else:
+                if call.get("resolutionSource") == "builtin":
+                    continue
+                external_target = str(call.get("externalTarget") or "").strip()
+                if not external_target:
+                    continue
+                target_id = add_external_ref(external_target)
+                target_label = external_target.split(".")[-1] or target_label
+            if not target_id or target_id not in {node.get("id") for node in graph.get("nodes", [])}:
+                continue
+            source_id = source_node_for_call(symbol, call, target_id)
+            if not source_id or source_id not in nodes_by_id and not any(node.get("id") == source_id for node in graph.get("nodes", [])):
+                continue
+            add_call_edge(source_id, target_id, call, target_label, target_kind)
+
+    if call_graph_nodes:
+        metadata["callGraphFlowNodes"] = call_graph_nodes
+
+
+def _embed_function_call_graph_flow(
+    graph: GraphDoc,
+    file_path: str,
+    symbol: Dict[str, Any],
+    symbols_by_id: Dict[str, Dict[str, Any]],
+) -> None:
+    if not symbol or not symbols_by_id:
+        return
+    calls = symbol.get("calls") or []
+    if not calls:
+        return
+
+    call_ref_by_symbol_id: Dict[str, str] = {}
+    external_ref_by_target: Dict[str, str] = {}
+    call_graph_nodes: List[str] = []
+    existing_pairs = {(edge.get("from"), edge.get("to")) for edge in graph.get("edges", [])}
+
+    def add_call_ref_for_symbol(target_symbol: Dict[str, Any]) -> Optional[str]:
+        symbol_id = str(target_symbol.get("id") or "")
+        if not symbol_id or symbol_id == symbol.get("id"):
+            return None
+        existing = call_ref_by_symbol_id.get(symbol_id)
+        if existing:
+            return existing
+        if target_symbol.get("kind") == "module":
+            return None
+        node_id = f"funccall_{len(call_ref_by_symbol_id) + 1}"
+        kind = target_symbol.get("kind") if target_symbol.get("kind") in {"function", "method", "class"} else "function"
+        source = dict(target_symbol.get("source") or {})
+        if not source and target_symbol.get("file"):
+            source = {"file": target_symbol.get("file"), "line": 1}
+        label = target_symbol.get("name") or target_symbol.get("qualifiedName") or symbol_id
+        graph["nodes"].append({
+            "id": node_id,
+            "kind": kind,
+            "label": label,
+            "detail": target_symbol.get("qualifiedName") or symbol_id,
+            "module": target_symbol.get("module"),
+            "source": source,
+            "metadata": {
+                "scope": "function_call_graph_ref",
+                "symbolId": symbol_id,
+                "docSummary": target_symbol.get("docSummary"),
+                "displayLines": [f"{label}()" if kind in {"function", "method"} else str(label)],
+                "crossFile": os.path.normcase(os.path.abspath(str(target_symbol.get("file") or file_path))) != os.path.normcase(os.path.abspath(file_path)),
+            },
+        })
+        call_ref_by_symbol_id[symbol_id] = node_id
+        call_graph_nodes.append(node_id)
+        return node_id
+
+    def add_external_ref(target_text: str) -> str:
+        target_text = target_text.strip()
+        existing = external_ref_by_target.get(target_text)
+        if existing:
+            return existing
+        parts = [part for part in target_text.split(".") if part]
+        label = parts[-1] if parts else target_text
+        module_name = ".".join(parts[:-1]) if len(parts) > 1 else "external"
+        node_id = f"funcextcall_{len(external_ref_by_target) + 1}"
+        graph["nodes"].append({
+            "id": node_id,
+            "kind": "function",
+            "label": label,
+            "detail": target_text,
+            "module": module_name,
+            "metadata": {
+                "scope": "function_call_graph_ref",
+                "external": True,
+                "externalTarget": target_text,
+                "displayLines": [f"{label}()"],
+                "docSummary": "External dependency",
+            },
+        })
+        external_ref_by_target[target_text] = node_id
+        call_graph_nodes.append(node_id)
+        return node_id
+
+    def add_call_edge(source_id: str, target_id: str, call: Dict[str, Any], target_label: str, target_kind: str) -> None:
+        if source_id == target_id or (source_id, target_id) in existing_pairs:
+            return
+        existing_pairs.add((source_id, target_id))
+        graph["edges"].append({
+            "id": f"e_funccall_{source_id}_{target_id}_{len(graph['edges'])}",
+            "from": source_id,
+            "to": target_id,
+            "kind": "calls",
+            "label": f"calls {target_label}()" if target_kind in {"function", "method"} else f"uses {target_label}",
+            "resolution": call.get("resolution", "unresolved"),
+            "metadata": {
+                "line": call.get("line"),
+                "column": call.get("column"),
+                "callText": call.get("text"),
+                "resolutionSource": call.get("resolutionSource"),
+                "confidence": call.get("confidence"),
+                "scope": "function_call_graph_flow",
+            },
+        })
+
+    for call in calls:
+        target_id: Optional[str] = None
+        target_label = str(call.get("text") or "call")
+        target_kind = "function"
+        resolved_to = call.get("resolvedTo")
+        if resolved_to:
+            target_symbol = symbols_by_id.get(resolved_to)
+            if not target_symbol:
+                continue
+            target_id = add_call_ref_for_symbol(target_symbol)
+            target_label = str(target_symbol.get("name") or target_label)
+            target_kind = str(target_symbol.get("kind") or "function")
+        else:
+            if call.get("resolutionSource") == "builtin":
+                continue
+            external_target = str(call.get("externalTarget") or "").strip()
+            if not external_target:
+                continue
+            target_id = add_external_ref(external_target)
+            target_label = external_target.split(".")[-1] or target_label
+        if not target_id:
+            continue
+        source_node = _best_source_node_for_call(
+            graph.get("nodes", []),
+            file_path,
+            int(call.get("line", 0) or 0),
+            target_id,
+        )
+        source_id = str(source_node.get("id")) if source_node else (graph.get("rootNodeIds") or [None])[0]
+        if not source_id:
+            continue
+        add_call_edge(source_id, target_id, call, target_label, target_kind)
+
+    if call_graph_nodes:
+        metadata = graph.setdefault("metadata", {})
+        metadata["callGraphFlowNodes"] = call_graph_nodes
+
+
+def _analysis_call_targets_by_location(
+    symbols_by_id: Dict[str, Dict[str, Any]],
+    file_path: str,
+    function_defs_by_line: Dict[int, Dict[str, Any]],
+) -> Dict[Tuple[int, int], Dict[str, Any]]:
+    targets: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    file_norm = os.path.normcase(os.path.abspath(file_path))
+    for symbol in symbols_by_id.values():
+        if symbol.get("kind") not in {"function", "method"}:
+            continue
+        symbol_file = symbol.get("file")
+        if not symbol_file or os.path.normcase(os.path.abspath(symbol_file)) != file_norm:
+            continue
+        for call in symbol.get("calls", []) or []:
+            resolved_to = call.get("resolvedTo")
+            target_symbol = symbols_by_id.get(resolved_to) if resolved_to else None
+            if not target_symbol:
+                continue
+            target_file = target_symbol.get("file")
+            if not target_file or os.path.normcase(os.path.abspath(target_file)) != file_norm:
+                continue
+            target_source = target_symbol.get("source") or {}
+            target_info = function_defs_by_line.get(int(target_source.get("line", 0) or 0))
+            if not target_info:
+                continue
+            targets[(int(call.get("line", 0) or 0), int(call.get("column", 0) or 0))] = target_info
+    return targets
+
+
+def _collect_call_sites(tree: ast.Module) -> List[Dict[str, Any]]:
+    calls: List[Dict[str, Any]] = []
+
+    class Collector(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:
+            calls.append({
+                "node": node,
+                "line": int(getattr(node, "lineno", 0) or 0),
+                "column": int(getattr(node, "col_offset", 0) or 0),
+            })
+            self.generic_visit(node)
+
+    Collector().visit(tree)
+    return calls
+
+
+def _resolve_static_call_target(call: ast.Call, by_name: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    name = ""
+    if isinstance(call.func, ast.Name):
+        name = call.func.id
+    elif isinstance(call.func, ast.Attribute):
+        name = call.func.attr
+    if not name:
+        return None
+    matches = by_name.get(name) or []
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _best_source_node_for_call(
+    nodes: List[NodeDict],
+    file_path: str,
+    line: int,
+    target_id: str,
+) -> Optional[NodeDict]:
+    def candidate_rank(node: NodeDict) -> Tuple[int, int, int]:
+        metadata = node.get("metadata") or {}
+        label = str(node.get("label") or "").strip().lower()
+        kind = str(node.get("kind") or "")
+        span = int((node.get("source") or {}).get("endLine", (node.get("source") or {}).get("line", 0)) or 0) - int((node.get("source") or {}).get("line", 0) or 0)
+        scope_rank = 0 if metadata.get("scope") in {"expanded_function", "file_function_ref"} else 1
+        if label == "after loop":
+            kind_rank = 4
+        elif kind in {"loop", "decision", "loop_else", "entry"}:
+            kind_rank = 3
+        elif kind in {"return", "break", "continue", "error"}:
+            kind_rank = 2
+        else:
+            kind_rank = 1
+        return (kind_rank, span, scope_rank)
+
+    file_norm = os.path.normcase(os.path.abspath(file_path))
+    candidates: List[Tuple[Tuple[int, int, int], NodeDict]] = []
+    for node in nodes:
+        if node.get("id") == target_id:
+            continue
+        source = node.get("source") or {}
+        node_file = source.get("file")
+        if not node_file or os.path.normcase(os.path.abspath(node_file)) != file_norm:
+            continue
+        start = int(source.get("line", 0) or 0)
+        end = int(source.get("endLine", start) or start)
+        if start <= line <= end:
+            candidates.append((candidate_rank(node), node))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -1276,6 +1918,7 @@ def main() -> None:
         return
     file_path = req.get("file")
     line = int(req.get("line", 1))
+    scope = req.get("scope", "function")
     analysis = req.get("analysis")
     if not file_path:
         emit({"error": "missing 'file'"})
@@ -1287,13 +1930,16 @@ def main() -> None:
     except (OSError, SyntaxError, UnicodeDecodeError) as e:
         emit({"error": str(e)})
         return
+    symbol = _find_analysis_symbol(analysis, file_path, line)
+    symbols_by_id = (analysis or {}).get("symbols") or {}
+    builder = FlowBuilder(file_path, symbol=symbol, symbols_by_id=symbols_by_id)
+    if scope == "file":
+        emit(builder.build_file(tree))
+        return
     func = find_target_function(tree, line)
     if func is None:
         emit({"error": f"no function found at line {line}"})
         return
-    symbol = _find_analysis_symbol(analysis, file_path, line)
-    symbols_by_id = (analysis or {}).get("symbols") or {}
-    builder = FlowBuilder(file_path, symbol=symbol, symbols_by_id=symbols_by_id)
     doc, _name = builder.build(func)
     emit(doc)
 

@@ -40,6 +40,11 @@ export interface ToggleAiAssistanceMessage {
   enabled: boolean;
 }
 
+export interface ToggleFunctionCallsMessage {
+  type: "toggleFunctionCalls";
+  enabled: boolean;
+}
+
 export interface RegenerateProbesMessage {
   type: "regenerateProbes";
   nodeId: string;
@@ -97,6 +102,7 @@ export interface SetRuntimeFrameMessage {
 
 export interface UiStateView {
   showEvidence: boolean;
+  showFunctionCalls?: boolean;
   narrationEnabled?: boolean;
   repelStrength: number;
   attractStrength: number;
@@ -213,6 +219,7 @@ export type FromWebviewMessage =
   | RequestNarrationMessage
   | RequestExportNarrationMessage
   | ToggleAiAssistanceMessage
+  | ToggleFunctionCallsMessage
   | RegenerateProbesMessage
   | DismissProbeMessage
   | NavigateLevelMessage
