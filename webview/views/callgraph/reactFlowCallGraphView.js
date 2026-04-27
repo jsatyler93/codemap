@@ -1163,14 +1163,14 @@ function buildScene(graph, viewState, uiState) {
     const highlighted = selectedEdgeIndexes ? selectedEdgeIndexes.has(index) : false;
     const dimmed = selectedEdgeIndexes ? !highlighted : false;
     const alpha = highlighted
-      ? "ee"
+      ? "b8"
       : dimmed
-        ? "12"
+        ? "0d"
         : edge.resolution === "unresolved"
-          ? "8c"
+          ? "56"
           : edge.resolution === "likely"
-            ? "b8"
-            : "dc";
+            ? "70"
+            : "84";
     return {
       id: edge.id,
       source: edge.src,
@@ -1433,7 +1433,7 @@ function CallClassFrameNode({ data }) {
 function CallGraphEdge({ id, style, data }) {
   const color = data?.color || "#7aa2f7";
   const particleCount = Math.max(3, data?.ambientCount || 0);
-  const particleOpacity = data.dimmed ? 0 : 1;
+  const particleOpacity = data.dimmed ? 0 : data.highlighted ? 0.82 : 0.54;
   const s = 5;
   const arrowUx = data?.arrowUx || 1;
   const arrowUy = data?.arrowUy || 0;
@@ -1457,14 +1457,14 @@ function CallGraphEdge({ id, style, data }) {
       x: data.labelX,
       y: data.labelY,
       textAnchor: "middle",
-      fill: color + (data.highlighted ? "dd" : "aa"),
+      fill: color + (data.highlighted ? "9c" : "62"),
       fontSize: 9,
       fontFamily: "Consolas, monospace",
       pointerEvents: "none",
     }, data.label),
     React.createElement("polygon", {
       points: `${tipX},${tipY} ${base1X},${base1Y} ${base2X},${base2Y}`,
-      fill: color + (data.dimmed ? "18" : data.highlighted ? "cc" : "88"),
+      fill: color + (data.dimmed ? "10" : data.highlighted ? "92" : "58"),
       pointerEvents: "none",
     }),
     ...Array.from({ length: particleCount }).map((_, index) => React.createElement("g", {
@@ -1475,14 +1475,14 @@ function CallGraphEdge({ id, style, data }) {
       React.createElement("circle", {
         r: 3.1,
         fill: color,
-        opacity: 0.12,
+        opacity: data.highlighted ? 0.12 : 0.08,
       }),
       React.createElement("circle", {
         r: 1.9,
         fill: "#eef3ff",
-        stroke: color + "b8",
+        stroke: color + (data.highlighted ? "b8" : "8a"),
         strokeWidth: 0.82,
-        opacity: 0.82,
+        opacity: data.highlighted ? 0.8 : 0.62,
       }),
       React.createElement("animateMotion", {
         dur: `${13.4 + (index % 3) * 0.95}s`,
