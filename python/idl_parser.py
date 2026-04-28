@@ -132,19 +132,79 @@ def preprocess_source(source: str) -> List[SourceLine]:
 
 
 def _strip_inline_comment(line: str) -> str:
+    """Remove an inline ``;`` comment, respecting IDL string literals.
+
+    Honors IDL's doubled-quote escape (e.g. ``'it''s'``) so that a doubled
+    quote inside a string literal does not terminate the literal.
+    """
     in_single = False
     in_double = False
-    for idx, ch in enumerate(line):
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
         if ch == "'" and not in_double:
+            if in_single and i + 1 < n and line[i + 1] == "'":
+                i += 2  # escaped doubled quote
+                continue
             in_single = not in_single
         elif ch == '"' and not in_single:
+            if in_double and i + 1 < n and line[i + 1] == '"':
+                i += 2  # escaped doubled quote
+                continue
             in_double = not in_double
         elif ch == ";" and not in_single and not in_double:
-            return line[:idx].rstrip()
+            return line[:i].rstrip()
+        i += 1
     return line.rstrip()
 
 
+def _strip_strings(line: str) -> str:
+    """Replace IDL string-literal contents with spaces, preserving column offsets.
+
+    Used by call extraction so identifiers inside string literals (``'foo(x)'``)
+    are not mistaken for function or procedure calls.
+    """
+    out = list(line)
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "'" and not in_double:
+            if in_single and i + 1 < n and line[i + 1] == "'":
+                out[i] = ' '
+                out[i + 1] = ' '
+                i += 2
+                continue
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            if in_double and i + 1 < n and line[i + 1] == '"':
+                out[i] = ' '
+                out[i + 1] = ' '
+                i += 2
+                continue
+            in_double = not in_double
+            i += 1
+            continue
+        if in_single or in_double:
+            out[i] = ' '
+        i += 1
+    return ''.join(out)
+
+
 def find_routines(lines: List[SourceLine]) -> List[RoutineInfo]:
+    """Locate top-level PRO/FUNCTION routines in a preprocessed source.
+
+    A routine ends on the matching outermost ``END``. Nested control-flow
+    block terminators (``ENDIF``, ``ENDFOR`` ...) are not treated as routine
+    boundaries. If a new ``PRO``/``FUNCTION`` definition appears before the
+    current routine has been closed, the current routine is closed at the
+    previous source line as a defensive fallback for malformed input.
+    """
     routines: List[RoutineInfo] = []
     current: Optional[RoutineInfo] = None
     for sl in lines:
@@ -153,10 +213,11 @@ def find_routines(lines: List[SourceLine]) -> List[RoutineInfo]:
                 current.body_lines.append(sl)
             continue
 
-        m = _ROUTINE_PATTERN.match(sl.text.strip())
+        text = sl.text.strip()
+        m = _ROUTINE_PATTERN.match(text)
         if m:
             if current:
-                current.end_line = sl.line_number - 1
+                current.end_line = max(current.start_line, sl.line_number - 1)
                 routines.append(current)
             current = RoutineInfo()
             kind = m.group(1).upper()
@@ -168,7 +229,7 @@ def find_routines(lines: List[SourceLine]) -> List[RoutineInfo]:
                 current.params, current.keywords = _parse_params(params)
             continue
 
-        if _END_PATTERN.match(sl.text.strip()) or sl.text.upper().strip().startswith("END;"):
+        if _END_PATTERN.match(text) or text.upper().startswith("END;"):
             if current:
                 current.end_line = sl.line_number
                 routines.append(current)
@@ -199,26 +260,52 @@ def _parse_params(param_str: str) -> Tuple[List[str], List[str]]:
     return positional, keywords
 
 
+# Reserved keywords and routine-defining tokens that must never be treated as
+# procedure calls when they appear at the start of a line.
+_RESERVED_PROC_PREFIXES = {
+    "IF", "THEN", "ELSE", "ENDIF", "ENDELSE",
+    "FOR", "ENDFOR", "FOREACH", "ENDFOREACH",
+    "WHILE", "ENDWHILE", "REPEAT", "ENDREP", "UNTIL",
+    "CASE", "ENDCASE", "SWITCH", "ENDSWITCH",
+    "BEGIN", "END", "DO", "OF",
+    "RETURN", "BREAK", "CONTINUE", "GOTO",
+    "COMMON", "FORWARD_FUNCTION", "COMPILE_OPT", "ON_ERROR", "ON_IOERROR",
+    "PRO", "FUNCTION",
+}
+
+_CONTROL_LINE_PREFIXES = (
+    "IF ", "ENDIF", "ELSE", "FOR ", "ENDFOR", "FOREACH ", "ENDFOREACH",
+    "WHILE ", "ENDWHILE", "REPEAT", "ENDREP", "CASE ", "ENDCASE", "SWITCH ",
+    "ENDSWITCH", "BEGIN", "END", "RETURN", "BREAK", "CONTINUE", "GOTO",
+    "COMMON", "FORWARD_FUNCTION", "COMPILE_OPT", "ON_ERROR", "ON_IOERROR",
+)
+
+
 def extract_calls(body_lines: List[SourceLine]) -> List[CallSite]:
     calls: List[CallSite] = []
     for sl in body_lines:
         if sl.is_blank or sl.is_comment:
             continue
         text = sl.text.strip()
-        upper = text.upper()
-        if any(upper.startswith(prefix) for prefix in [
-            "IF ", "ENDIF", "ELSE", "FOR ", "ENDFOR", "FOREACH ", "ENDFOREACH",
-            "WHILE ", "ENDWHILE", "REPEAT", "ENDREP", "CASE ", "ENDCASE", "SWITCH ",
-            "ENDSWITCH", "BEGIN", "END", "RETURN", "BREAK", "CONTINUE", "GOTO",
-            "COMMON", "FORWARD_FUNCTION", "COMPILE_OPT", "ON_ERROR",
-        ]):
-            _extract_function_calls_from_expr(text, sl.line_number, calls)
+        if not text:
+            continue
+        # Strip string literals before regex matching so identifiers inside
+        # quoted text ("PRINT, 'plot, x, y'") are not treated as calls.
+        scrubbed = _strip_strings(text)
+        upper = scrubbed.upper()
+
+        if any(upper.startswith(prefix) for prefix in _CONTROL_LINE_PREFIXES):
+            _extract_function_calls_from_expr(scrubbed, sl.line_number, calls)
             continue
 
-        proc_match = _PROCEDURE_CALL.match(text)
+        proc_match = _PROCEDURE_CALL.match(scrubbed)
         if proc_match:
             name = proc_match.group(1).upper()
-            if name not in IDL_BUILTINS and not name.startswith("!"):
+            if (
+                name not in IDL_BUILTINS
+                and name not in _RESERVED_PROC_PREFIXES
+                and not name.startswith("!")
+            ):
                 cs = CallSite()
                 cs.name = name
                 cs.line = sl.line_number
@@ -226,30 +313,36 @@ def extract_calls(body_lines: List[SourceLine]) -> List[CallSite]:
                 cs.call_type = "procedure"
                 calls.append(cs)
 
-        for matcher in _METHOD_CALL_ARROW.finditer(text):
+        for matcher in _METHOD_CALL_ARROW.finditer(scrubbed):
+            method_name = matcher.group(2).upper()
+            if method_name in _RESERVED_PROC_PREFIXES:
+                continue
             cs = CallSite()
-            cs.name = matcher.group(2).upper()
+            cs.name = method_name
             cs.line = sl.line_number
             cs.text = matcher.group(0)
             cs.call_type = "method"
             calls.append(cs)
 
-        for matcher in _METHOD_CALL_DOT.finditer(text):
+        for matcher in _METHOD_CALL_DOT.finditer(scrubbed):
+            method_name = matcher.group(2).upper()
+            if method_name in _RESERVED_PROC_PREFIXES:
+                continue
             cs = CallSite()
-            cs.name = matcher.group(2).upper()
+            cs.name = method_name
             cs.line = sl.line_number
             cs.text = matcher.group(0)
             cs.call_type = "method"
             calls.append(cs)
 
-        _extract_function_calls_from_expr(text, sl.line_number, calls)
+        _extract_function_calls_from_expr(scrubbed, sl.line_number, calls)
     return calls
 
 
 def _extract_function_calls_from_expr(text: str, line_number: int, calls: List[CallSite]) -> None:
     for matcher in _FUNCTION_CALL.finditer(text):
         name = matcher.group(1).upper()
-        if name in {"IF", "WHILE", "CASE", "SWITCH", "FOR", "FOREACH", "REPEAT"}:
+        if name in _RESERVED_PROC_PREFIXES:
             continue
         if name in IDL_BUILTIN_FUNCTIONS:
             continue
@@ -450,29 +543,42 @@ def _parse_inline_if(text: str) -> Optional[Dict[str, str]]:
 
 
 def _find_keyword(text: str, keyword: str, start: int) -> int:
-    """Find *keyword* at word boundaries in *text*, skipping quoted/nested regions."""
+    """Find *keyword* at word boundaries in *text*, skipping quoted/nested regions.
+
+    Honors IDL doubled-quote escapes inside string literals.
+    """
     klen = len(keyword)
     in_single = False
     in_double = False
     depth = 0
     i = start
-    while i <= len(text) - klen:
+    n = len(text)
+    while i <= n - klen:
         ch = text[i]
         if ch == "'" and not in_double:
+            if in_single and i + 1 < n and text[i + 1] == "'":
+                i += 2
+                continue
             in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif in_single or in_double:
             i += 1
             continue
-        elif ch in "([":
+        if ch == '"' and not in_single:
+            if in_double and i + 1 < n and text[i + 1] == '"':
+                i += 2
+                continue
+            in_double = not in_double
+            i += 1
+            continue
+        if in_single or in_double:
+            i += 1
+            continue
+        if ch in "([":
             depth += 1
         elif ch in ")]":
             depth = max(0, depth - 1)
         elif depth == 0 and text[i:i + klen].upper() == keyword:
-            # Check word boundaries.
-            before_ok = i == 0 or not text[i - 1].isalnum()
-            after_ok = (i + klen >= len(text)) or not text[i + klen].isalnum()
+            before_ok = i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+            after_ok = (i + klen >= n) or not (text[i + klen].isalnum() or text[i + klen] == "_")
             if before_ok and after_ok:
                 return i
         i += 1
@@ -489,14 +595,28 @@ def _parse_case_branch(text: str) -> Optional[Dict[str, str]]:
     in_single = False
     in_double = False
     colon_pos = -1
-    for idx, ch in enumerate(text):
+    n = len(text)
+    idx = 0
+    while idx < n:
+        ch = text[idx]
         if ch == "'" and not in_double:
+            if in_single and idx + 1 < n and text[idx + 1] == "'":
+                idx += 2
+                continue
             in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif in_single or in_double:
+            idx += 1
             continue
-        elif ch == "(":
+        if ch == '"' and not in_single:
+            if in_double and idx + 1 < n and text[idx + 1] == '"':
+                idx += 2
+                continue
+            in_double = not in_double
+            idx += 1
+            continue
+        if in_single or in_double:
+            idx += 1
+            continue
+        if ch == "(":
             depth_paren += 1
         elif ch == ")":
             depth_paren = max(0, depth_paren - 1)
@@ -507,6 +627,7 @@ def _parse_case_branch(text: str) -> Optional[Dict[str, str]]:
         elif ch == ":" and depth_paren == 0 and depth_bracket == 0:
             colon_pos = idx
             break
+        idx += 1
 
     if colon_pos < 1:
         return None

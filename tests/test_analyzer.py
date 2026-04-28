@@ -273,5 +273,143 @@ class IdlFlowchartTests(unittest.TestCase):
         self.assertTrue(multi, "Expected at least one collapsed statement run")
 
 
+class IdlParserHardeningTests(unittest.TestCase):
+    """Edge-case coverage for IDL parser robustness improvements."""
+
+    def _write(self, source: str) -> str:
+        fd, path = tempfile.mkstemp(suffix=".pro", prefix="idl_hard_", dir=ROOT)
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_doubled_quote_strings_do_not_become_calls(self):
+        # 'plot, x' is a literal string, not a call. The PRINT below it must be
+        # the only procedure call extracted.
+        source = textwrap.dedent("""\
+            pro demo_quotes
+              compile_opt idl2
+              msg = 'don''t plot, x'
+              print, msg
+            end
+            """)
+        path = self._write(source)
+        result = run_helper("idl_analyzer.py", {
+            "command": "index", "files": [path], "root": ROOT,
+        })
+        symbols = result["symbols"]
+        routine = next(s for s in symbols.values() if s["name"].lower() == "demo_quotes")
+        names = sorted(call["text"].lower() for call in routine["calls"])
+        # PRINT is a builtin, plot must NOT appear (it was inside a string).
+        for txt in names:
+            self.assertNotIn("plot", txt.split("'")[0], f"unexpected plot extracted from {txt!r}")
+
+    def test_reserved_keywords_not_treated_as_procedures(self):
+        source = textwrap.dedent("""\
+            pro demo_keywords
+              compile_opt idl2
+              if x gt 0 then begin
+                return
+              endif
+            end
+            """)
+        path = self._write(source)
+        result = run_helper("idl_analyzer.py", {
+            "command": "index", "files": [path], "root": ROOT,
+        })
+        routine = next(s for s in result["symbols"].values() if s["name"].lower() == "demo_keywords")
+        for call in routine["calls"]:
+            self.assertNotEqual(call.get("externalTarget", "").lower(), "return")
+            self.assertNotEqual(call.get("externalTarget", "").lower(), "endif")
+
+
+class IdlAnalyzerResolutionTests(unittest.TestCase):
+    def test_external_unresolved_call_carries_external_target(self):
+        source = textwrap.dedent("""\
+            pro demo_external
+              compile_opt idl2
+              call_some_unknown_proc, 1, 2
+              y = unknown_func(3)
+            end
+            """)
+        fd, path = tempfile.mkstemp(suffix=".pro", prefix="idl_ext_", dir=ROOT)
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        self.addCleanup(os.remove, path)
+
+        result = run_helper("idl_analyzer.py", {
+            "command": "index", "files": [path], "root": ROOT,
+        })
+        routine = next(s for s in result["symbols"].values() if s["name"].lower() == "demo_external")
+        targets = {(call.get("externalTarget") or "").lower() for call in routine["calls"]}
+        self.assertIn("call_some_unknown_proc", targets)
+        self.assertIn("unknown_func", targets)
+        for call in routine["calls"]:
+            if call.get("externalTarget", "").lower() in {"call_some_unknown_proc", "unknown_func"}:
+                self.assertEqual(call.get("resolutionSource"), "idl-external")
+                self.assertEqual(call.get("resolution"), "unresolved")
+                self.assertIn(call.get("confidence"), {"medium", "low"})
+
+        summary = result["summary"]["callResolution"]
+        self.assertGreaterEqual(summary["outOfScope"], 2)
+
+
+class IdlFileFlowchartTests(unittest.TestCase):
+    def test_file_scope_emits_routine_reference_nodes(self):
+        source = textwrap.dedent("""\
+            pro helper_a
+              compile_opt idl2
+              print, 'a'
+            end
+
+            function helper_b, x
+              compile_opt idl2
+              return, x * 2
+            end
+
+            pro main_entry
+              compile_opt idl2
+              helper_a, 0
+              y = helper_b(3)
+            end
+            """)
+        fd, path = tempfile.mkstemp(suffix=".pro", prefix="idl_file_", dir=ROOT)
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        self.addCleanup(os.remove, path)
+
+        doc = run_helper("idl_flowchart.py", {
+            "file": path,
+            "line": 1,
+            "scope": "file",
+        })
+        self.assertEqual(doc["graphType"], "flowchart")
+        kinds = [n["kind"] for n in doc["nodes"]]
+        self.assertEqual(kinds.count("entry"), 1)
+        # One function-reference node per declared routine.
+        self.assertEqual(kinds.count("function"), 3)
+
+        labels = " ".join(n["label"] for n in doc["nodes"])
+        self.assertIn("helper_a", labels)
+        self.assertIn("helper_b", labels)
+        self.assertIn("main_entry", labels)
+
+        function_refs = [n for n in doc["nodes"] if n["kind"] == "function"]
+        self.assertTrue(function_refs)
+        self.assertTrue(all(n.get("metadata", {}).get("scope") == "file_function_ref" for n in function_refs))
+
+        # Cross-routine call edges should be present (main_entry -> helper_a, helper_b).
+        call_edges = [e for e in doc["edges"] if e.get("kind") == "calls"]
+        self.assertGreaterEqual(len(call_edges), 2)
+
+        meta = doc.get("metadata", {})
+        self.assertEqual(meta.get("language"), "idl")
+        self.assertEqual(meta.get("scope"), "file")
+        self.assertEqual(meta.get("routineCount"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

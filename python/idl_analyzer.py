@@ -83,6 +83,8 @@ def main() -> None:
                         "column": 0,
                         "resolution": callsite.resolution,
                         "_targetName": callsite.name,
+                        "_targetDisplay": callsite.name.lower(),
+                        "_callType": callsite.call_type,
                     })
                 all_symbols[sym_id] = symbol
                 all_symbols[module_id]["topLevel"].append(sym_id)
@@ -93,23 +95,37 @@ def main() -> None:
     resolved_count = 0
     unresolved_count = 0
     builtin_count = 0
+    out_of_scope_count = 0
 
     for symbol in all_symbols.values():
         for call in symbol.get("calls", []):
             target_name = str(call.pop("_targetName", "")).upper()
+            display_name = str(call.pop("_targetDisplay", target_name.lower()))
+            call_type = str(call.pop("_callType", ""))
             if not target_name:
                 continue
             if target_name in all_routines:
                 call["resolvedTo"] = all_routines[target_name]
                 call["resolution"] = "resolved"
+                call["resolutionSource"] = "idl-local"
+                call["confidence"] = "high"
                 resolved_count += 1
             elif target_name in IDL_BUILTINS or target_name in IDL_BUILTIN_FUNCTIONS:
                 call["resolution"] = "unresolved"
                 call["resolutionSource"] = "builtin"
+                call["confidence"] = "high"
+                call["externalTarget"] = display_name
                 builtin_count += 1
             else:
+                # Unknown target — treat as out-of-scope external dependency.
                 call["resolution"] = "unresolved"
+                call["resolutionSource"] = (
+                    "idl-method" if call_type == "method" else "idl-external"
+                )
+                call["confidence"] = "low" if call_type == "method" else "medium"
+                call["externalTarget"] = display_name
                 unresolved_count += 1
+                out_of_scope_count += 1
 
     result = {
         "symbols": all_symbols,
@@ -130,7 +146,7 @@ def main() -> None:
                 "likely": 0,
                 "unresolved": unresolved_count,
                 "builtin": builtin_count,
-                "outOfScope": 0,
+                "outOfScope": out_of_scope_count,
                 "jedi": 0,
             },
         },

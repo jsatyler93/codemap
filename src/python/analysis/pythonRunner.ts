@@ -232,6 +232,17 @@ export async function buildIdlFlowchartFor(
   });
 }
 
+export async function buildIdlFileFlowchartFor(
+  extensionPath: string,
+  file: string,
+): Promise<GraphDocument> {
+  return runPythonHelper<GraphDocument>(extensionPath, "idl_flowchart.py", {
+    file,
+    line: 1,
+    scope: "file",
+  });
+}
+
 export async function buildDataflowFor(
   extensionPath: string,
   file: string,

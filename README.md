@@ -1,84 +1,135 @@
 # CodeMap
 
-CodeMap is a multi-language VS Code extension that provides interactive
-visualizations of your code:
+**Interactive flowcharts, call graphs, and AI-narrated code understanding for VS Code.**
 
-- **Function flowcharts** – control-flow chart for the function under the
-  cursor (Python, JavaScript/TypeScript, IDL).
-- **Symbol-centric call graphs** – callers and callees of the selected
-  symbol.
-- **Workspace graphs** – module/symbol graph for the whole project.
-- **Static traces** – approximate ordered traversal of calls reached from a
-  function (clearly labelled as static analysis, not runtime truth).
-- **Optional Copilot narration** of graphs and flowcharts.
-- **Optional runtime debug probes** (Python and JavaScript) – LLM-generated,
-  read-only snippets evaluated at the active breakpoint via the Debug
-  Adapter Protocol.
+![Workspace call graph in CodeMap showing 73 nodes across module clusters](https://raw.githubusercontent.com/jsatyler93/codemap/main/screenshots/call_graphs.png)
 
-Static analysis is performed locally (Python via `ast`, JavaScript/TypeScript
-via the TypeScript compiler API, IDL via a bundled parser). No network calls
-are required for analysis. Narration and probe generation use VS Code's
-Language Model API only when explicitly enabled.
+CodeMap turns your source files into navigable visualizations: flowcharts of
+individual functions, file-level flowcharts that include top-level execution
+and local function references, file call graphs, and workspace-level overviews.
+It also layers optional Copilot narration and debug-time introspection on top.
 
-> The visual style of the two views is borrowed from a pair of HTML
-> templates included in `flowchart_interactive.html` and
-> `callgraph_interactive.html`. The runtime version of those views lives in
-> [`webview/`](webview) as small ES modules driven by JSON.
+Supports **Python**, **JavaScript / TypeScript**, and **IDL** (`.pro`).
+
+---
+
+## Features
+
+### Flowcharts
+Render the function under your cursor as an interactive flowchart showing
+control flow, branches, and loops. Click nodes to jump to source.
+
+![Flowchart of a deeply nested function showing entry/exit, decision, loop, and break nodes](https://raw.githubusercontent.com/jsatyler93/codemap/main/screenshots/function_flow_chart.png)
+
+CodeMap also supports **file flowcharts** for Python, JavaScript/TypeScript,
+and IDL. These show top-level execution together with compact local function
+reference nodes and local call edges when they can be resolved statically.
+
+### Call graphs
+- **File call graph**: a file-scoped call graph centered on the active file,
+  including local symbols and external dependencies that connect to them.
+- **Workspace call graph**: a project-wide symbol graph across your workspace,
+  bounded by a configurable file cap (default `400`).
+- **Type-aware resolution via Jedi** when available for Python analysis.
+
+### Copilot narration
+Generate plain-English walkthroughs of the active graph or static execution
+trace. Flowcharts can be annotated inline, narration can be regenerated, and
+scripts can be exported as Markdown.
+
+### Debug probes
+At a breakpoint, generate context-aware logging probes or ask a natural-language
+question about the current state. Probes can be exported as a standalone script
+in the dominant probe language.
+
+Runtime probes are currently supported for **Python** and **JavaScript / TypeScript**.
+
+### Activity bar integration
+CodeMap adds a dedicated activity-bar view container with:
+
+- **Scope**: choose which files are included in analysis
+- **Controls**: visualization and narration controls
+
+---
 
 ## Commands
 
-| Command palette                                     | What it does                                               |
-| --------------------------------------------------- | ---------------------------------------------------------- |
-| `CodeMap: Show Python Flowchart for Current Function` | Builds a flowchart for the function containing the cursor. |
-| `CodeMap: Show Call Graph for Current Symbol`         | Symbol-centric call graph (configurable depth).            |
-| `CodeMap: Show Python Workspace Graph`                | Whole-project module/symbol graph.                         |
-| `CodeMap: Show Static Trace for Current Function`     | Approximate ordered call traversal from a root function.   |
-| `CodeMap: Refresh Visualization`                      | Re-index the workspace and re-render the last view.        |
+All commands are prefixed with `CodeMap:` in the Command Palette.
 
-Click any node in the webview to jump to its source location.
+| Command | What it does |
+| --- | --- |
+| `Show Flowchart for Current Function` | Flowchart of the function under your cursor |
+| `Show Flowchart for File` | File-scoped flowchart for the active file |
+| `Show Call Graph for File` | File-scoped call graph for the active file |
+| `Show Workspace Call Graph` | Workspace-wide symbol graph |
+| `Refresh Analysis` | Re-run static analysis and re-render the last view |
+| `Narrate Current Graph` | Generate an AI walkthrough of the active graph |
+| `Narrate Execution Trace` | Generate an AI walkthrough of a trace-capable graph |
+| `Annotate Flowchart with Copilot` | Add narration to the active flowchart |
+| `Regenerate Narration` | Re-run narration using the current graph context |
+| `Export Narration Script` | Save the narration as Markdown |
+| `Generate Debug Probes at Breakpoint` | Auto-generate probes at the current breakpoint |
+| `Ask a Debug Question at This Point` | Ask a natural-language debugging question |
+| `Clear All Debug Probes` | Remove generated probes from the current session |
+| `Export Debug Probes as Script` | Save probes as a standalone script |
 
-## Settings
+---
 
-| Setting                       | Default | Description                                              |
-| ----------------------------- | ------- | -------------------------------------------------------- |
-| `codemap.pythonPath`          | `""`    | Path to a Python 3 interpreter (else `python` on PATH).  |
-| `codemap.callGraph.depth`     | `1`     | Default depth for symbol-centric call graphs.            |
-| `codemap.workspace.maxFiles`  | `400`   | Cap on Python files indexed for the workspace graph.     |
+## Configuration
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `codemap.pythonPath` | `""` | Path to the Python 3 interpreter used for static analysis. Falls back to `python` on `PATH`. |
+| `codemap.workspace.maxFiles` | `400` | Cap on files indexed in the workspace graph. |
+| `codemap.useJedi` | `true` | Use Jedi for type-aware Python call resolution when it is installed. |
+| `codemap.narration.autoGenerate` | `false` | Automatically narrate newly rendered graphs. |
+
+---
 
 ## Requirements
 
-- VS Code 1.80+
-- Node.js 18+ (for building the extension)
-- Python 3.8+ on PATH or set via `codemap.pythonPath`
+- **VS Code** 1.90 or newer
+- **Python 3** on `PATH` or configured via `codemap.pythonPath`
+- **Jedi** (optional) for upgraded Python call resolution: `pip install jedi`
+- **GitHub Copilot** (optional) for narration and debug-probe features
 
-## Development
+---
 
-```powershell
-npm install
-npm run compile
-```
+## Getting Started
 
-Then press <kbd>F5</kbd> in VS Code to launch the Extension Development Host.
+1. Install CodeMap.
+2. Open a Python, JavaScript / TypeScript, or IDL file.
+3. Run `CodeMap: Show Flowchart for File` or another CodeMap command.
+4. Explore the graph in the CodeMap activity-bar panel.
 
-## Static-analysis limitations
+---
 
-CodeMap is intentionally conservative. Edges are marked with a resolution
-quality:
+## Known Limitations
 
-- **resolved** – direct local call or unambiguously imported symbol.
-- **likely** – best-effort match (e.g. `Class.method` via alias).
-- **unresolved** – call target could not be statically determined.
+- Workspace graphs above the configured file cap may need `codemap.workspace.maxFiles` raised and will take longer to build.
+- JavaScript / TypeScript and IDL analysis are intentionally conservative when static targets are ambiguous.
+- IDL support focuses on `.pro` routines and does not currently support runtime debug probes.
+- Trace narration requires a call graph that includes an execution timeline.
+- Copilot-dependent commands require Copilot to be available and enabled.
 
-Things CodeMap does not (yet) attempt:
+---
 
-- runtime tracing of execution paths
-- dynamic dispatch via `getattr` / `exec` / `eval` (Python) or computed
-  property access (JavaScript)
-- decorator-introduced wrappers changing call shape
-- runtime debug probes for IDL (DAP integration is best-effort only)
+## Privacy
 
-The "static trace" mode is an **approximate ordered traversal** – it does
-not reflect actual runtime execution.
+Static analysis runs locally. Optional narration and debug-probe generation use
+VS Code Copilot APIs only when you explicitly invoke or enable them.
+
+---
+
+## Feedback And Issues
+
+Bug reports and feature requests are welcome at the [issue tracker](https://github.com/jsatyler93/codemap/issues).
+
+---
+
+## License
+
+MIT
 
 ## Project layout
 

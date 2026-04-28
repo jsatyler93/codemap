@@ -1,9 +1,36 @@
 {
   "name": "codemap",
   "displayName": "CodeMap",
-  "description": "Interactive flowcharts, call graphs, and workspace visualization for Python, JavaScript/TypeScript, and IDL in VS Code.",
+  "description": "Interactive flowcharts, call graphs, and AI-assisted code understanding for Python, JavaScript/TypeScript, and IDL in VS Code.",
   "version": "0.1.0",
-  "publisher": "local",
+  "publisher": "stevetyler",
+  "icon": "resources/codemap-icon.png",
+  "galleryBanner": {
+    "color": "#0f172a",
+    "theme": "dark"
+  },
+  "keywords": [
+    "python",
+    "javascript",
+    "typescript",
+    "idl",
+    "visualization",
+    "code map",
+    "flowchart",
+    "call graph",
+    "ast",
+    "debugging",
+    "static analysis"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jsatyler93/codemap.git"
+  },
+  "homepage": "https://github.com/jsatyler93/codemap#readme",
+  "bugs": {
+    "url": "https://github.com/jsatyler93/codemap/issues"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -23,6 +50,15 @@
     "onDebug"
   ],
   "main": "./out/extension.js",
+  "files": [
+    "out/**/*.js",
+    "dist/**",
+    "python/*.py",
+    "resources/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -56,17 +92,17 @@
       },
       {
         "command": "codemap.showFileGraph",
-        "title": "CodeMap: Call Graph for File",
+        "title": "CodeMap: Show Call Graph for File",
         "category": "CodeMap"
       },
       {
         "command": "codemap.showFileFlowchart",
-        "title": "CodeMap: Flowchart for File",
+        "title": "CodeMap: Show Flowchart for File",
         "category": "CodeMap"
       },
       {
         "command": "codemap.showWorkspaceGraph",
-        "title": "CodeMap: Workspace Call Graph",
+        "title": "CodeMap: Show Workspace Call Graph",
         "category": "CodeMap"
       },
       {
@@ -116,11 +152,10 @@
       },
       {
         "command": "codemap.exportProbes",
-        "title": "CodeMap: Export Debug Probes as Python Script",
+        "title": "CodeMap: Export Debug Probes as Script",
         "category": "CodeMap"
       }
     ],
-    "languageModels": {},
     "menus": {
       "editor/context": [
         {
@@ -134,7 +169,7 @@
           "group": "codemap@2"
         },
         {
-          "when": "resourceLangId == python || resourceExtname == .py",
+          "when": "resourceLangId == python || resourceExtname == .py || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFileFlowchart",
           "group": "codemap@3"
         }
@@ -146,7 +181,7 @@
           "group": "navigation@2"
         },
         {
-          "when": "resourceLangId == python || resourceExtname == .py",
+          "when": "resourceLangId == python || resourceExtname == .py || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFileFlowchart",
           "group": "navigation@3"
         }
@@ -158,7 +193,7 @@
           "group": "navigation@2"
         },
         {
-          "when": "resourceLangId == python || resourceExtname == .py",
+          "when": "resourceLangId == python || resourceExtname == .py || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
           "command": "codemap.showFileFlowchart",
           "group": "navigation@3"
         }

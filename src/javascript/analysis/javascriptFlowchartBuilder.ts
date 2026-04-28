@@ -26,6 +26,18 @@ interface FunctionCandidate {
   endLine: number;
 }
 
+interface FileFunctionEntry {
+  key: string;
+  node: ts.FunctionLikeDeclaration;
+  name: string;
+  qualname: string;
+  kind: Extract<NodeKind, "function" | "method">;
+  startLine: number;
+  endLine: number;
+  className?: string;
+  isAsync: boolean;
+}
+
 export function buildJavaScriptFlowchartFor(file: string, line: number): GraphDocument {
   const text = fs.readFileSync(file, "utf8");
   const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, scriptKindFor(file));
@@ -36,6 +48,13 @@ export function buildJavaScriptFlowchartFor(file: string, line: number): GraphDo
 
   const builder = new JsFlowBuilder(file, sourceFile);
   return builder.build(target);
+}
+
+export function buildJavaScriptFileFlowchartFor(file: string): GraphDocument {
+  const text = fs.readFileSync(file, "utf8");
+  const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, scriptKindFor(file));
+  const builder = new JsFlowBuilder(file, sourceFile);
+  return builder.buildFile();
 }
 
 class JsFlowBuilder {
@@ -84,6 +103,78 @@ class JsFlowBuilder {
         function: target.name,
         language: "javascript",
         groups: this.groups,
+      },
+    };
+  }
+
+  buildFile(): GraphDocument {
+    const fileName = path.basename(this.filePath);
+    const topLevelStatements = topLevelExecutableStatements(this.sourceFile);
+    const entry = this.addNode("entry", fileName, 1, {
+      displayLines: ["file", fileName],
+      scope: "file",
+    });
+
+    const bodyGroup = this.beginGroup("function_body", `${fileName} top level`, 1);
+    const bodyStart = this.nodes.length;
+    const result = this.buildBlock(topLevelStatements, entry);
+    if (result.fallthrough) {
+      const endLine = topLevelStatements.length ? endLineOf(topLevelStatements[topLevelStatements.length - 1], this.sourceFile) : 1;
+      const done = this.addNode("return", "end of file", endLine, {
+        displayLines: ["end of file"],
+      });
+      this.addEdge(result.fallthrough, done);
+    }
+    this.endGroup(bodyGroup, bodyStart);
+
+    const functionEntries = collectFileFunctionEntries(this.sourceFile);
+    const entryByKey = new Map<string, string>();
+    const expandedFunctions: Array<Record<string, unknown>> = [];
+
+    functionEntries.forEach((info, index) => {
+      const nodeId = `fnref_${index + 1}`;
+      this.nodes.push({
+        id: nodeId,
+        kind: info.kind,
+        label: info.name,
+        detail: info.qualname,
+        source: {
+          file: this.filePath,
+          line: info.startLine,
+          endLine: info.endLine,
+        },
+        metadata: {
+          scope: "file_function_ref",
+          function: info.qualname,
+          displayLines: [`${info.name}()`],
+          isAsync: info.isAsync,
+        },
+      });
+      entryByKey.set(info.key, nodeId);
+      expandedFunctions.push({
+        key: info.key,
+        name: info.name,
+        qualname: info.qualname,
+        line: info.startLine,
+        entryNodeId: nodeId,
+      });
+    });
+
+    connectLocalFunctionCallEdges(this.sourceFile, this.edges, entry, functionEntries, entryByKey);
+
+    return {
+      graphType: "flowchart",
+      title: `File flowchart: ${fileName}`,
+      subtitle: this.filePath,
+      nodes: this.nodes,
+      edges: this.edges,
+      rootNodeIds: [entry],
+      metadata: {
+        function: fileName,
+        scope: "file",
+        language: "javascript",
+        groups: this.groups,
+        expandedFunctions,
       },
     };
   }
@@ -499,6 +590,237 @@ function functionBodyStatements(node: ts.FunctionLikeDeclaration): ts.Statement[
   // Arrow function with expression body.
   const ret = ts.factory.createReturnStatement(node.body);
   return [ret];
+}
+
+function callableBodyNode(node: ts.Node): ts.Node | undefined {
+  if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)
+    || ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) {
+    return node.body;
+  }
+  return undefined;
+}
+
+function topLevelExecutableStatements(sourceFile: ts.SourceFile): ts.Statement[] {
+  return sourceFile.statements.filter((stmt) => {
+    if (ts.isImportDeclaration(stmt) || ts.isExportDeclaration(stmt) || ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) {
+      return false;
+    }
+    if (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) {
+      return false;
+    }
+    if (ts.isVariableStatement(stmt)) {
+      const declarations = stmt.declarationList.declarations;
+      if (
+        declarations.length > 0
+        && declarations.every((decl) => !!decl.initializer && isNamedFileFunctionExpression(decl.initializer, decl))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function collectFileFunctionEntries(sourceFile: ts.SourceFile): FileFunctionEntry[] {
+  const out: FileFunctionEntry[] = [];
+
+  const visit = (node: ts.Node, currentClass: string | undefined, functionDepth: number): void => {
+    const info = fileFunctionInfo(node, sourceFile, currentClass);
+    if (info) {
+      if (functionDepth === 0) {
+        out.push(info);
+      }
+      ts.forEachChild(node, (child) => visit(child, currentClass, functionDepth + 1));
+      return;
+    }
+
+    if (ts.isClassDeclaration(node) && node.name) {
+      const nextClassName = node.name.text;
+      ts.forEachChild(node, (child) => visit(child, nextClassName, functionDepth));
+      return;
+    }
+
+    ts.forEachChild(node, (child) => visit(child, currentClass, functionDepth));
+  };
+
+  visit(sourceFile, undefined, 0);
+  return out;
+}
+
+function fileFunctionInfo(
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+  className?: string,
+): FileFunctionEntry | undefined {
+  if (ts.isFunctionDeclaration(node) && node.name) {
+    return {
+      key: node.name.text,
+      node,
+      name: node.name.text,
+      qualname: node.name.text,
+      kind: "function",
+      startLine: lineOf(node, sourceFile),
+      endLine: endLineOf(node, sourceFile),
+      isAsync: !!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword),
+    };
+  }
+
+  if (ts.isFunctionExpression(node) || ts.isArrowFunction(node)) {
+    const parent = node.parent;
+    if (parent && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+      return {
+        key: parent.name.text,
+        node,
+        name: parent.name.text,
+        qualname: parent.name.text,
+        kind: "function",
+        startLine: lineOf(node, sourceFile),
+        endLine: endLineOf(node, sourceFile),
+        isAsync: !!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword),
+      };
+    }
+  }
+
+  if ((ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)) && node.name) {
+    const methodName = ts.isIdentifier(node.name) ? node.name.text : node.name.getText(sourceFile);
+    const qualname = className ? `${className}.${methodName}` : methodName;
+    return {
+      key: qualname,
+      node,
+      name: methodName,
+      qualname,
+      kind: "method",
+      startLine: lineOf(node, sourceFile),
+      endLine: endLineOf(node, sourceFile),
+      className,
+      isAsync: !!node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword),
+    };
+  }
+
+  if (ts.isConstructorDeclaration(node)) {
+    const qualname = className ? `${className}.constructor` : "constructor";
+    return {
+      key: qualname,
+      node,
+      name: "constructor",
+      qualname,
+      kind: "method",
+      startLine: lineOf(node, sourceFile),
+      endLine: endLineOf(node, sourceFile),
+      className,
+      isAsync: false,
+    };
+  }
+
+  return undefined;
+}
+
+function connectLocalFunctionCallEdges(
+  sourceFile: ts.SourceFile,
+  edges: GraphEdge[],
+  entryId: string,
+  entries: FileFunctionEntry[],
+  entryByKey: Map<string, string>,
+): void {
+  if (!entries.length) return;
+
+  const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+  const bySimpleName = new Map<string, FileFunctionEntry[]>();
+  entries.forEach((entry) => {
+    const arr = bySimpleName.get(entry.name) ?? [];
+    arr.push(entry);
+    bySimpleName.set(entry.name, arr);
+  });
+
+  const existing = new Set(edges.map((edge) => `${edge.from}->${edge.to}:${edge.label || ""}`));
+  const addCallEdge = (from: string, to: string, line: number, column: number, label: string): void => {
+    const key = `${from}->${to}:${label}`;
+    if (existing.has(key) || from === to) return;
+    existing.add(key);
+    edges.push({
+      id: `e_call_${from}_${to}_${edges.length}`,
+      from,
+      to,
+      kind: "calls",
+      label,
+      resolution: "resolved",
+      metadata: {
+        line,
+        column,
+        scope: "file_call_graph_flow",
+      },
+    });
+  };
+
+  const connectCallsFromNode = (root: ts.Node, sourceId: string, className?: string): void => {
+    const visit = (node: ts.Node): void => {
+      if (node !== root && fileFunctionInfo(node, sourceFile, className)) {
+        return;
+      }
+      if (ts.isClassDeclaration(node)) {
+        return;
+      }
+      if (ts.isCallExpression(node)) {
+        const target = resolveLocalFunctionTarget(node.expression, className, byKey, bySimpleName);
+        if (target) {
+          const targetId = entryByKey.get(target.key);
+          if (targetId) {
+            const pos = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile));
+            addCallEdge(sourceId, targetId, pos.line + 1, pos.character, `calls ${target.name}()`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(root, visit);
+  };
+
+  for (const entry of entries) {
+    const sourceId = entryByKey.get(entry.key);
+    if (!sourceId) continue;
+    const body = callableBodyNode(entry.node);
+    if (body) {
+      connectCallsFromNode(body, sourceId, entry.className);
+    }
+  }
+
+  for (const stmt of topLevelExecutableStatements(sourceFile)) {
+    connectCallsFromNode(stmt, entryId);
+  }
+}
+
+function resolveLocalFunctionTarget(
+  expr: ts.LeftHandSideExpression,
+  className: string | undefined,
+  byKey: Map<string, FileFunctionEntry>,
+  bySimpleName: Map<string, FileFunctionEntry[]>,
+): FileFunctionEntry | undefined {
+  if (ts.isIdentifier(expr)) {
+    if (className) {
+      const sameClass = byKey.get(`${className}.${expr.text}`);
+      if (sameClass) return sameClass;
+    }
+    const candidates = bySimpleName.get(expr.text) ?? [];
+    if (candidates.length === 1) return candidates[0];
+    const plainFunctions = candidates.filter((candidate) => candidate.kind === "function");
+    if (plainFunctions.length === 1) return plainFunctions[0];
+    return undefined;
+  }
+
+  if (ts.isPropertyAccessExpression(expr)) {
+    if (expr.expression.kind === ts.SyntaxKind.ThisKeyword && className) {
+      return byKey.get(`${className}.${expr.name.text}`);
+    }
+    if (ts.isIdentifier(expr.expression)) {
+      return byKey.get(`${expr.expression.text}.${expr.name.text}`);
+    }
+  }
+
+  return undefined;
+}
+
+function isNamedFileFunctionExpression(node: ts.Expression, parent: ts.VariableDeclaration): boolean {
+  return ts.isIdentifier(parent.name) && (ts.isFunctionExpression(node) || ts.isArrowFunction(node));
 }
 
 function statementToBlock(statement: ts.Statement): ts.Statement[] {

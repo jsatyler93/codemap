@@ -3,9 +3,9 @@ import * as path from "path";
 import * as fs from "fs";
 import { GraphWebviewProvider } from "./providers/graphWebviewProvider";
 import { PythonWorkspaceIndexer } from "./python/analysis/pythonWorkspaceIndexer";
-import { buildFileFlowchartFor, buildFlowchartFor, buildIdlFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
+import { buildFileFlowchartFor, buildFlowchartFor, buildIdlFileFlowchartFor, buildIdlFlowchartFor, resetInterpreterCache } from "./python/analysis/pythonRunner";
 import { JavaScriptWorkspaceIndexer } from "./javascript/analysis/javascriptWorkspaceIndexer";
-import { buildJavaScriptFlowchartFor } from "./javascript/analysis/javascriptFlowchartBuilder";
+import { buildJavaScriptFileFlowchartFor, buildJavaScriptFlowchartFor } from "./javascript/analysis/javascriptFlowchartBuilder";
 import { IdlWorkspaceIndexer } from "./idl/analysis/idlWorkspaceIndexer";
 import { DebugSyncService, RuntimeFrame } from "./live/debugSync";
 import { NavigationController } from "./navigation/navigationController";
@@ -670,8 +670,15 @@ export function activate(context: vscode.ExtensionContext): void {
         language === "javascript" ? "file-graph-js" : language === "idl" ? "file-graph-idl" : "file-graph",
       );
 
-      if (language === "python") {
+      // Python and IDL analyzer outputs share the PyAnalysisResult schema, so
+      // the language-agnostic file call-graph builder can serve both. Only the
+      // JavaScript path still needs the workspace-filter fallback because its
+      // analyzer emits a different shape.
+      if (language === "python" || language === "idl") {
         const graph = buildFileCallGraph(analysis, file, computeModuleColorMap(analysis));
+        if (language === "idl") {
+          graph.metadata = { ...(graph.metadata || {}), language: "idl" };
+        }
         presentGraph(graph);
         return;
       }
@@ -739,18 +746,29 @@ export function activate(context: vscode.ExtensionContext): void {
   async function runShowFileFlowchart(file: string): Promise<void> {
     try {
       const language = languageForPath(file);
-      if (language !== "python") {
-        vscode.window.showWarningMessage("CodeMap: file flowcharts are currently available for Python files.");
+      if (language !== "python" && language !== "javascript" && language !== "idl") {
+        vscode.window.showWarningMessage("CodeMap: file flowcharts are currently available for Python, JavaScript/TypeScript, and IDL files.");
         return;
       }
       const analysis = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: indexing workspace..." },
-        () => pythonIndexer.getAnalysis(),
+        () => language === "idl"
+          ? idlIndexer.getAnalysis()
+          : language === "javascript"
+            ? javascriptIndexer.getAnalysis()
+            : pythonIndexer.getAnalysis(),
       );
-      logAnalysis(analysis, "file-flowchart");
+      logAnalysis(
+        analysis,
+        language === "idl" ? "file-flowchart-idl" : language === "javascript" ? "file-flowchart-js" : "file-flowchart",
+      );
       const graph = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: "CodeMap: building file flowchart..." },
-        () => buildFileFlowchartFor(context.extensionPath, file, analysis),
+        () => language === "idl"
+          ? buildIdlFileFlowchartFor(context.extensionPath, file)
+          : language === "javascript"
+            ? Promise.resolve(buildJavaScriptFileFlowchartFor(file))
+            : buildFileFlowchartFor(context.extensionPath, file, analysis),
       );
       if (!graph.nodes?.length) {
         vscode.window.showInformationMessage(`CodeMap: no file flowchart available for ${path.basename(file)}.`);

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,13 +11,24 @@ from idl_parser import detect_control_flow, find_routines, preprocess_source
 def main() -> None:
     request = json.loads(sys.stdin.read())
     file_path = request["file"]
-    target_line = request["line"]
+    target_line = request.get("line", 1)
+    scope = (request.get("scope") or "function").lower()
 
-    with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
-        source = handle.read()
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+            source = handle.read()
+    except Exception as exc:  # pragma: no cover - surface filesystem issues
+        print(json.dumps({"error": str(exc), "graphType": "flowchart", "nodes": [], "edges": []}))
+        return
 
     lines = preprocess_source(source)
     routines = find_routines(lines)
+
+    if scope == "file":
+        graph = build_file_flowchart(file_path, lines, routines)
+        print(json.dumps(graph))
+        return
+
     target_routine = None
     for routine in routines:
         if routine.start_line <= target_line <= routine.end_line:
@@ -24,10 +36,22 @@ def main() -> None:
             break
     if target_routine is None:
         if not routines:
-            print(json.dumps({"error": "No routine found"}))
+            print(json.dumps({
+                "error": "No routine found",
+                "graphType": "flowchart",
+                "title": os.path.basename(file_path),
+                "subtitle": file_path,
+                "nodes": [],
+                "edges": [],
+                "metadata": {"language": "idl"},
+            }))
             return
         target_routine = routines[-1]
 
+    print(json.dumps(build_routine_flowchart(file_path, target_routine)))
+
+
+def build_routine_flowchart(file_path: str, target_routine: Any) -> Dict[str, Any]:
     cf_nodes = detect_control_flow(target_routine.body_lines)
     kind_label = "FUNCTION" if target_routine.kind == "function" else "PRO"
     entry_label = f"{kind_label} {target_routine.name}"
@@ -243,7 +267,163 @@ def main() -> None:
             "language": "idl",
         },
     }
-    print(json.dumps(graph))
+    return graph
+
+
+def build_file_flowchart(file_path: str, lines: List[Any], routines: List[Any]) -> Dict[str, Any]:
+    """Build a file-scoped flowchart for an IDL ``.pro`` source.
+
+    The graph contains:
+      * an ``entry`` node labelled with the file basename,
+      * one compact ``function`` reference node per routine in the file,
+      * an edge from entry to each routine in source order,
+      * ``calls`` edges between routines that invoke other local routines.
+
+    Top-level executable statements (lines outside any PRO/FUNCTION) are
+    emitted as ``process`` nodes so files that contain a ``main`` block are
+    rendered alongside their routine references.
+    """
+    base = os.path.basename(file_path)
+    routine_lines = set()
+    for routine in routines:
+        for ln in range(routine.start_line, routine.end_line + 1):
+            routine_lines.add(ln)
+
+    top_level: List[Any] = []
+    for sl in lines:
+        if sl.is_blank or sl.is_comment:
+            continue
+        if sl.line_number in routine_lines:
+            continue
+        top_level.append(sl)
+
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    groups: List[Dict[str, Any]] = []
+
+    entry_id = "entry"
+    nodes.append({
+        "id": entry_id,
+        "kind": "entry",
+        "label": base,
+        "source": {"file": file_path, "line": 1, "endLine": 1},
+        "metadata": {"displayLines": [base]},
+    })
+
+    body_group = {
+        "id": "group_file_body",
+        "kind": "function_body",
+        "label": f"{base} top-level",
+        "line": 1,
+        "parentGroupId": None,
+        "nodeIds": [entry_id],
+    }
+    groups.append(body_group)
+
+    prev_id = entry_id
+
+    for idx, sl in enumerate(top_level):
+        node_id = f"top_{idx + 1}"
+        label = sl.text.strip() or sl.raw_text.strip()
+        nodes.append({
+            "id": node_id,
+            "kind": "process",
+            "label": label,
+            "source": {"file": file_path, "line": sl.line_number, "endLine": sl.line_number},
+            "metadata": {"displayLines": [label], "indentLevel": 0},
+        })
+        body_group["nodeIds"].append(node_id)
+        edges.append({
+            "id": f"e_top_{idx}",
+            "from": prev_id,
+            "to": node_id,
+            "kind": "control_flow",
+        })
+        prev_id = node_id
+
+    routines_group = {
+        "id": "group_file_routines",
+        "kind": "function_body",
+        "label": f"{base} routines",
+        "line": routines[0].start_line if routines else 1,
+        "parentGroupId": None,
+        "nodeIds": [],
+    }
+    if routines:
+        groups.append(routines_group)
+
+    routine_node_ids: Dict[str, str] = {}
+    for idx, routine in enumerate(routines):
+        node_id = f"routine_{idx + 1}"
+        kind_label = "FUNCTION" if routine.kind == "function" else "PRO"
+        param_text = f"({', '.join(routine.params)})" if routine.params else ""
+        label = f"{kind_label} {routine.name}{param_text}"
+        nodes.append({
+            "id": node_id,
+            "kind": "function",
+            "label": label,
+            "source": {
+                "file": file_path,
+                "line": routine.start_line,
+                "endLine": routine.end_line,
+            },
+            "metadata": {
+                "scope": "file_function_ref",
+                "displayLines": [label],
+                "indentLevel": 0,
+                "routine": routine.name,
+                "routineKind": routine.kind,
+            },
+        })
+        routines_group["nodeIds"].append(node_id)
+        edges.append({
+            "id": f"e_routine_{idx}",
+            "from": entry_id if idx == 0 else f"routine_{idx}",
+            "to": node_id,
+            "kind": "control_flow",
+            "label": "declares" if idx == 0 else "then",
+        })
+        routine_node_ids[routine.name.upper()] = node_id
+
+    # Add cross-routine call edges discovered from the parser.
+    from idl_parser import extract_calls
+    seen_call_edges = set()
+    for routine in routines:
+        src_id = routine_node_ids.get(routine.name.upper())
+        if not src_id:
+            continue
+        for call in extract_calls(routine.body_lines):
+            target_id = routine_node_ids.get(call.name.upper())
+            if not target_id or target_id == src_id:
+                continue
+            key = (src_id, target_id)
+            if key in seen_call_edges:
+                continue
+            seen_call_edges.add(key)
+            edges.append({
+                "id": f"e_call_{len(edges)}",
+                "from": src_id,
+                "to": target_id,
+                "kind": "calls",
+                "label": "calls",
+            })
+
+    return {
+        "graphType": "flowchart",
+        "title": f"File flowchart: {base}",
+        "subtitle": file_path,
+        "nodes": nodes,
+        "edges": edges,
+        "rootNodeIds": [entry_id],
+        "metadata": {
+            "scope": "file",
+            "language": "idl",
+            "fileScope": file_path,
+            "groups": [g for g in groups if g["nodeIds"]],
+            "routineCount": len(routines),
+            "topLevelCount": len(top_level),
+        },
+    }
 
 
 def collapse_statement_runs(cf_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
