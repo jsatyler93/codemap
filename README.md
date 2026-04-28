@@ -1,10 +1,10 @@
-# CodeMap
+# CodeMap Visualizer
 
 **Interactive flowcharts, call graphs, and AI-narrated code understanding for VS Code.**
 
-![Workspace call graph in CodeMap showing 73 nodes across module clusters](https://raw.githubusercontent.com/jsatyler93/codemap/main/screenshots/call_graphs.png)
+![Workspace call graph in CodeMap Visualizer showing 73 nodes across module clusters](https://raw.githubusercontent.com/jsatyler93/codemap/main/screenshots/call_graphs.png)
 
-CodeMap turns your source files into navigable visualizations: flowcharts of
+CodeMap Visualizer turns your source files into navigable visualizations: flowcharts of
 individual functions, file-level flowcharts that include top-level execution
 and local function references, file call graphs, and workspace-level overviews.
 It also layers optional Copilot narration and debug-time introspection on top.
@@ -21,7 +21,7 @@ control flow, branches, and loops. Click nodes to jump to source.
 
 ![Flowchart of a deeply nested function showing entry/exit, decision, loop, and break nodes](https://raw.githubusercontent.com/jsatyler93/codemap/main/screenshots/function_flow_chart.png)
 
-CodeMap also supports **file flowcharts** for Python, JavaScript/TypeScript,
+CodeMap Visualizer also supports **file flowcharts** for Python, JavaScript/TypeScript,
 and IDL. These show top-level execution together with compact local function
 reference nodes and local call edges when they can be resolved statically.
 
@@ -45,7 +45,7 @@ in the dominant probe language.
 Runtime probes are currently supported for **Python** and **JavaScript / TypeScript**.
 
 ### Activity bar integration
-CodeMap adds a dedicated activity-bar view container with:
+CodeMap Visualizer adds a dedicated activity-bar view container with:
 
 - **Scope**: choose which files are included in analysis
 - **Controls**: visualization and narration controls
@@ -97,10 +97,10 @@ All commands are prefixed with `CodeMap:` in the Command Palette.
 
 ## Getting Started
 
-1. Install CodeMap.
+1. Install CodeMap Visualizer.
 2. Open a Python, JavaScript / TypeScript, or IDL file.
 3. Run `CodeMap: Show Flowchart for File` or another CodeMap command.
-4. Explore the graph in the CodeMap activity-bar panel.
+4. Explore the graph in the CodeMap Visualizer activity-bar panel.
 
 ---
 

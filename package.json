@@ -1,6 +1,6 @@
 {
-  "name": "codemap",
-  "displayName": "CodeMap",
+  "name": "codemap-visualizer",
+  "displayName": "CodeMap Visualizer",
   "description": "Interactive flowcharts, call graphs, and AI-assisted code understanding for Python, JavaScript/TypeScript, and IDL in VS Code.",
   "version": "0.1.0",
   "publisher": "stevetyler",
