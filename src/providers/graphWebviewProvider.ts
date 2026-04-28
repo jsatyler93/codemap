@@ -65,7 +65,6 @@ export class GraphWebviewProvider {
           enableScripts: true,
           retainContextWhenHidden: true,
           localResourceRoots: [
-            vscode.Uri.file(path.join(this.context.extensionPath, "webview")),
             vscode.Uri.file(path.join(this.context.extensionPath, "dist", "webview")),
           ],
         },
@@ -280,16 +279,13 @@ export class GraphWebviewProvider {
   }
 
   private buildHtml(webview: vscode.Webview): string {
-    const webviewRoot = vscode.Uri.file(
-      path.join(this.context.extensionPath, "webview"),
-    );
     const distRoot = vscode.Uri.file(
       path.join(this.context.extensionPath, "dist", "webview"),
     );
     const asUri = (root: vscode.Uri, rel: string) =>
       webview.asWebviewUri(vscode.Uri.joinPath(root, ...rel.split("/")));
 
-    const cssUri = asUri(webviewRoot, "styles.css");
+    const cssUri = asUri(distRoot, "styles.css");
     const flowCssUri = asUri(distRoot, "main.css");
     const mainUri = asUri(distRoot, "main.js");
     const litegraphUri = asUri(distRoot, "litegraph.js");
