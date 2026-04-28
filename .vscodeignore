@@ -1,0 +1,56 @@
+# Source / dev folders that the packaged extension never loads at runtime.
+# Runtime assets live under: dist/, python/, resources/.
+
+.vscode/**
+.vscode-test/**
+.git/**
+.gitignore
+.gitattributes
+.github/**
+
+# TypeScript / build inputs (extension code is bundled into dist/extension.js)
+src/**
+out/**
+webview/**
+tsconfig.json
+tsconfig.*.json
+**/*.ts.map
+**/*.js.map
+**/tsconfig*.json
+
+# esbuild / build helpers
+scripts/**
+esbuild.*
+.eslintrc*
+
+# Tests, samples, screenshots, dev plans, docs
+tests/**
+test_samples/**
+samples/**
+screenshots/**
+docs/**
+*.md
+!README.md
+!CHANGELOG.md
+*.html
+write_rfv.js
+write_rfv.py
+codemap_surgical_debug_plan.md
+copilot_narration_plan.md
+implementaion_idl.md
+implementiaon_js.md
+IMPLEMENTATION_TECHNICAL.md
+
+# Node tooling artifacts (vsce already excludes most of these but be explicit)
+node_modules/**
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Memory / agent files (local dev only)
+/memories/**
+.idl/**
+.skills/**
+.agents/**
+.aider*
+.copilot*

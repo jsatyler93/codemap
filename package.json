@@ -2,7 +2,7 @@
   "name": "codemap-visualizer",
   "displayName": "CodeMap Visualizer",
   "description": "Interactive flowcharts, call graphs, and AI-assisted code understanding for Python, JavaScript/TypeScript, and IDL in VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "publisher": "stevetyler",
   "icon": "resources/codemap-icon.png",
   "galleryBanner": {
@@ -49,16 +49,7 @@
     "workspaceContains:**/*.pro",
     "onDebug"
   ],
-  "main": "./out/extension.js",
-  "files": [
-    "out/**/*.js",
-    "dist/**",
-    "python/*.py",
-    "resources/**",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
-  ],
+  "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -188,12 +179,12 @@
       ],
       "explorer/context": [
         {
-          "when": "resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
+          "when": "resourceExtname == .py || resourceExtname == .js || resourceExtname == .jsx || resourceExtname == .mjs || resourceExtname == .cjs || resourceExtname == .ts || resourceExtname == .tsx || resourceExtname == .pro || resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl",
           "command": "codemap.showFileGraph",
           "group": "navigation@2"
         },
         {
-          "when": "resourceLangId == python || resourceExtname == .py || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl || resourceExtname == .pro",
+          "when": "resourceExtname == .py || resourceExtname == .js || resourceExtname == .jsx || resourceExtname == .mjs || resourceExtname == .cjs || resourceExtname == .ts || resourceExtname == .tsx || resourceExtname == .pro || resourceLangId == python || resourceLangId == javascript || resourceLangId == javascriptreact || resourceLangId == typescript || resourceLangId == typescriptreact || resourceLangId == idl",
           "command": "codemap.showFileFlowchart",
           "group": "navigation@3"
         }
@@ -228,11 +219,14 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "npm run compile:ext && npm run bundle:webview",
+    "compile": "npm run compile:ext && npm run bundle:ext && npm run bundle:webview && npm run copy:assets",
     "compile:ext": "tsc -p ./",
+    "bundle:ext": "esbuild src/extension.ts --bundle --format=cjs --platform=node --target=node18 --external:vscode --outfile=dist/extension.js",
     "bundle:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --external:litegraph.js --outfile=dist/webview/main.js",
+    "copy:assets": "node ./scripts/copy-assets.js",
     "watch": "tsc -watch -p ./",
-    "watch:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --external:litegraph.js --outfile=dist/webview/main.js --watch"
+    "watch:webview": "esbuild webview/main.js --bundle --format=iife --target=es2020 --external:litegraph.js --outfile=dist/webview/main.js --watch",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
